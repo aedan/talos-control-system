@@ -1,0 +1,122 @@
+{{- $probes := .Values.probes -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tcs.fullname" . }}
+  labels:
+    {{- include "tcs.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "tcs.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- if $probes.liveness.enabled }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "tcs.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "tcs.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: tcs
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: TCS_SERVER_HTTP_PORT
+              value: "{{ .Values.service.port }}"
+            - name: TCS_SERVER_GRPC_PORT
+              value: "{{ .Values.service.grpcPort }}"
+            - name: TCS_SIDEROLINK_BIND_PORT
+              value: "{{ .Values.siderolink.bindPort }}"
+            - name: TCS_DATABASE_BACKEND
+              value: {{ .Values.database.backend }}
+            - name: TCS_DATABASE_SQLITE_PATH
+              value: {{ .Values.database.sqlitePath }}
+            {{- if eq .Values.database.backend "postgres" }}
+            - name: TCS_DATABASE_POSTGRES_URL
+              value: {{ .Values.database.postgresUrl }}
+            {{- end }}
+            - name: TCS_DATABASE_MAX_CONNECTIONS
+              value: "{{ .Values.database.maxConnections }}"
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.service.grpcPort }}
+              protocol: TCP
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+            - name: siderolink
+              containerPort: {{ .Values.siderolink.bindPort }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.service.metricsPort }}
+              protocol: TCP
+          {{- if $probes.liveness.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ $probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ $probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ $probes.liveness.periodSeconds }}
+          {{- end }}
+          {{- if $probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ $probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ $probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ $probes.readiness.periodSeconds }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/tcs
+            - name: config
+              mountPath: /app/config.toml
+              subPath: config.toml
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "tcs.fullname" . }}
+        {{- if .Values.persistence.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ if .Values.persistence.existingClaim }}{{ .Values.persistence.existingClaim }}{{ else }}{{ include "tcs.fullname" . }}{{ end }}
+        {{- else }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

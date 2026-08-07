@@ -1,0 +1,53 @@
+[package]
+name = "talos-control-system"
+version = "0.1.0"
+edition = "2021"
+description = "Talos Control System - Kubernetes Management Platform"
+license = "Apache-2.0"
+
+[dependencies]
+axum = { version = "0.7", features = ["ws", "json"] }
+tokio = { version = "1", features = ["full"] }
+tonic = "0.12"
+prost = "0.13"
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "postgres", "chrono", "uuid"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+uuid = { version = "1", features = ["v4", "serde"] }
+moka = { version = "0.12", features = ["future"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+prometheus = "0.13"
+jsonwebtoken = "9"
+oauth2 = "4"
+openidconnect = "3"
+rsa = "0.9"
+ecdsa = "0.16"
+sha2 = "0.10"
+utoipa = { version = "4", features = ["axum_extras"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1"
+rust-embed = "8"
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+hyper = { version = "1", features = ["full"] }
+bytes = "1"
+futures = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
+indexmap = { version = "2", features = ["serde"] }
+dashmap = "6"
+config = "0.14"
+kube = { version = "0.94", features = ["rustls-tls"] }
+k8s-openapi = { version = "0.22", features = ["v1_30"] }
+hyper-util = { version = "0.1", features = ["full"] }
+serde_yaml = "0.9"
+async-trait = "0.1"
+x25519-dalek = "2"
+rand = "0.8"
+base64 = "0.22"
+hex = "0.4"
+lazy_static = "1"
+regex = "1"
+
+[build-dependencies]
+tonic-build = "0.12"
