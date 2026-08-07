@@ -20,6 +20,8 @@ pub fn create_rest_router(state: AppState, branding: &BrandingConfig) -> Router 
         .route("/branding", put(handlers::update_branding))
         .route("/clusters", get(handlers::list_clusters))
         .route("/clusters", post(handlers::create_cluster))
+        .route("/clusters/import", post(handlers::import_cluster))
+        .route("/clusters/import/preview", post(handlers::preview_import))
         .route("/clusters/:id", get(handlers::get_cluster))
         .route("/clusters/:id", put(handlers::update_cluster))
         .route("/clusters/:id", delete(handlers::delete_cluster))

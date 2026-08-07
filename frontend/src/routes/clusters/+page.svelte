@@ -25,7 +25,14 @@
 <div class="clusters-page">
   <div class="page-header">
     <h1>Clusters</h1>
-    <Button variant="primary" onclick={() => navigate('/clusters/create')}>Create Cluster</Button>
+    <div class="header-actions">
+      <a href="/clusters/import">
+        <Button variant="ghost">Import Cluster</Button>
+      </a>
+      <a href="/clusters/create">
+        <Button variant="primary">Create Cluster</Button>
+      </a>
+    </div>
   </div>
 
   {#if $loading}

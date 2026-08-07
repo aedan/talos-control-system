@@ -252,6 +252,50 @@ pub struct LoginRequest {
     pub password: String,
 }
 
+#[derive(Deserialize)]
+pub struct ImportClusterRequest {
+    pub name: String,
+    pub kubeconfig: String,
+}
+
+#[derive(Serialize)]
+pub struct ImportClusterResponse {
+    pub cluster: serde_json::Value,
+    pub machines_imported: i32,
+}
+
+pub async fn import_cluster(
+    State(state): State<AppState>,
+    Json(payload): Json<ImportClusterRequest>,
+) -> Result<(StatusCode, Json<ImportClusterResponse>), (StatusCode, String)> {
+    let controller = crate::controllers::cluster::ClusterController::new(state.db_pool.clone());
+
+    match controller.import_cluster(payload.name, payload.kubeconfig).await {
+        Ok(cluster) => {
+            let machines = crate::db::repos::machine::list_by_cluster(&state.db_pool, cluster.id).await
+                .unwrap_or_default();
+
+            Ok((StatusCode::CREATED, Json(ImportClusterResponse {
+                cluster: serde_json::to_value(cluster).unwrap(),
+                machines_imported: machines.len() as i32,
+            })))
+        }
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+pub async fn preview_import(
+    State(state): State<AppState>,
+    Json(payload): Json<ImportClusterRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = crate::controllers::cluster::ClusterController::new(state.db_pool.clone());
+
+    match controller.preview_import(payload.kubeconfig).await {
+        Ok(discovered) => Ok(Json(serde_json::to_value(discovered).unwrap())),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
 pub async fn login(
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
