@@ -43,3 +43,57 @@ export async function deleteCluster(id: string): Promise<void> {
     error.set(e instanceof Error ? e.message : 'Failed to delete cluster');
   }
 }
+
+export interface DiscoveredNode {
+  name: string;
+  internalIp: string;
+  kubernetesVersion: string;
+  talosVersion: string;
+  role: string;
+  osImage: string;
+}
+
+export interface DiscoveredCluster {
+  name: string;
+  server: string;
+  kubernetesVersion: string;
+  talosVersion: string;
+  controlPlaneNodes: DiscoveredNode[];
+  workerNodes: DiscoveredNode[];
+  isTalos: boolean;
+}
+
+export interface ImportResult {
+  cluster: Cluster;
+  machinesImported: number;
+}
+
+export async function previewImport(kubeconfig: string, name?: string): Promise<DiscoveredCluster> {
+  error.set(null);
+  try {
+    const data = await client.post('/clusters/import/preview', {
+      name: name || '',
+      kubeconfig,
+    });
+    return data as DiscoveredCluster;
+  } catch (e: unknown) {
+    error.set(e instanceof Error ? e.message : 'Failed to preview import');
+    throw e;
+  }
+}
+
+export async function importCluster(name: string, kubeconfig: string): Promise<ImportResult> {
+  error.set(null);
+  try {
+    const data = await client.post('/clusters/import', {
+      name,
+      kubeconfig,
+    });
+    const result = data as ImportResult;
+    clusters.update((items) => [result.cluster, ...items]);
+    return result;
+  } catch (e: unknown) {
+    error.set(e instanceof Error ? e.message : 'Failed to import cluster');
+    throw e;
+  }
+}
