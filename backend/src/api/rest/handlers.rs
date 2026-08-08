@@ -527,3 +527,384 @@ pub async fn oidc_callback(
 
     Ok(Json(LoginResponse { token, user }))
 }
+
+// ─── Certificate Settings ─────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct CertStatusResponse {
+    pub mode: String,
+    pub domains: Vec<String>,
+    pub issuer: String,
+    pub expires_at: Option<String>,
+    pub days_remaining: i64,
+    pub error: Option<String>,
+}
+
+pub async fn get_cert_status(
+    State(state): State<AppState>,
+) -> Result<Json<CertStatusResponse>, (StatusCode, String)> {
+    let tls = &state.config.tls;
+    let mode = match &tls.mode {
+        crate::config::TlsMode::LetsEncrypt => "letsencrypt".to_string(),
+        crate::config::TlsMode::SelfSigned => "self-signed".to_string(),
+        crate::config::TlsMode::Provided => "provided".to_string(),
+        crate::config::TlsMode::Disabled => "disabled".to_string(),
+    };
+
+    let (domains, issuer, expires_at) = match &tls.mode {
+        crate::config::TlsMode::LetsEncrypt => {
+            let le = tls.letsencrypt.as_ref();
+            (
+                le.map(|c| c.domains.clone()).unwrap_or_default(),
+                "Let's Encrypt".to_string(),
+                None,
+            )
+        }
+        crate::config::TlsMode::SelfSigned => (
+            tls.self_signed.as_ref().map(|c| c.domains.clone()).unwrap_or_else(|| vec!["localhost".to_string()]),
+            "Self-Signed".to_string(),
+            None,
+        ),
+        crate::config::TlsMode::Provided => {
+            let prov = tls.provided.as_ref();
+            (
+                vec![],
+                "Custom".to_string(),
+                None::<String>,
+            )
+        }
+        crate::config::TlsMode::Disabled => (vec![], "None".to_string(), None),
+    };
+
+    // Try to compute days remaining from cert on disk
+    let cert_path = "/var/lib/tcs/certs/cert.pem";
+    let days_remaining = if let Ok(pem) = std::fs::read_to_string(cert_path) {
+        if let Some(exp) = crate::cert::provided::parse_expiry_from_cert_pem(&pem) {
+            let diff = exp - chrono::Utc::now();
+            diff.num_days()
+        } else {
+            -1
+        }
+    } else {
+        -1
+    };
+
+    Ok(Json(CertStatusResponse {
+        mode,
+        domains,
+        issuer,
+        expires_at: None,
+        days_remaining,
+        error: None,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct CertConfigRequest {
+    pub mode: String,
+    pub domains: Option<Vec<String>>,
+    pub letsencrypt: Option<LetsEncryptConfigRequest>,
+    pub self_signed: Option<SelfSignedConfigRequest>,
+    pub provided: Option<ProvidedCertConfigRequest>,
+}
+
+#[derive(Deserialize)]
+pub struct LetsEncryptConfigRequest {
+    pub email: String,
+    #[serde(default)]
+    pub challenge_type: String,
+    pub dns_provider: Option<DnsProviderConfigRequest>,
+}
+
+#[derive(Deserialize)]
+pub struct DnsProviderConfigRequest {
+    pub provider: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub api_secret: String,
+    #[serde(default)]
+    pub api_token: String,
+    #[serde(default)]
+    pub zone_id: String,
+}
+
+#[derive(Deserialize)]
+pub struct SelfSignedConfigRequest {
+    pub domains: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ProvidedCertConfigRequest {
+    pub cert_path: String,
+    pub key_path: String,
+    #[serde(default)]
+    pub ca_path: Option<String>,
+}
+
+pub async fn update_cert_config(
+    State(state): State<AppState>,
+    Json(req): Json<CertConfigRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Write TLS config to TOML file
+    let config_path = "/etc/tcs/config.toml";
+    
+    let mut config_data = toml::value::Table::new();
+    let mut tls_table = toml::value::Table::new();
+    tls_table.insert("enabled".to_string(), toml::Value::Boolean(req.mode != "disabled"));
+    tls_table.insert("mode".to_string(), toml::Value::String(req.mode.clone()));
+
+    if req.mode == "letsencrypt" {
+        if let Some(le) = req.letsencrypt {
+            let mut le_table = toml::value::Table::new();
+            le_table.insert("domains".to_string(), toml::Value::Array(
+                req.domains.unwrap_or_default().iter().map(|d| toml::Value::String(d.clone())).collect()
+            ));
+            le_table.insert("email".to_string(), toml::Value::String(le.email));
+            le_table.insert("challenge_type".to_string(), toml::Value::String(le.challenge_type));
+            tls_table.insert("letsencrypt".to_string(), toml::Value::Table(le_table));
+        }
+    } else if req.mode == "self-signed" {
+        if let Some(ss) = req.self_signed {
+            let mut ss_table = toml::value::Table::new();
+            ss_table.insert("domains".to_string(), toml::Value::Array(
+                ss.domains.iter().map(|d| toml::Value::String(d.clone())).collect()
+            ));
+            tls_table.insert("self-signed".to_string(), toml::Value::Table(ss_table));
+        }
+    } else if req.mode == "provided" {
+        if let Some(prov) = req.provided {
+            let mut prov_table = toml::value::Table::new();
+            prov_table.insert("cert_path".to_string(), toml::Value::String(prov.cert_path));
+            prov_table.insert("key_path".to_string(), toml::Value::String(prov.key_path));
+            if let Some(ca) = prov.ca_path {
+                prov_table.insert("ca_path".to_string(), toml::Value::String(ca));
+            }
+            tls_table.insert("provided".to_string(), toml::Value::Table(prov_table));
+        }
+    }
+
+    config_data.insert("tls".to_string(), toml::Value::Table(tls_table));
+
+    if let Some(path) = std::path::Path::new(config_path).parent() {
+        std::fs::create_dir_all(path).ok();
+    }
+    let config_str = toml::to_string_pretty(&config_data)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    std::fs::write(config_path, &config_str).ok();
+
+    // Restart would be needed for changes to take effect — note this in response
+    Ok(Json(serde_json::json!({
+        "message": "TLS config updated. Restart required to apply changes.",
+        "mode": req.mode
+    })))
+}
+
+pub async fn renew_certificate(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let tls = &state.config.tls;
+    
+    match &tls.mode {
+        crate::config::TlsMode::LetsEncrypt => {
+            let le = tls.letsencrypt.as_ref()
+                .ok_or_else(|| (StatusCode::BAD_REQUEST, "Let's Encrypt not configured".to_string()))?;
+            
+            // Trigger ACME renewal
+            let acme = crate::cert::acme::AcmeClient::new(
+                &le.email,
+                le.dns_provider.as_ref().map(|d| crate::config::tls::DnsProviderConfig {
+                    provider: d.provider.clone(),
+                    api_key: d.api_key.clone(),
+                    api_secret: d.api_secret.clone(),
+                    api_token: d.api_token.clone(),
+                    zone_id: d.zone_id.clone(),
+                }),
+                le.challenge_type.clone(),
+            )
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            
+            let result = acme.renew_certificate(&le.domains).await;
+            match result {
+                Ok(_) => Ok(Json(serde_json::json!({
+                    "message": "Certificate renewed successfully",
+                    "mode": "letsencrypt"
+                }))),
+                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+            }
+        }
+        crate::config::TlsMode::SelfSigned => {
+            let domains = tls.self_signed.as_ref()
+                .map(|c| c.domains.clone())
+                .unwrap_or_else(|| vec!["localhost".to_string()]);
+            
+            let (cert, key) = crate::cert::self_signed::generate_self_signed(&domains)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            
+            // Write to disk
+            std::fs::create_dir_all("/var/lib/tcs/certs/").ok();
+            std::fs::write("/var/lib/tcs/certs/cert.pem", &cert).ok();
+            std::fs::write("/var/lib/tcs/certs/key.pem", &key).ok();
+            
+            Ok(Json(serde_json::json!({
+                "message": "Self-signed certificate regenerated",
+                "mode": "self-signed"
+            })))
+        }
+        _ => Err((StatusCode::BAD_REQUEST, format!("Cannot renew {} certificates", match &tls.mode {
+            crate::config::TlsMode::Provided => "provided",
+            crate::config::TlsMode::Disabled => "disabled",
+            _ => "unknown",
+        }))),
+    }
+}
+
+// ─── Auth Settings ────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct AuthConfigResponse {
+    pub ldap: Option<LdapConfigResponse>,
+    pub oidc: Option<OidcConfigResponse>,
+}
+
+#[derive(Serialize)]
+pub struct LdapConfigResponse {
+    pub server: String,
+    pub bind_dn: String,
+    pub user_search_base: String,
+    pub user_search_filter: String,
+    pub default_role: String,
+    pub group_role_mappings: Vec<GroupRoleMappingResponse>,
+}
+
+#[derive(Serialize)]
+pub struct GroupRoleMappingResponse {
+    pub group_dn_pattern: String,
+    pub role: String,
+}
+
+#[derive(Serialize)]
+pub struct OidcConfigResponse {
+    pub enabled: bool,
+    pub issuer_url: String,
+    pub client_id: String,
+    pub redirect_url: String,
+    pub scopes: Vec<String>,
+}
+
+pub async fn get_auth_config(
+    State(state): State<AppState>,
+) -> Result<Json<AuthConfigResponse>, (StatusCode, String)> {
+    let ldap = state.config.auth.ldap.as_ref().map(|l| LdapConfigResponse {
+        server: l.url.clone(),
+        bind_dn: String::new(),
+        user_search_base: l.user_search_base.clone(),
+        user_search_filter: l.user_search_filter.clone(),
+        default_role: l.default_role.clone(),
+        group_role_mappings: l.group_role_mappings.iter().map(|m| GroupRoleMappingResponse {
+            group_dn_pattern: m.group_dn_pattern.clone(),
+            role: m.role.clone(),
+        }).collect(),
+    });
+
+    let oidc = state.config.auth.oidc.as_ref().map(|o| OidcConfigResponse {
+        enabled: true,
+        issuer_url: o.issuer_url.clone(),
+        client_id: o.client_id.clone(),
+        redirect_url: o.redirect_url.clone(),
+        scopes: o.scopes.clone(),
+    });
+
+    Ok(Json(AuthConfigResponse { ldap, oidc }))
+}
+
+#[derive(Deserialize)]
+pub struct AuthConfigRequest {
+    pub ldap: Option<AuthLdapRequest>,
+    pub oidc: Option<AuthOidcRequest>,
+}
+
+#[derive(Deserialize)]
+pub struct AuthLdapRequest {
+    pub server: String,
+    pub bind_dn: String,
+    pub bind_password: String,
+    pub user_search_base: String,
+    pub user_search_filter: String,
+    pub default_role: String,
+    pub group_role_mappings: Vec<AuthGroupMappingRequest>,
+}
+
+#[derive(Deserialize)]
+pub struct AuthGroupMappingRequest {
+    pub group_dn_pattern: String,
+    pub role: String,
+}
+
+#[derive(Deserialize)]
+pub struct AuthOidcRequest {
+    pub enabled: bool,
+    pub issuer_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_url: String,
+    pub scopes: Vec<String>,
+}
+
+pub async fn update_auth_config(
+    State(state): State<AppState>,
+    Json(req): Json<AuthConfigRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let config_path = "/etc/tcs/config.toml";
+    let mut config_data = toml::value::Table::new();
+    let mut auth_table = toml::value::Table::new();
+
+    if let Some(ldap_req) = req.ldap {
+        let mut ldap_table = toml::value::Table::new();
+        ldap_table.insert("server".to_string(), toml::Value::String(ldap_req.server));
+        ldap_table.insert("bind_dn".to_string(), toml::Value::String(ldap_req.bind_dn));
+        ldap_table.insert("bind_password".to_string(), toml::Value::String(ldap_req.bind_password));
+        ldap_table.insert("user_search_base".to_string(), toml::Value::String(ldap_req.user_search_base));
+        ldap_table.insert("user_search_filter".to_string(), toml::Value::String(ldap_req.user_search_filter));
+        ldap_table.insert("default_role".to_string(), toml::Value::String(ldap_req.default_role));
+        
+        let mut mappings = vec![];
+        for m in ldap_req.group_role_mappings {
+            let mut map_table = toml::value::Table::new();
+            map_table.insert("group_dn_pattern".to_string(), toml::Value::String(m.group_dn_pattern));
+            map_table.insert("role".to_string(), toml::Value::String(m.role));
+            mappings.push(toml::Value::Table(map_table));
+        }
+        ldap_table.insert("group_role_mappings".to_string(), toml::Value::Array(mappings));
+        auth_table.insert("ldap".to_string(), toml::Value::Table(ldap_table));
+    }
+
+    if let Some(oidc_req) = req.oidc {
+        if oidc_req.enabled {
+            let mut oidc_table = toml::value::Table::new();
+            oidc_table.insert("enabled".to_string(), toml::Value::Boolean(true));
+            oidc_table.insert("issuer_url".to_string(), toml::Value::String(oidc_req.issuer_url));
+            oidc_table.insert("client_id".to_string(), toml::Value::String(oidc_req.client_id));
+            oidc_table.insert("client_secret".to_string(), toml::Value::String(oidc_req.client_secret));
+            oidc_table.insert("redirect_url".to_string(), toml::Value::String(oidc_req.redirect_url));
+            oidc_table.insert("scopes".to_string(), toml::Value::Array(
+                oidc_req.scopes.iter().map(|s| toml::Value::String(s.clone())).collect()
+            ));
+            auth_table.insert("oidc".to_string(), toml::Value::Table(oidc_table));
+        }
+    }
+
+    config_data.insert("auth".to_string(), toml::Value::Table(auth_table));
+
+    if let Some(path) = std::path::Path::new(config_path).parent() {
+        std::fs::create_dir_all(path).ok();
+    }
+    let config_str = toml::to_string_pretty(&config_data)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    std::fs::write(config_path, &config_str).ok();
+
+    Ok(Json(serde_json::json!({
+        "message": "Auth config updated. Restart required to apply changes."
+    })))
+}
