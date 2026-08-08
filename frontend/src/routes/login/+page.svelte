@@ -39,7 +39,7 @@
       <p class="tagline">Kubernetes Management Simplified</p>
     </div>
     
-    <form class="login-form" on:submit={handleLogin}>
+    <form class="login-form" onsubmit={handleLogin}>
       {#if error}
         <div class="error-banner">{error}</div>
       {/if}

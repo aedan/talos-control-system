@@ -37,7 +37,7 @@
 <div class="create-page">
   <h1>Create Cluster</h1>
   
-  <form class="create-form" on:submit|preventDefault={handleCreate}>
+  <form class="create-form" onsubmit={(e) => { e.preventDefault(); handleCreate(); }}>
     <div class="form-group">
       <label for="name">Cluster Name</label>
       <input id="name" type="text" bind:value={name} placeholder="my-cluster" required />

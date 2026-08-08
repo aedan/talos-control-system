@@ -2,6 +2,9 @@
   import { branding, applyBranding } from '$lib/stores/branding';
   import Logo from '$lib/branding/components/Logo.svelte';
   import { onMount } from 'svelte';
+  import type { Snippet } from 'svelte';
+
+  let { children }: { children: Snippet } = $props();
 
   let authenticated = $state(false);
   let user = $state<any>(null);
