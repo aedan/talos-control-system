@@ -28,3 +28,18 @@ impl Default for LdapConfig {
         }
     }
 }
+
+fn default_scopes() -> Vec<String> {
+    vec!["openid".to_string(), "profile".to_string(), "email".to_string()]
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcConfig {
+    pub enabled: bool,
+    pub issuer_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_url: String,
+    #[serde(default = "default_scopes")]
+    pub scopes: Vec<String>,
+}

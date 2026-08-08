@@ -57,8 +57,8 @@ pub async fn upsert(pool: &SqlitePool, user: &User) -> Result<User, AppError> {
         })
     } else {
         sqlx::query(
-            "INSERT INTO users (id, email, display_name, role, is_active, password_hash, auth_provider, ldap_dn, last_login, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO users (id, email, display_name, role, is_active, password_hash, auth_provider, ldap_dn, password_needs_change, last_login, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(user.id)
         .bind(&user.email)
@@ -68,6 +68,7 @@ pub async fn upsert(pool: &SqlitePool, user: &User) -> Result<User, AppError> {
         .bind(&user.password_hash)
         .bind(&user.auth_provider)
         .bind(&user.ldap_dn)
+        .bind(user.password_needs_change)
         .bind(&user.last_login)
         .bind(&user.created_at)
         .bind(&user.updated_at)
