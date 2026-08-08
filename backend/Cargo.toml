@@ -7,6 +7,7 @@ license = "Apache-2.0"
 
 [dependencies]
 axum = { version = "0.7", features = ["ws", "json"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["full"] }
 tonic = "0.12"
 prost = "0.13"
@@ -31,6 +32,7 @@ thiserror = "1"
 rust-embed = "8"
 tower-http = { version = "0.5", features = ["cors", "fs"] }
 hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
 bytes = "1"
 futures = "0.3"
 tokio-util = { version = "0.7", features = ["io"] }
@@ -39,7 +41,6 @@ dashmap = "6"
 config = "0.14"
 kube = { version = "0.94", features = ["rustls-tls"] }
 k8s-openapi = { version = "0.22", features = ["v1_30"] }
-hyper-util = { version = "0.1", features = ["full"] }
 serde_yaml = "0.9"
 async-trait = "0.1"
 x25519-dalek = "2"
@@ -48,6 +49,23 @@ base64 = "0.22"
 hex = "0.4"
 lazy_static = "1"
 regex = "1"
+
+# Auth
+argon2 = "0.5"
+ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-ring"] }
+
+# TLS / Certificates
+acme2 = "0.5"
+openssl = { version = "0.10", features = ["vendored"] }
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+tokio-rustls = "0.26"
+webpki-roots = "0.26"
+rustls-pemfile = "2"
+
+# DNS providers
+cloudflare = "0.14"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [build-dependencies]
 tonic-build = "0.12"

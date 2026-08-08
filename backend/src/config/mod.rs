@@ -2,11 +2,15 @@ pub mod server;
 pub mod database;
 pub mod branding;
 pub mod siderolink;
+pub mod auth;
+pub mod tls;
 
 pub use server::ServerConfig;
 pub use database::{DatabaseBackend, DatabaseConfig};
 pub use branding::BrandingConfig;
 pub use siderolink::SideroLinkConfig;
+pub use auth::LdapConfig;
+pub use tls::TlsConfig;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
@@ -14,6 +18,22 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub branding: BrandingConfig,
     pub siderolink: SideroLinkConfig,
+    pub auth: AuthConfig,
+    #[serde(default)]
+    pub tls: TlsConfig,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AuthConfig {
+    pub ldap: Option<LdapConfig>,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            ldap: None,
+        }
+    }
 }
 
 impl Config {
@@ -58,6 +78,8 @@ impl Config {
             database: DatabaseConfig::default(),
             branding: BrandingConfig::default(),
             siderolink: SideroLinkConfig::default(),
+            auth: AuthConfig::default(),
+            tls: TlsConfig::default(),
         }
     }
 }
