@@ -341,11 +341,14 @@ pub async fn login(
         }
     };
 
-    let token = create_jwt(&create_claims(
-        &authenticated_user.email,
-        &authenticated_user.role,
-        std::time::Duration::from_secs(3600),
-    )).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let token = create_jwt(
+        &create_claims(
+            &authenticated_user.email,
+            &authenticated_user.role,
+            std::time::Duration::from_secs(3600),
+        ),
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(LoginResponse {
         token,

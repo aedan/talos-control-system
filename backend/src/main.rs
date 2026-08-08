@@ -29,11 +29,15 @@ type CertStore = Arc<tokio::sync::RwLock<(String, String)>>;
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     init_tracing();
 
+    use talos_control_system::auth::jwt::set_jwt_secret;
+
     // Install ring as the rustls CryptoProvider before any TLS operations.
     // Required because multiple crypto backends (ring, aws-lc-rs) are in the dep tree.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let config = Config::load()?;
+
+    set_jwt_secret(&config.auth.jwt_secret);
 
     info!(
         version = VERSION_INFO.version,

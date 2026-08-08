@@ -29,6 +29,12 @@ pub struct Config {
 pub struct AuthConfig {
     pub ldap: Option<LdapConfig>,
     pub oidc: Option<OidcConfig>,
+    #[serde(default = "default_jwt_secret")]
+    pub jwt_secret: String,
+}
+
+fn default_jwt_secret() -> String {
+    "talos-control-system-default-secret-change-in-production".to_string()
 }
 
 impl Default for AuthConfig {
@@ -36,6 +42,7 @@ impl Default for AuthConfig {
         Self {
             ldap: None,
             oidc: None,
+            jwt_secret: default_jwt_secret(),
         }
     }
 }

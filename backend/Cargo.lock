@@ -3992,6 +3992,7 @@ dependencies = [
  "uuid",
  "webpki-roots 0.26.11",
  "x25519-dalek",
+ "x509-parser",
 ]
 
 [[package]]
