@@ -7,6 +7,7 @@ use tower_http::cors::{AllowHeaders, AllowMethods, Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::auth::jwt::verify_jwt;
+use crate::static_server;
 use crate::AppState;
 use crate::config::BrandingConfig;
 
@@ -107,6 +108,7 @@ pub fn create_rest_router(state: AppState, branding: &BrandingConfig) -> Router 
 
     Router::new()
         .nest("/api", api_routes)
+        .fallback(static_server::serve_static)
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
