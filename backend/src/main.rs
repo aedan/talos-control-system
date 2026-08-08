@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Path, Request, State};
 use axum::http::StatusCode;
@@ -137,9 +138,15 @@ async fn run_with_tls(
         }
     });
 
-    let rustls_config = RustlsConfig::from_pem(cert_pem.into_bytes(), key_pem.into_bytes())
+    let rustls_config = RustlsConfig::from_pem(cert_pem.clone().into_bytes(), key_pem.clone().into_bytes())
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+    let renewal_handle = tokio::spawn(async move {
+        if let Err(e) = talos_control_system::cert::start_cert_renewal_task(config).await {
+            error!(error = %e, "Certificate renewal task error");
+        }
+    });
 
     let https_handle = tokio::spawn(async move {
         info!(addr = %https_addr, "Starting HTTPS server (TLS)");
@@ -161,6 +168,9 @@ async fn run_with_tls(
         }
         _ = https_handle => {
             info!("HTTPS server exited");
+        }
+        _ = renewal_handle => {
+            info!("Certificate renewal task exited");
         }
     }
 
