@@ -1,23 +1,85 @@
 use axum::Router;
-use axum::routing::{get, post, put, delete};
-use tower_http::cors::{CorsLayer, Any, AllowHeaders};
+use axum::body::Body;
+use axum::extract::Request;
+use axum::middleware::from_fn;
+use axum::routing::{delete, get, post, put};
+use tower_http::cors::{AllowHeaders, AllowMethods, Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
+use crate::auth::jwt::verify_jwt;
 use crate::AppState;
 use crate::config::BrandingConfig;
 
 pub mod handlers;
 
+async fn auth_middleware(request: Request, next: axum::middleware::Next) -> axum::response::Response {
+    let headers = request.headers();
+
+    if let Some(auth_header) = headers.get(axum::http::header::AUTHORIZATION) {
+        let auth_str = match auth_header.to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                return axum::response::Response::builder()
+                    .status(axum::http::StatusCode::UNAUTHORIZED)
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"error":"Invalid Authorization header"}"#))
+                    .unwrap();
+            }
+        };
+
+        let token = match auth_str.strip_prefix("Bearer ") {
+            Some(t) => t,
+            None => {
+                return axum::response::Response::builder()
+                    .status(axum::http::StatusCode::UNAUTHORIZED)
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"error":"Missing Bearer prefix"}"#))
+                    .unwrap();
+            }
+        };
+
+        if let Err(e) = verify_jwt(token) {
+            return axum::response::Response::builder()
+                .status(axum::http::StatusCode::UNAUTHORIZED)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(r#"{{"error":"{}"}}"#, e)))
+                .unwrap();
+        }
+    } else {
+        return axum::response::Response::builder()
+            .status(axum::http::StatusCode::UNAUTHORIZED)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"error":"Missing Authorization header"}"#))
+            .unwrap();
+    }
+
+    next.run(request).await
+}
+
 pub fn create_rest_router(state: AppState, branding: &BrandingConfig) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods(Any)
+        .allow_methods(AllowMethods::mirror_request())
         .allow_headers(AllowHeaders::mirror_request());
 
-    let api_routes = Router::new()
+    let public_routes = Router::new()
         .route("/health", get(handlers::health_check))
+        .route("/metrics", get(handlers::get_metrics))
+        .route("/auth/login", post(handlers::login))
+        .route("/auth/logout", post(handlers::logout))
+        .route("/auth/token", post(handlers::refresh_token))
+        .route("/auth/oidc", get(handlers::oidc_authorize))
+        .route("/auth/oidc/callback", get(handlers::oidc_callback));
+
+    let protected_routes = Router::new()
+        .route("/auth/me", get(handlers::get_user_info))
+        .route("/auth/password", post(handlers::change_password))
+        .route("/auth/users", get(handlers::list_users))
         .route("/branding", get(handlers::get_branding))
         .route("/branding", put(handlers::update_branding))
+        .route("/branding/css", get(handlers::get_branding_css))
+        .route("/branding/logo", get(handlers::get_logo))
+        .route("/branding/favicon", get(handlers::get_favicon))
         .route("/clusters", get(handlers::list_clusters))
         .route("/clusters", post(handlers::create_cluster))
         .route("/clusters/import", post(handlers::import_cluster))
@@ -28,13 +90,15 @@ pub fn create_rest_router(state: AppState, branding: &BrandingConfig) -> Router 
         .route("/machines", get(handlers::list_machines))
         .route("/machines/:id", get(handlers::get_machine))
         .route("/machines/:id", delete(handlers::delete_machine))
-        .route("/metrics", get(handlers::get_metrics))
-        .route("/auth/login", post(handlers::login))
-        .route("/auth/logout", post(handlers::logout))
-        .route("/auth/token", post(handlers::refresh_token))
-        .route("/branding/css", get(handlers::get_branding_css))
-        .route("/branding/logo", get(handlers::get_logo))
-        .route("/branding/favicon", get(handlers::get_favicon));
+        .layer(from_fn(auth_middleware));
+
+    let acme_routes = Router::new()
+        .route("/.well-known/acme-challenge/*challenge", get(handlers::health_check));
+
+    let api_routes = Router::new()
+        .merge(acme_routes)
+        .merge(public_routes)
+        .merge(protected_routes);
 
     Router::new()
         .nest("/api", api_routes)

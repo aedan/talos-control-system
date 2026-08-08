@@ -10,7 +10,8 @@ pub use database::{DatabaseBackend, DatabaseConfig};
 pub use branding::BrandingConfig;
 pub use siderolink::SideroLinkConfig;
 pub use auth::LdapConfig;
-pub use tls::TlsConfig;
+pub use auth::OidcConfig;
+pub use tls::{TlsConfig, TlsMode};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
@@ -26,12 +27,14 @@ pub struct Config {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AuthConfig {
     pub ldap: Option<LdapConfig>,
+    pub oidc: Option<OidcConfig>,
 }
 
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
             ldap: None,
+            oidc: None,
         }
     }
 }
