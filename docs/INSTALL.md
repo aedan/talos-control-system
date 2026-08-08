@@ -1,154 +1,173 @@
 # Installation Guide
 
+TCS is distributed as a single statically-linked binary with the frontend embedded. No Docker, Kubernetes, or Helm required.
+
 ## Prerequisites
 
-- **Docker** 24+ and **Docker Compose** v2 (for standalone deployment)
-- **Kubernetes** 1.28+ and **Helm** 3.12+ (for K8s deployment)
-- **Talos Linux** 1.7+ on managed machines
+- **Linux server** (Ubuntu 22.04+, Debian 12+, or similar)
+- **Talos Linux** 1.7+ on managed clusters
 
-## Option 1: Docker Deployment
+## Option 1: Self-Extracting Installer (Recommended)
 
-### 1. Clone the repository
+The installer downloads the binary, creates a systemd unit, sets up directories, and writes a default config.
+
+### 1. Download the installer
 
 ```bash
-git clone https://github.com/siderolabs/talos-control-system.git
-cd talos-control-system
+# x86_64
+curl -sL https://github.com/siderolabs/talos-control-system/releases/download/v0.1.0/tcs-installer-linux-amd64.sh -o tcs-install.sh
+
+# ARM64
+curl -sL https://github.com/siderolabs/talos-control-system/releases/download/v0.1.0/tcs-installer-linux-arm64.sh -o tcs-install.sh
 ```
 
-### 2. Configure
-
-Copy the example configuration and adjust settings:
+### 2. Run the installer
 
 ```bash
-cp config.example.toml config.toml
+chmod +x tcs-install.sh
+sudo ./tcs-install.sh
 ```
 
-At minimum, set:
-- `server.http_port` — The port TCS will listen on
-- `database.sqlite_path` — Path for the SQLite database
+This creates:
+- `/usr/local/bin/tcs` — The TCS binary
+- `/etc/tcs/config.toml` — Default configuration
+- `/etc/systemd/system/tcs.service` — Systemd unit
+- `/var/lib/tcs/` — Data directory (SQLite database)
 
-### 3. Start with Docker Compose
+### 3. Configure
+
+Edit `/etc/tcs/config.toml` at minimum:
+
+```toml
+[server]
+advertised_url = "https://tcs.example.com"
+```
+
+### 4. Start
 
 ```bash
-docker compose up -d
+sudo systemctl enable --now tcs
 ```
 
 TCS will be available at `http://localhost:8081`.
 
-### 4. Configure siderolink
+### 5. Get admin credentials
 
-TCS exposes port 8082 for siderolink tunnel connections. Configure your Talos machines with:
-
-```
---siderolink.server=tcs.example.com
---siderolink.token=<your-token>
-```
-
-## Option 2: Kubernetes Deployment
-
-### 1. Add the Helm repository
+On first boot, TCS creates a default admin user and logs the password:
 
 ```bash
-helm repo add tcs https://charts.talos.dev
-helm repo update
+sudo journalctl -u tcs | grep "password:"
+# Created default admin user: admin@tcs.local with password: abc123
 ```
 
-### 2. Install with default values
+## Option 2: Manual Binary Install
+
+### 1. Download the binary
 
 ```bash
-helm install tcs tcs/tcs -n tcs --create-namespace
+curl -sL https://github.com/siderolabs/talos-control-system/releases/download/v0.1.0/tcs-linux-amd64 -o /usr/local/bin/tcs
+chmod +x /usr/local/bin/tcs
 ```
 
-### 3. Install with custom values
+### 2. Create directories
 
 ```bash
-helm install tcs tcs/tcs -n tcs --create-namespace \
-  --set ingress.enabled=true \
-  --set ingress.hosts[0].host=tcs.example.com \
-  --set database.backend=postgres \
-  --set database.postgresUrl="postgresql://user:pass@postgres-host:5432/tcs"
+sudo mkdir -p /etc/tcs /var/lib/tcs
 ```
 
-### 4. Expose siderolink
-
-For machine connectivity, forward the siderolink port:
+### 3. Create config
 
 ```bash
-kubectl port-forward svc/tcs-tcs 8082:8082 -n tcs
+sudo tee /etc/tcs/config.toml > /dev/null << 'EOF'
+[server]
+bind_addr = "0.0.0.0"
+http_port = 8081
+grpc_port = 8080
+
+[database]
+backend = "sqlite"
+sqlite_path = "/var/lib/tcs/data.db"
+EOF
 ```
 
-Or configure a `NodePort` / `LoadBalancer` service:
-
-```yaml
-# values-custom.yaml
-service:
-  type: LoadBalancer
-siderolink:
-  listenPort: 443
-```
-
-## Option 3: Bare Metal / Systemd
-
-### 1. Build the binary
+### 4. Create systemd unit
 
 ```bash
-cargo build --release
-cp target/release/talos-control-system /usr/local/bin/tcs
-```
-
-### 2. Create config
-
-```bash
-cp config.example.toml /etc/tcs/config.toml
-```
-
-### 3. Create systemd unit
-
-```ini
+sudo tee /etc/systemd/system/tcs.service > /dev/null << 'EOF'
 [Unit]
 Description=Talos Control System
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/tcs --config /etc/tcs/config.toml
+ExecStart=/usr/local/bin/tcs
 Restart=on-failure
-User=tcs
-Group=tcs
+RestartSec=5
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
+EOF
 ```
 
-### 4. Enable and start
+### 5. Enable and start
 
 ```bash
-systemctl enable --now tcs
+sudo systemctl daemon-reload
+sudo systemctl enable --now tcs
 ```
 
 ## Post-Installation
 
-### Initial Admin User
+### Import a Cluster
 
-The first admin account can be created via the API:
+After logging in, import your Talos cluster:
 
 ```bash
-curl -X POST http://localhost:8081/api/auth/setup \
+TOKEN=$(curl -s -X POST http://localhost:8081/api/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"admin@example.com","password":"strong-password"}'
+  -d '{"email":"admin@tcs.local","password":"YOUR_PASSWORD"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+curl -s -X POST http://localhost:8081/api/clusters/import \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "$(python3 -c "
+import json, sys
+print(json.dumps({
+    'name': 'my-cluster',
+    'kubeconfig': open('/root/.kube/config').read()
+}))")"
 ```
 
-### Configure OIDC (Optional)
+### Configure TLS (Let's Encrypt)
+
+Update `/etc/tcs/config.toml`:
+
+```toml
+[tls]
+enabled = true
+mode = "letsencrypt"
+
+[tls.letsencrypt]
+domains = ["tcs.example.com"]
+email = "admin@example.com"
+challenge_type = "http-01"
+```
+
+Then restart:
 
 ```bash
-curl -X PUT http://localhost:8081/api/auth/oidc \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <admin-token>" \
-  -d '{
-    "issuer": "https://accounts.google.com",
-    "client_id": "YOUR_CLIENT_ID",
-    "client_secret": "YOUR_CLIENT_SECRET"
-  }'
+sudo systemctl restart tcs
+```
+
+### Configure Siderolink
+
+TCS exposes port 8082 for siderolink tunnel connections. Configure your Talos machines with:
+
+```
+--siderolink.server=tcs.example.com
+--siderolink.token=<your-token>
 ```
 
 ### Configure Branding
@@ -163,6 +182,24 @@ tagline = "Our Kubernetes Platform"
 primary_color = "#2563EB"
 ```
 
+## Upgrading
+
+### Via installer
+
+```bash
+curl -sL https://github.com/siderolabs/talos-control-system/releases/download/v0.2.0/tcs-installer-linux-amd64.sh -o tcs-install.sh
+chmod +x tcs-install.sh
+sudo ./tcs-install.sh
+```
+
+### Manual
+
+```bash
+curl -sL https://github.com/siderolabs/talos-control-system/releases/download/v0.2.0/tcs-linux-amd64 -o /usr/local/bin/tcs
+chmod +x /usr/local/bin/tcs
+sudo systemctl restart tcs
+```
+
 ## Troubleshooting
 
 ### TCS fails to start
@@ -170,14 +207,20 @@ primary_color = "#2563EB"
 Check logs:
 
 ```bash
-# Docker
-docker compose logs tcs
+sudo journalctl -u tcs --no-pager -f
+```
 
-# Kubernetes
-kubectl logs -n tcs deployment/tcs-tcs
+### Check service status
 
-# Systemd
-journalctl -u tcs --no-pager -f
+```bash
+sudo systemctl status tcs
+```
+
+### Verify API
+
+```bash
+curl -s http://localhost:8081/api/health
+# Expected: {"status":"ok","version":"0.1.0"}
 ```
 
 ### Machines can't connect via siderolink
@@ -187,18 +230,14 @@ Ensure port 8082 is accessible and not blocked by a firewall:
 ```bash
 # Test connectivity
 nc -zv tcs.example.com 8082
-
-# Check TCS logs for siderolink messages
-grep -i siderolink /var/log/tcs.log
 ```
 
 ### Database migration errors
 
-If you get migration errors after upgrading, ensure you haven't skipped versions. TCS applies migrations automatically on startup.
-
-For manual migration review:
+TCS tracks applied migrations and only applies new ones. If you encounter persistent migration errors, the database may need to be reset (warning: this deletes all data):
 
 ```bash
-ls backend/migrations/
-cat backend/migrations/001_initial.sql
+sudo systemctl stop tcs
+sudo rm /var/lib/tcs/data.db
+sudo systemctl start tcs
 ```

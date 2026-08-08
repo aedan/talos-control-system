@@ -1,226 +1,183 @@
-# Kubernetes Deployment Guide
+# Deployment Guide
 
-This guide covers deploying TCS on a Kubernetes cluster with production-grade configuration.
+This guide covers deploying TCS as a standalone systemd service with production-grade configuration.
+
+## Architecture
+
+TCS runs as a single binary on a Linux host. It does not run inside Kubernetes — it manages Kubernetes clusters from the outside via Talos API and kubeconfig.
+
+```
+┌─────────────────────────────────────────────┐
+│  Your Server (systemd)                      │
+│  ┌─────────────────────────────────────┐    │
+│  │  tcs (single binary)                │    │
+│  │  ├─ REST API + Web UI  :8081        │    │
+│  │  ├─ gRPC (Talos API) :8080          │    │
+│  │  ├─ Siderolink       :8082          │    │
+│  │  └─ Metrics          :9090          │    │
+│  └─────────────────────────────────────┘    │
+│                           ↕ Talos API        │
+└─────────────────────────────────────────────┘
+                ↕ kubeconfig
+┌─────────────────────────────────────────────┐
+│  Your Kubernetes Cluster                    │
+│  (Talos Linux nodes)                        │
+└─────────────────────────────────────────────┘
+```
 
 ## Prerequisites
 
-- Kubernetes cluster (1.28+)
-- Helm 3.12+
-- External database (PostgreSQL recommended for production)
-- TLS certificates (cert-manager recommended)
-- Ingress controller (nginx, traefik, or similar)
+- Linux server (Ubuntu 22.04+, Debian 12+, or similar)
+- Network access to your Talos cluster's control plane
+- Talos cluster v1.7+ with accessible kubeconfig
 
-## Quick Install
+## Quick Start
+
+### 1. Install via self-extracting script
 
 ```bash
-helm repo add tcs https://charts.talos.dev
-helm install tcs tcs/tcs -n tcs --create-namespace
+# Download the installer for your architecture
+curl -sL https://github.com/siderolabs/talos-control-system/releases/download/v0.1.0/tcs-installer-linux-amd64.sh -o tcs-install.sh
+chmod +x tcs-install.sh
+
+# Install (creates systemd unit, config, and data directories)
+sudo ./tcs-install.sh
 ```
+
+### 2. Configure
+
+Edit `/etc/tcs/config.toml`:
+
+```toml
+[server]
+bind_addr = "0.0.0.0"
+advertised_url = "https://tcs.example.com"
+http_port = 8081
+
+[database]
+backend = "sqlite"
+sqlite_path = "/var/lib/tcs/data.db"
+```
+
+### 3. Start
+
+```bash
+sudo systemctl enable --now tcs
+sudo journalctl -u tcs -f
+```
+
+### 4. Get admin password
+
+On first boot, TCS creates a default admin user and logs the password:
+
+```bash
+sudo journalctl -u tcs | grep "password:"
+# Output: Created default admin user: admin@tcs.local with password: abc123
+```
+
+Login at `http://your-server:8081` with `admin@tcs.local` and the displayed password.
 
 ## Production Configuration
 
-### 1. Create a values file
+### Database
 
-```yaml
-# values-prod.yaml
+For production, consider using PostgreSQL instead of SQLite:
 
-replicaCount: 2
-
-image:
-  repository: ghcr.io/siderolabs/talos-control-system
-  tag: "0.1.0"
-  pullPolicy: IfNotPresent
-
-service:
-  type: ClusterIP
-  port: 8081
-  grpcPort: 8080
-  metricsPort: 9090
-
-ingress:
-  enabled: true
-  className: nginx
-  annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
-    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
-  hosts:
-    - host: tcs.example.com
-      paths:
-        - path: /
-          pathType: Prefix
-  tls:
-    - secretName: tcs-tls
-      hosts:
-        - tcs.example.com
-
-persistence:
-  enabled: true
-  size: 20Gi
-  storageClass: standard
-
-database:
-  backend: postgres
-  postgresUrl: "postgresql://tcs:CHANGE_PASSWORD@postgres-primary:5432/tcs"
-  maxConnections: 20
-  connectionTimeout: 30
-
-siderolink:
-  bindPort: 8082
-  listenPort: 443
-  mtu: 1420
-  subnet: "100.64.0.0/10"
-
-resources:
-  requests:
-    cpu: 250m
-    memory: 256Mi
-  limits:
-    cpu: 2000m
-    memory: 4Gi
-
-branding:
-  name: "Acme Kubernetes Platform"
-  shortName: "Acme K8s"
-  tagline: "Managed by Acme Corp"
-  primaryColor: "#2563EB"
-  secondaryColor: "#60A5FA"
-  backgroundColor: "#0F172A"
-  surfaceColor: "#1E293B"
-  textColor: "#F8FAFC"
-  textMutedColor: "#94A3B8"
-  docsUrl: "https://docs.acme.example.com"
-  supportUrl: "https://support.acme.example.com"
+```toml
+[database]
+backend = "postgres"
+postgres_url = "postgresql://tcs:strong_password@localhost:5432/tcs"
+max_connections = 20
 ```
 
-### 2. Install with production values
+### TLS with Let's Encrypt
+
+See [TLS.md](./TLS.md) for detailed configuration. Quick example:
+
+```toml
+[tls]
+enabled = true
+mode = "letsencrypt"
+
+[tls.letsencrypt]
+domains = ["tcs.example.com"]
+email = "admin@example.com"
+challenge_type = "http-01"
+```
+
+Ensure port 80 is accessible from the internet for ACME validation.
+
+### Importing a Cluster
+
+After logging in, import your cluster via the API:
 
 ```bash
-helm install tcs tcs/tcs -n tcs --create-namespace -f values-prod.yaml
+TOKEN=$(curl -s -X POST http://localhost:8081/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@tcs.local","password":"YOUR_PASSWORD"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+curl -s -X POST http://localhost:8081/api/clusters/import \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "{
+    \"name\": \"production\",
+    \"kubeconfig\": \"$(cat /path/to/kubeconfig | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')\"
+  }"
 ```
 
-## Exposing Siderolink
+## Systemd Unit
 
-Machines need to reach TCS on the siderolink port (default 8082). Options:
+The installer creates `/etc/systemd/system/tcs.service`:
 
-### Option A: NodePort
+```ini
+[Unit]
+Description=Talos Control System
+After=network.target
 
-```yaml
-service:
-  type: NodePort
-siderolink:
-  bindPort: 8082
-  listenPort: 30082
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tcs
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-### Option B: LoadBalancer
+## Backup and Restore
 
-```yaml
-siderolink:
-  service:
-    type: LoadBalancer
-    port: 443
-```
-
-### Option C: Second Ingress (WebSocket Upgrade)
-
-```yaml
-# Add to values.yaml
-ingress:
-  hosts:
-    - host: tcs.example.com
-      paths:
-        - path: /
-          pathType: Prefix
-    - host: link.tcs.example.com
-      paths:
-        - path: /
-          pathType: Prefix
-
-ingressAnnotations:
-  nginx.ingress.kubernetes.io/use-regex: "true"
-  nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-  nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-```
-
-## High Availability
-
-### Multiple Replicas
-
-```yaml
-replicaCount: 3
-
-# With PostgreSQL, multiple replicas are safe since the database
-# handles state. With SQLite, use replicaCount: 1.
-
-affinity:
-  podAntiAffinity:
-    preferredDuringSchedulingIgnoredDuringExecution:
-      - weight: 100
-        podAffinityTerm:
-          labelSelector:
-            matchExpressions:
-              - key: app.kubernetes.io/name
-                operator: In
-                values:
-                  - tcs
-          topologyKey: kubernetes.io/hostname
-```
-
-### PostgreSQL Primary/Replica
-
-For a production PostgreSQL backend, deploy a managed database or use a Helm chart like `postgresql` or `cloudnative-pg`:
-
-```yaml
-# Using cloudnative-pg
-helm install cnpg-postgres cloudnative-pg/cloudnative-pg -n cnpg --create-namespace
-
-# Then configure TCS:
-database:
-  backend: postgres
-  postgresUrl: "postgresql://tcs:password@cnpg-postgres-rw:5432/tcs"
-```
-
-## Upgrading
+### Database Backup
 
 ```bash
-helm repo update
-helm upgrade tcs tcs/tcs -n tcs -f values-prod.yaml
+# SQLite
+sudo cp /var/lib/tcs/data.db /backup/data.db.$(date +%F).bak
+
+# Verify backup
+sqlite3 /backup/data.db.$(date +%F).bak ".tables"
 ```
 
-TCS runs database migrations automatically on startup. If upgrading across major versions, review the changelog for breaking changes.
-
-### Rollback
+### Restore
 
 ```bash
-helm rollback tcs 1 -n tcs
+# Stop TCS
+sudo systemctl stop tcs
+
+# Restore database
+sudo cp /backup/data.db.2024-01-01.bak /var/lib/tcs/data.db
+sudo chown root:root /var/lib/tcs/data.db
+
+# Start TCS
+sudo systemctl start tcs
 ```
-
-## Resource Recommendations
-
-| Deployment Size | CPU Request | Memory Request | CPU Limit | Memory Limit |
-|----------------|-------------|----------------|-----------|--------------|
-| Small (< 5 clusters) | 100m | 128Mi | 500m | 1Gi |
-| Medium (5-20 clusters) | 250m | 256Mi | 2000m | 4Gi |
-| Large (20+ clusters) | 500m | 512Mi | 4000m | 8Gi |
 
 ## Monitoring
 
 TCS exposes Prometheus metrics on port 9090:
 
-```yaml
-# Prometheus ServiceMonitor
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: tcs
-  namespace: tcs
-spec:
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: tcs
-  endpoints:
-    - port: metrics
-      interval: 15s
+```bash
+curl http://localhost:9090/metrics
 ```
 
 Key metrics:
@@ -229,57 +186,67 @@ Key metrics:
 - `tcs_machines_by_status` — Machine count by status
 - `tcs_http_requests_total` — API request counter
 - `tcs_http_request_duration_seconds` — Request latency histogram
-- `tcs_siderolink_connections_active` — Active siderolink tunnels
 
-## Backup and Restore
+## Upgrading
 
-### Database Backup
-
-```bash
-# SQLite
-kubectl exec -n tcs tcs-tcs-0 -- cp /var/lib/tcs/data.db /tmp/data.db
-kubectl cp -n tcs tcs-tcs-0:/tmp/data.db ./backup.db
-
-# PostgreSQL
-pg_dump -h postgres-host -U tcs tcs > backup.sql
-```
-
-### Restore
+### Via installer
 
 ```bash
-# Stop TCS pods
-kubectl scale deployment tcs-tcs -n tcs --replicas=0
-
-# Restore database (SQLite example)
-kubectl cp ./backup.db -n tcs tcs-tcs-0:/var/lib/tcs/data.db
-
-# Scale back up
-kubectl scale deployment tcs-tcs -n tcs --replicas=1
+curl -sL https://github.com/siderolabs/talos-control-system/releases/download/v0.2.0/tcs-installer-linux-amd64.sh -o tcs-install.sh
+chmod +x tcs-install.sh
+sudo ./tcs-install.sh
 ```
+
+### Manual
+
+```bash
+# Download new binary
+curl -sL https://github.com/siderolabs/talos-control-system/releases/download/v0.2.0/tcs-linux-amd64 -o /usr/local/bin/tcs
+chmod +x /usr/local/bin/tcs
+
+# Restart
+sudo systemctl restart tcs
+```
+
+TCS runs database migrations automatically on startup. Review the changelog for breaking changes across major versions.
+
+## Resource Recommendations
+
+| Deployment Size | CPU | Memory |
+|----------------|-----|--------|
+| Small (< 5 clusters) | 1 vCPU | 512Mi |
+| Medium (5-20 clusters) | 2 vCPU | 2Gi |
+| Large (20+ clusters) | 4 vCPU | 4Gi |
 
 ## Troubleshooting
 
-### Check pod status
+### Check service status
 
 ```bash
-kubectl get pods -n tcs
-kubectl describe pod -n tcs -l app.kubernetes.io/name=tcs
-kubectl logs -n tcs deployment/tcs-tcs
+sudo systemctl status tcs
+sudo journalctl -u tcs --no-pager -f
 ```
 
-### Verify siderolink connectivity
+### Verify API
 
 ```bash
-kubectl port-forward -n tcs svc/tcs-tcs 8082:8082
-
-# From a Talos machine:
-nc -zv $(minikube ip) 8082
+curl -s http://localhost:8081/api/health
+# Expected: {"status":"ok","version":"0.1.0"}
 ```
 
-### Check ingress
+### Database migration errors
+
+TCS tracks applied migrations in a `_tcs_migrations` table. Migrations are only applied once. If you encounter migration errors, check the journal:
 
 ```bash
-kubectl get ingress -n tcs
-kubectl get pods -n ingress-nginx
-kubectl logs -n ingress-nginx -l app.kubernetes.io/name=ingress-nginx
+sudo journalctl -u tcs | grep -i migrat
+```
+
+### Siderolink connectivity
+
+Ensure port 8082 is accessible from your Talos machines:
+
+```bash
+# Test from a Talos node
+nc -zv tcs.example.com 8082
 ```

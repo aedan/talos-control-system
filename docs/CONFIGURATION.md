@@ -6,10 +6,12 @@ TCS is configured via a TOML file and environment variables. Environment variabl
 
 TCS looks for configuration in the following order:
 
-1. Path specified by `--config` CLI flag
-2. `$TCS_CONFIG` environment variable
-3. `/etc/tcs/config.toml`
-4. `./config.toml` (current directory)
+1. Path specified by the `TCS_CONFIG` environment variable
+2. `/etc/tcs/config.toml` (default)
+
+```bash
+export TCS_CONFIG=/path/to/config.toml
+```
 
 ## Environment Variables
 
@@ -66,6 +68,30 @@ connection_timeout = 30         # seconds
 ```
 postgresql://username:password@host:port/database?sslmode=require
 ```
+
+## TLS Configuration
+
+```toml
+[tls]
+enabled = false
+mode = "disabled"
+
+[tls.letsencrypt]
+domains = ["tcs.example.com"]
+email = "admin@example.com"
+challenge_type = "http-01"
+
+[tls.letsencrypt.dns_provider]
+provider = "godaddy"
+api_key = "..."
+api_secret = "..."
+
+[tls.provided]
+cert_path = "/etc/tls/cert.pem"
+key_path = "/etc/tls/key.pem"
+```
+
+See [TLS.md](./TLS.md) for detailed TLS and ACME configuration.
 
 ## Siderolink Configuration
 
@@ -136,10 +162,17 @@ http_port = 8081
 metrics_port = 9090
 
 [database]
-backend = "postgres"
-postgres_url = "postgresql://tcs:tcs_password@localhost:5432/tcs"
-max_connections = 20
-connection_timeout = 30
+backend = "sqlite"
+sqlite_path = "/var/lib/tcs/data.db"
+
+[tls]
+enabled = true
+mode = "letsencrypt"
+
+[tls.letsencrypt]
+domains = ["tcs.example.com"]
+email = "admin@example.com"
+challenge_type = "http-01"
 
 [siderolink]
 bind_port = 8082
