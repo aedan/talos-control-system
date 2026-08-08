@@ -53,16 +53,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .fetch_one(&db_pool)
         .await?;
     if count.0 == 0 {
-        let password: String = (0..16)
-            .map(|_| {
-                let b = rand::random::<u8>();
-                b as char
-            })
-            .filter(|c: &char| c.is_ascii_alphanumeric())
-            .take(16)
-            .collect();
+        let default_password = "admin";
 
-        let password_hash = talos_control_system::auth::local::hash_password(&password)
+        let password_hash = talos_control_system::auth::local::hash_password(default_password)
             .expect("Failed to hash default admin password");
 
         let now = chrono::Utc::now();
@@ -88,8 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .await?;
 
         info!(
-            "Created default admin user: admin@tcs.local with password: {}",
-            password
+            "Created default admin user: admin@tcs.local"
         );
         info!("IMPORTANT: Change the default admin password on first login");
     }
