@@ -26,7 +26,7 @@ data:
     listen_port = {{ .Values.siderolink.listenPort }}
     mtu = {{ .Values.siderolink.mtu }}
     subnet = {{ .Values.siderolink.subnet | quote }}
-    {{- if gt (int .Values.siderolink.rateLimitBytes) 0 }}
+    {{- if gt .Values.siderolink.rateLimitBytes 0 }}
     rate_limit_bytes = {{ .Values.siderolink.rateLimitBytes }}
     {{- end }}
 

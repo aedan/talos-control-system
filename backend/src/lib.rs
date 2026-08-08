@@ -9,6 +9,7 @@ pub mod branding;
 pub mod integration;
 pub mod utils;
 pub mod cert;
+pub mod static_server;
 
 use std::sync::Arc;
 use crate::branding::manager::BrandingManager;

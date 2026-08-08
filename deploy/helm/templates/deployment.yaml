@@ -56,14 +56,11 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           ports:
-            - name: http
-              containerPort: {{ .Values.service.httpPort }}
-              protocol: TCP
-            - name: https
-              containerPort: {{ .Values.service.httpsPort }}
-              protocol: TCP
             - name: grpc
               containerPort: {{ .Values.service.grpcPort }}
+              protocol: TCP
+            - name: http
+              containerPort: {{ .Values.service.port }}
               protocol: TCP
             - name: siderolink
               containerPort: {{ .Values.siderolink.bindPort }}
@@ -95,10 +92,6 @@ spec:
             - name: config
               mountPath: /app/config.toml
               subPath: config.toml
-            {{- if .Values.tls.enabled }}
-            - name: certs
-              mountPath: /var/lib/tcs/certs
-            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -109,10 +102,6 @@ spec:
             claimName: {{ if .Values.persistence.existingClaim }}{{ .Values.persistence.existingClaim }}{{ else }}{{ include "tcs.fullname" . }}{{ end }}
         {{- else }}
         - name: data
-          emptyDir: {}
-        {{- end }}
-        {{- if .Values.tls.enabled }}
-        - name: certs
           emptyDir: {}
         {{- end }}
       {{- with .Values.nodeSelector }}
