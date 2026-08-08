@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
-use crate::auth::jwt::{Claims, create_claims, create_jwt};
+use crate::auth::jwt::{Claims, create_claims, create_jwt, verify_jwt};
 use crate::config::auth::OidcConfig as ConfigOidcConfig;
 use crate::db::models::auth::User;
 use crate::db::repos::user;
@@ -299,7 +299,7 @@ impl TcsOidcProvider {
     }
 
     pub async fn validate_token(&self, token: &str) -> Result<Claims, AppError> {
-        let token_data = crate::auth::jwt::verify_jwt(token)?;
+        let token_data = verify_jwt(token)?;
         Ok(token_data.claims)
     }
 
