@@ -102,7 +102,8 @@
   </main>
 </div>
 {:else}
-<!-- Unauthenticated — children not rendered, redirect is already in progress -->
+<!-- Login page or redirecting — render children -->
+{@render children()}
 {/if}
 
 <style>
