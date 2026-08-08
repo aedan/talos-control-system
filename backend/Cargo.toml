@@ -58,7 +58,6 @@ ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-ri
 
 # TLS / Certificates
 acme2 = "0.5"
-openssl = { version = "0.10", features = ["vendored"] }
 rcgen = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio-rustls = "0.26"
