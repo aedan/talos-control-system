@@ -14,6 +14,7 @@ pub use auth::OidcConfig;
 pub use tls::{TlsConfig, TlsMode};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
@@ -41,7 +42,11 @@ impl Default for AuthConfig {
 
 impl Config {
     pub fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let file_path = std::env::var("TCS_CONFIG")
+            .unwrap_or_else(|_| "/etc/tcs/config.toml".to_string());
+
         let config = config::Config::builder()
+            .add_source(config::File::with_name(&file_path).required(false))
             .add_source(config::Environment::with_prefix("TCS").separator("_"))
             .build()?;
 

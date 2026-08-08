@@ -27,11 +27,14 @@ fn default_mode() -> TlsMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
 pub enum TlsMode {
+    #[serde(rename = "letsencrypt")]
     LetsEncrypt,
+    #[serde(rename = "self-signed")]
     SelfSigned,
+    #[serde(rename = "provided")]
     Provided,
+    #[serde(rename = "disabled")]
     Disabled,
 }
 
@@ -52,9 +55,10 @@ fn default_challenge() -> ChallengeType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
 pub enum ChallengeType {
+    #[serde(rename = "http-01")]
     Http01,
+    #[serde(rename = "dns-01")]
     Dns01,
 }
 

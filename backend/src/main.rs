@@ -301,7 +301,7 @@ async fn run_signal_handlers() -> String {
         {
             let mut term = signal::unix::signal(signal::unix::SignalKind::terminate())
                 .expect("Failed to listen for SIGTERM");
-            term.recv();
+            term.recv().await;
         }
         #[cfg(not(unix))]
         {
