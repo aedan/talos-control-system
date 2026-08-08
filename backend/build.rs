@@ -2,6 +2,12 @@ use std::process::Command;
 use std::path::Path;
 
 fn main() {
+    let frontend_build = Path::new("../frontend/build/index.html");
+    if frontend_build.exists() {
+        println!("cargo:rerun-if-changed=../frontend/build/index.html");
+        return;
+    }
+
     let frontend_dir = "../frontend";
     if !Path::new(frontend_dir).exists() {
         return;
