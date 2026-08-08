@@ -4,6 +4,11 @@ export interface ApiError extends Error {
   status?: number;
 }
 
+function getToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  return localStorage.getItem('tcs_token');
+}
+
 export class TcsClient {
   constructor(private headers: Record<string, string> = {}) {}
 
@@ -24,10 +29,12 @@ export class TcsClient {
   }
 
   private async request(method: string, path: string, body?: unknown): Promise<unknown> {
+    const token = getToken();
     const opts: RequestInit = {
       method,
       headers: {
         'Content-Type': 'application/json',
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         ...this.headers
       }
     };
@@ -37,7 +44,17 @@ export class TcsClient {
     }
 
     const res = await fetch(`${API_BASE}${path}`, opts);
-    
+
+    if (res.status === 401 && typeof window !== 'undefined') {
+      if (window.location.pathname !== '/login') {
+        localStorage.removeItem('tcs_token');
+        window.location.href = '/login';
+      }
+      const err: ApiError = new Error('Authentication required');
+      err.status = 401;
+      throw err;
+    }
+
     if (!res.ok) {
       const err: ApiError = new Error(`API error: ${res.status} ${res.statusText}`);
       err.status = res.status;

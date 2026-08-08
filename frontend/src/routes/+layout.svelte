@@ -7,13 +7,20 @@
   let { children }: { children: Snippet } = $props();
 
   let authenticated = $state(false);
+  let checking = $state(true);
   let user = $state<any>(null);
 
   async function checkAuth() {
-    if (typeof window === 'undefined') return;
+    if (typeof window === 'undefined') {
+      checking = false;
+      return;
+    }
 
     // Never redirect on /login
-    if (window.location.pathname === '/login') return;
+    if (window.location.pathname === '/login') {
+      checking = false;
+      return;
+    }
 
     const token = localStorage.getItem('tcs_token');
     if (!token) {
@@ -35,6 +42,8 @@
     } catch {
       localStorage.removeItem('tcs_token');
       window.location.href = '/login';
+    } finally {
+      checking = false;
     }
   }
 
@@ -54,7 +63,12 @@
   }
 </script>
 
-{#if authenticated}
+{#if checking}
+<!-- Loading overlay while auth resolves -->
+<div class="loading-overlay">
+  <div class="spinner"></div>
+</div>
+{:else if authenticated}
 <div class="layout">
   <nav class="sidebar">
     <a href="/" class="sidebar-logo">
@@ -88,11 +102,31 @@
   </main>
 </div>
 {:else}
-<!-- Show children without sidebar while auth is resolving -->
-{@render children()}
+<!-- Unauthenticated — children not rendered, redirect is already in progress -->
 {/if}
 
 <style>
+  .loading-overlay {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    background: var(--tcs-background);
+  }
+
+  .spinner {
+    width: 32px;
+    height: 32px;
+    border: 3px solid var(--tcs-border);
+    border-top-color: var(--tcs-primary);
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
   .layout {
     display: flex;
     min-height: 100vh;
