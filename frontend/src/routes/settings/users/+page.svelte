@@ -86,7 +86,7 @@
             <td><span class="role-badge">{user.role}</span></td>
             <td>
               <label class="toggle">
-                <input type="checkbox" checked={user.isActive} on:change={() => toggleActive(user)} />
+                <input type="checkbox" checked={user.isActive} onchange={() => toggleActive(user)} />
                 <span class="toggle-track">
                   <span class="toggle-thumb"></span>
                 </span>
