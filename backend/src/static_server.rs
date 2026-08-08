@@ -1,6 +1,5 @@
 use axum::body::Body;
-use axum::extract::Path;
-use axum::http::StatusCode;
+use axum::http::{Request, StatusCode};
 use axum::response::Response;
 use rust_embed::RustEmbed;
 
@@ -36,11 +35,12 @@ fn get_mime_type(path: &str) -> &'static str {
     "application/octet-stream"
 }
 
-pub async fn serve_static(Path(path): Path<String>) -> Result<Response<Body>, StatusCode> {
-    let lookup = if path.is_empty() || path == "/" {
+pub async fn serve_static(req: Request<Body>) -> Result<Response<Body>, StatusCode> {
+    let path = req.uri().path().trim_start_matches('/');
+    let lookup = if path.is_empty() {
         "index.html"
     } else {
-        &path
+        path
     };
 
     match FrontendAssets::get(lookup) {
