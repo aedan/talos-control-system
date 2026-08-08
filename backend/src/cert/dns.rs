@@ -23,16 +23,14 @@ pub trait DnsProvider: Send + Sync {
 }
 
 pub struct GoDaddyProvider {
-    domain: String,
     api_key: String,
     api_secret: String,
     client: reqwest::Client,
 }
 
 impl GoDaddyProvider {
-    pub fn new(domain: &str, api_key: &str, api_secret: &str) -> Self {
+    pub fn new(api_key: &str, api_secret: &str) -> Self {
         Self {
-            domain: domain.to_string(),
             api_key: api_key.to_string(),
             api_secret: api_secret.to_string(),
             client: reqwest::Client::new(),
@@ -42,10 +40,10 @@ impl GoDaddyProvider {
 
 #[async_trait]
 impl DnsProvider for GoDaddyProvider {
-    async fn add_txt_record(&self, _domain: &str, name: &str, value: &str) -> Result<(), CertError> {
+    async fn add_txt_record(&self, domain: &str, name: &str, value: &str) -> Result<(), CertError> {
         let url = format!(
             "https://api.godaddy.com/v1/domains/{}/records/TXT/{}",
-            self.domain, name
+            domain, name
         );
         
         let record = serde_json::json!([{
@@ -67,14 +65,14 @@ impl DnsProvider for GoDaddyProvider {
             return Err(CertError::Dns(format!("GoDaddy API error {}: {}", status, body)));
         }
 
-        tracing::info!(domain = %self.domain, record = name, "Added TXT record via GoDaddy");
+        tracing::info!(domain = %domain, record = name, "Added TXT record via GoDaddy");
         Ok(())
     }
 
-    async fn remove_txt_record(&self, _domain: &str, name: &str) -> Result<(), CertError> {
+    async fn remove_txt_record(&self, domain: &str, name: &str) -> Result<(), CertError> {
         let url = format!(
             "https://api.godaddy.com/v1/domains/{}/records/TXT/{}",
-            self.domain, name
+            domain, name
         );
 
         let resp = self.client
@@ -90,7 +88,7 @@ impl DnsProvider for GoDaddyProvider {
             return Err(CertError::Dns(format!("GoDaddy API error {}: {}", status, body)));
         }
 
-        tracing::info!(domain = %self.domain, record = name, "Removed TXT record via GoDaddy");
+        tracing::info!(domain = %domain, record = name, "Removed TXT record via GoDaddy");
         Ok(())
     }
 }
