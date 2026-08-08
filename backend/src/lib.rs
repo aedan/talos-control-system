@@ -8,6 +8,7 @@ pub mod auth;
 pub mod branding;
 pub mod integration;
 pub mod utils;
+pub mod cert;
 
 use std::sync::Arc;
 use crate::branding::manager::BrandingManager;
@@ -62,6 +63,9 @@ pub enum AppError {
 
     #[error("gRPC error: {0}")]
     Grpc(String),
+
+    #[error("LDAP error: {0}")]
+    Ldap(String),
 
     #[error("Network error: {0}")]
     Network(String),
