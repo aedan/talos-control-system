@@ -62,6 +62,9 @@ COPY --from=frontend /frontend/build ./frontend-dist
 # Copy database migrations
 COPY backend/migrations ./migrations
 
-EXPOSE 8080 8081 8082 9090
+# Cert volume for TLS
+VOLUME /var/lib/tcs/certs
+
+EXPOSE 80 443 8080 8082 9090
 
 ENTRYPOINT ["/app/tcs"]

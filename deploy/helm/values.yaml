@@ -12,6 +12,23 @@ service:
   grpcPort: 8080
   siderolinkPort: 8082
   metricsPort: 9090
+  httpPort: 80
+  httpsPort: 443
+
+# -- TLS configuration
+tls:
+  enabled: false
+  mode: letsencrypt
+  letsencrypt:
+    email: ""
+    domains: []
+    challengeType: http-01
+  selfSigned:
+    domains: []
+  provided:
+    secretName: ""
+    certPath: ""
+    keyPath: ""
 
 # -- Ingress configuration
 ingress:
@@ -44,6 +61,24 @@ database:
   postgresUrl: ""
   maxConnections: 10
   connectionTimeout: 30
+
+# -- Auth configuration
+auth:
+  jwtSecret: ""
+  ldap:
+    enabled: false
+    url: ""
+    bindDn: ""
+    bindPassword: ""
+    userSearchBase: ""
+    userSearchFilter: ""
+    defaultRole: viewer
+  oidc:
+    enabled: false
+    issuerUrl: ""
+    clientId: ""
+    clientSecret: ""
+    redirectUrl: ""
 
 # -- White-label branding defaults
 branding:
