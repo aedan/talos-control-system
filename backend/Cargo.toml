@@ -7,7 +7,7 @@ license = "Apache-2.0"
 
 [dependencies]
 axum = { version = "0.7", features = ["ws", "json"] }
-axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 
 tokio = { version = "1", features = ["full"] }
 tonic = "0.12"

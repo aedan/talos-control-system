@@ -2,18 +2,51 @@
   import { branding, applyBranding } from '$lib/stores/branding';
   import Logo from '$lib/branding/components/Logo.svelte';
   import { onMount } from 'svelte';
-  import '$lib/styles/app.css';
+
+  let authenticated = false;
+  let user = null;
+
+  async function checkAuth() {
+    const token = localStorage.getItem('tcs_token');
+    if (!token) {
+      window.location.href = '/login';
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/auth/me', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!res.ok) {
+        localStorage.removeItem('tcs_token');
+        window.location.href = '/login';
+        return;
+      }
+      user = await res.json();
+      authenticated = true;
+    } catch {
+      localStorage.removeItem('tcs_token');
+      window.location.href = '/login';
+    }
+  }
 
   onMount(async () => {
     const m = await import('$lib/stores/branding');
     m.fetchBranding();
+    await checkAuth();
   });
 
   $effect(() => {
     applyBranding($branding);
   });
+
+  async function handleLogout() {
+    localStorage.removeItem('tcs_token');
+    window.location.href = '/login';
+  }
 </script>
 
+{#if authenticated}
 <div class="layout">
   <nav class="sidebar">
     <a href="/" class="sidebar-logo">
@@ -30,19 +63,23 @@
       <li class="sub"><a href="/settings/auth">Auth</a></li>
       <li class="sub"><a href="/settings/branding">Branding</a></li>
       <li class="sub"><a href="/settings/users">Users</a></li>
+      <li><a href="#" on:click|preventDefault={handleLogout}>Logout</a></li>
     </ul>
   </nav>
 
   <main class="main">
     <header class="topbar">
       <span class="brand">{$branding.shortName}</span>
-      <span class="tagline">{$branding.tagline}</span>
+      {#if user}
+        <span class="user-info">{$user.display_name || $user.email}</span>
+      {/if}
     </header>
     <div class="content">
       <slot />
     </div>
   </main>
 </div>
+{/if}
 
 <style>
   .layout {
@@ -110,7 +147,7 @@
     border-bottom: 1px solid var(--tcs-border);
     display: flex;
     align-items: center;
-    gap: 1rem;
+    justify-content: space-between;
   }
 
   .brand {
@@ -118,7 +155,7 @@
     font-weight: 600;
   }
 
-  .tagline {
+  .user-info {
     color: var(--tcs-text-muted);
     font-size: 0.85rem;
   }
