@@ -54,16 +54,13 @@ pub fn parse_expiry_from_cert_pem(pem: &str) -> Option<chrono::DateTime<chrono::
 }
 
 fn parse_x509_not_after(der: &[u8]) -> Option<chrono::DateTime<chrono::Utc>> {
-    match openssl::x509::X509::from_der(der) {
-        Ok(x509) => {
-            let not_after = x509.not_after();
-            let time_str = not_after.to_string();
-            chrono::NaiveDateTime::parse_from_str(&time_str, "%b %d %H:%M:%S %Y %Z")
-                .ok()
-                .and_then(|dt| chrono::DateTime::from_timestamp(dt.and_utc().timestamp(), 0))
+    match rcgen::Certificate::from_der(der) {
+        Ok(cert) => {
+            let not_after = cert.not_after();
+            chrono::DateTime::from_timestamp(not_after.unix_timestamp, 0)
         }
         Err(e) => {
-            tracing::warn!("Failed to parse DER certificate with openssl: {}", e);
+            tracing::warn!("Failed to parse DER certificate with rcgen: {}", e);
             None
         }
     }
