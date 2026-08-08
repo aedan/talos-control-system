@@ -3,10 +3,15 @@
   import Logo from '$lib/branding/components/Logo.svelte';
   import { onMount } from 'svelte';
 
-  let authenticated = false;
-  let user = null;
+  let authenticated = $state(false);
+  let user = $state<any>(null);
 
   async function checkAuth() {
+    if (typeof window === 'undefined') return;
+
+    // Never redirect on /login
+    if (window.location.pathname === '/login') return;
+
     const token = localStorage.getItem('tcs_token');
     if (!token) {
       window.location.href = '/login';
@@ -63,7 +68,7 @@
       <li class="sub"><a href="/settings/auth">Auth</a></li>
       <li class="sub"><a href="/settings/branding">Branding</a></li>
       <li class="sub"><a href="/settings/users">Users</a></li>
-      <li><a href="#" on:click|preventDefault={handleLogout}>Logout</a></li>
+      <li><a href="#" onclick={(e) => { e.preventDefault(); handleLogout(); }}>Logout</a></li>
     </ul>
   </nav>
 
@@ -71,14 +76,17 @@
     <header class="topbar">
       <span class="brand">{$branding.shortName}</span>
       {#if user}
-        <span class="user-info">{$user.display_name || $user.email}</span>
+        <span class="user-info">{user.display_name || user.email}</span>
       {/if}
     </header>
     <div class="content">
-      <slot />
+      {@render children()}
     </div>
   </main>
 </div>
+{:else}
+<!-- Show children without sidebar while auth is resolving -->
+{@render children()}
 {/if}
 
 <style>
