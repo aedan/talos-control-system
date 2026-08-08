@@ -25,8 +25,11 @@
       <li><a href="/machine-classes">Machine Classes</a></li>
     </ul>
     <ul class="sidebar-nav sidebar-nav-bottom">
-      <li><a href="/settings/branding">Branding</a></li>
       <li><a href="/settings">Settings</a></li>
+      <li class="sub"><a href="/settings/certificates">Certificates</a></li>
+      <li class="sub"><a href="/settings/auth">Auth</a></li>
+      <li class="sub"><a href="/settings/branding">Branding</a></li>
+      <li class="sub"><a href="/settings/users">Users</a></li>
     </ul>
   </nav>
 
@@ -81,6 +84,11 @@
     background: var(--tcs-surface-hover);
     color: var(--tcs-text);
     text-decoration: none;
+  }
+
+  .sidebar-nav li.sub a {
+    padding-left: 2rem;
+    font-size: 0.9em;
   }
 
   .sidebar-nav-bottom {

@@ -31,16 +31,30 @@
       <span class="card-arrow">&rarr;</span>
     </a>
     
-    <div class="settings-card disabled">
+    <a href="/settings/certificates" class="settings-card">
       <div class="card-icon">
         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
         </svg>
       </div>
+      <h3>SSL/TLS Certificates</h3>
+      <p>Manage TLS certificates and Let's Encrypt integration.</p>
+      <span class="card-arrow">&rarr;</span>
+    </a>
+    
+    <a href="/settings/auth" class="settings-card">
+      <div class="card-icon">
+        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+          <circle cx="9" cy="7" r="4"/>
+          <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+          <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+        </svg>
+      </div>
       <h3>Authentication</h3>
-      <p>Configure OIDC, SAML, and local auth providers.</p>
-      <span class="card-badge">Coming Soon</span>
-    </div>
+      <p>Configure OIDC, LDAP, and local auth providers.</p>
+      <span class="card-arrow">&rarr;</span>
+    </a>
     
     <div class="settings-card disabled">
       <div class="card-icon">
