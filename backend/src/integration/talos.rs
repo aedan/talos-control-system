@@ -70,19 +70,20 @@ fn decode_b64(data: &str) -> Result<Vec<u8>, AppError> {
         .map_err(|e| AppError::InvalidInput(format!("Invalid base64 in talosconfig: {}", e)))
 }
 
-/// Convert OpenSSL-style Ed25519 PEM keys to PKCS#8 for rustls.
+/// Normalize Talos client key PEM for rustls `Identity::from_pem`.
+///
+/// talosconfig often uses `BEGIN ED25519 PRIVATE KEY` whose body is already
+/// PKCS#8 DER (OpenSSL 3 may not parse that label). Relabel to
+/// `BEGIN PRIVATE KEY` so rustls accepts it.
 fn ensure_pkcs8_pem(key_pem: &[u8]) -> Result<Vec<u8>, AppError> {
     let s = String::from_utf8_lossy(key_pem);
-    if s.contains("BEGIN ED25519 PRIVATE KEY") || s.contains("BEGIN PRIVATE KEY") {
-        use openssl::pkey::PKey;
-        let pkey = PKey::private_key_from_pem(key_pem).map_err(|e| {
-            AppError::Internal(format!("Failed to parse Talos client key PEM: {}", e))
-        })?;
-        // Prefer PKCS#8 PEM which rustls accepts for Ed25519
-        if let Ok(pkcs8) = pkey.private_key_to_pem_pkcs8() {
-            return Ok(pkcs8);
-        }
+    if s.contains("BEGIN ED25519 PRIVATE KEY") {
+        let fixed = s
+            .replace("BEGIN ED25519 PRIVATE KEY", "BEGIN PRIVATE KEY")
+            .replace("END ED25519 PRIVATE KEY", "END PRIVATE KEY");
+        return Ok(fixed.into_bytes());
     }
+    // Already PKCS#8 / EC / RSA — pass through
     Ok(key_pem.to_vec())
 }
 
