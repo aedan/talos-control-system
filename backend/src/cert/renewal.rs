@@ -1,5 +1,7 @@
+use std::sync::Arc;
 use std::time::Duration;
 
+use dashmap::DashMap;
 use tokio::time::interval;
 use tracing::{error, info, warn};
 
@@ -28,8 +30,9 @@ fn needs_renewal(cert_pem: &str) -> bool {
 
 pub async fn start_cert_renewal_task(
     config: Config,
+    acme_store: Option<Arc<DashMap<String, String>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    info!("Starting certificate renewal monitoring task");
+    info!("Certificate renewal monitoring task started");
 
     let mut interval = interval(RENEWAL_CHECK_INTERVAL);
     interval.tick().await;
@@ -59,7 +62,7 @@ pub async fn start_cert_renewal_task(
         match &tls.mode {
             TlsMode::LetsEncrypt => {
                 if let Some(le) = &tls.letsencrypt {
-                    if let Ok(acme) = AcmeClient::new(
+                    let acme = AcmeClient::new(
                         &le.email,
                         le.dns_provider
                             .as_ref()
@@ -71,19 +74,28 @@ pub async fn start_cert_renewal_task(
                                 zone_id: d.zone_id.clone(),
                             }),
                         le.challenge_type.clone(),
-                    ) {
-                        match acme.renew_certificate(&le.domains).await {
-                            Ok((new_cert, new_key)) => {
-                                if let Err(e) = write_cert_to_disk(&new_cert, &new_key) {
-                                    error!(error = %e, "Failed to write renewed cert to disk");
-                                } else {
-                                    info!("Let's Encrypt certificate renewed successfully");
+                    );
+
+                    match acme {
+                        Ok(acme_client) => {
+                            let result = if let Some(store) = &acme_store {
+                                acme_client.renew_certificate_with_store(&le.domains, store).await
+                            } else {
+                                acme_client.renew_certificate(&le.domains).await
+                            };
+
+                            match result {
+                                Ok((new_cert, new_key)) => {
+                                    if let Err(e) = write_cert_to_disk(&new_cert, &new_key) {
+                                        error!(error = %e, "Failed to write renewed cert to disk");
+                                    } else {
+                                        info!("Let's Encrypt certificate renewed successfully");
+                                    }
                                 }
+                                Err(e) => error!(error = %e, "Let's Encrypt renewal failed"),
                             }
-                            Err(e) => error!(error = %e, "Let's Encrypt renewal failed"),
                         }
-                    } else {
-                        error!("Failed to create ACME client for renewal");
+                        Err(e) => error!(error = %e, "Failed to create ACME client for renewal"),
                     }
                 } else {
                     error!("Let's Encrypt not configured");

@@ -119,31 +119,63 @@ async fn run_with_tls(
     acme_store: AcmeChallengeStore,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cert_store: CertStore = Arc::new(tokio::sync::RwLock::new((String::new(), String::new())));
-    let (cert_pem, key_pem) = load_certificates(&config, &cert_store).await?;
 
-    let rest_app = create_rest_router(state.clone(), &config.branding);
-    let http_app = build_http_redirect_router(acme_store);
-
+    // Start HTTP server FIRST (required for ACME HTTP-01 challenge validation)
     let http_addr: SocketAddr = format!("{}:80", config.server.bind_addr).parse()?;
-    let https_addr: SocketAddr = format!("{}:443", config.server.bind_addr).parse()?;
-
+    let http_app = build_http_redirect_router(acme_store.clone());
+    let http_listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
+    info!(
+        addr = %http_addr,
+        "Starting HTTP server (ACME challenges + HTTPS redirect)"
+    );
     let http_handle = tokio::spawn(async move {
-        info!(
-            addr = %http_addr,
-            "Starting HTTP server (ACME challenges + HTTPS redirect)"
-        );
-        let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
-        if let Err(e) = axum::serve(listener, http_app).await {
+        if let Err(e) = axum::serve(http_listener, http_app).await {
             error!(error = %e, "HTTP server error");
         }
     });
+
+    // Now obtain certificate (HTTP challenge endpoint is live)
+    let (cert_pem, key_pem) = if config.tls.mode == TlsMode::LetsEncrypt {
+        if let Some(le) = &config.tls.letsencrypt {
+            match talos_control_system::cert::acme::obtain_http01_certificate(
+                &le.domains,
+                &le.email,
+                &acme_store,
+            )
+            .await
+            {
+                Ok((cert, key)) => {
+                    info!("Let's Encrypt certificate obtained successfully");
+                    (cert, key)
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "Let's Encrypt issuance failed, falling back to self-signed certificate"
+                    );
+                    talos_control_system::cert::self_signed::generate_self_signed(&le.domains).await?
+                }
+            }
+        } else {
+            warn!("Let's Encrypt mode selected but not configured, falling back to self-signed");
+            talos_control_system::cert::self_signed::generate_self_signed(&["localhost".to_string()]).await?
+        }
+    } else {
+        load_certificates_from_config(&config.tls, &cert_store).await?
+    };
+
+    *cert_store.write().await = (cert_pem.clone(), key_pem.clone());
+
+    let rest_app = create_rest_router(state.clone(), &config.branding);
+
+    let https_addr: SocketAddr = format!("{}:443", config.server.bind_addr).parse()?;
 
     let rustls_config = RustlsConfig::from_pem(cert_pem.clone().into_bytes(), key_pem.clone().into_bytes())
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     let renewal_handle = tokio::spawn(async move {
-        if let Err(e) = talos_control_system::cert::start_cert_renewal_task(config).await {
+        if let Err(e) = talos_control_system::cert::start_cert_renewal_task(config, Some(acme_store)).await {
             error!(error = %e, "Certificate renewal task error");
         }
     });
@@ -178,6 +210,41 @@ async fn run_with_tls(
     Ok(())
 }
 
+async fn load_certificates_from_config(
+    tls_config: &talos_control_system::config::tls::TlsConfig,
+    cert_store: &CertStore,
+) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
+    let (cert_pem, key_pem) = match tls_config.mode {
+        TlsMode::SelfSigned => {
+            let domains = tls_config
+                .self_signed
+                .as_ref()
+                .map(|c| c.domains.clone())
+                .unwrap_or_else(|| vec!["localhost".to_string()]);
+            talos_control_system::cert::self_signed::generate_self_signed(&domains).await?
+        }
+        TlsMode::Provided => {
+            let provided = tls_config.provided.as_ref().ok_or(
+                "Provided TLS mode requires cert_path and key_path in config",
+            )?;
+            talos_control_system::cert::provided::load_provided_certs(
+                &provided.cert_path,
+                &provided.key_path,
+            )
+            .await?
+        }
+        TlsMode::Disabled => {
+            return Err("TLS mode is Disabled".into());
+        }
+        TlsMode::LetsEncrypt => {
+            return Err("Let's Encrypt handled separately in run_with_tls".into());
+        }
+    };
+
+    *cert_store.write().await = (cert_pem.clone(), key_pem.clone());
+    Ok((cert_pem, key_pem))
+}
+
 async fn run_without_tls(
     config: Config,
     state: AppState,
@@ -208,52 +275,6 @@ async fn run_without_tls(
 
     info!("Shutting down gracefully...");
     Ok(())
-}
-
-async fn load_certificates(
-    config: &Config,
-    cert_store: &CertStore,
-) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
-    let (cert_pem, key_pem) = match config.tls.mode {
-        TlsMode::SelfSigned => {
-            let domains = config
-                .tls
-                .self_signed
-                .as_ref()
-                .map(|c| c.domains.clone())
-                .unwrap_or_else(|| vec!["localhost".to_string()]);
-            talos_control_system::cert::self_signed::generate_self_signed(&domains).await?
-        }
-        TlsMode::Provided => {
-            let provided = config.tls.provided.as_ref().ok_or(
-                "Provided TLS mode requires cert_path and key_path in config",
-            )?;
-            talos_control_system::cert::provided::load_provided_certs(
-                &provided.cert_path,
-                &provided.key_path,
-            )
-            .await?
-        }
-        TlsMode::LetsEncrypt => {
-            warn!(
-                "Let's Encrypt mode: using self-signed placeholder certificate; \
-                 real ACME issuance will be handled by the cert manager"
-            );
-            let domains = config
-                .tls
-                .letsencrypt
-                .as_ref()
-                .map(|c| c.domains.clone())
-                .unwrap_or_else(|| vec!["localhost".to_string()]);
-            talos_control_system::cert::self_signed::generate_self_signed(&domains).await?
-        }
-        TlsMode::Disabled => {
-            return Err("TLS mode is Disabled".into());
-        }
-    };
-
-    *cert_store.write().await = (cert_pem.clone(), key_pem.clone());
-    Ok((cert_pem, key_pem))
 }
 
 fn build_http_redirect_router(acme_store: AcmeChallengeStore) -> Router {
