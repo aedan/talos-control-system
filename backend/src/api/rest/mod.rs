@@ -71,6 +71,10 @@ pub fn create_rest_router(state: AppState, branding: &BrandingConfig) -> Router 
         .route("/clusters/:id/config", post(handlers::create_config_patch))
         .route("/clusters/:id/config/apply", post(handlers::apply_cluster_config))
         .route("/clusters/:id/config/:patch_id", delete(handlers::delete_config_patch))
+        .route(
+            "/clusters/:id/backups/schedule",
+            put(handlers::set_backup_schedule),
+        )
         .route("/clusters/:id/backups", get(handlers::list_cluster_backups))
         .route("/clusters/:id/backups", post(handlers::create_cluster_backup))
         .route("/clusters/:id/backups/:backup_id", get(handlers::download_cluster_backup))

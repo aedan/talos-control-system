@@ -60,6 +60,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
         ("003_features.sql", include_str!("migrations/003_features.sql")),
         ("004_talos_control.sql", include_str!("migrations/004_talos_control.sql")),
         ("005_control_plane.sql", include_str!("migrations/005_control_plane.sql")),
+        ("006_backup_schedule.sql", include_str!("migrations/006_backup_schedule.sql")),
     ];
 
     let mut tx = pool.begin().await?;

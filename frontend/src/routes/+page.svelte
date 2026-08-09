@@ -31,7 +31,7 @@
 
     <h2>Clusters</h2>
     {#if $clusters.length === 0}
-      <p class="empty">No clusters yet. <a href="/clusters/create">Create one</a></p>
+      <p class="empty">No clusters yet. <a href="/clusters/import">Import one</a></p>
     {:else}
       <div class="cluster-list">
         {#each $clusters as cluster (cluster.id)}

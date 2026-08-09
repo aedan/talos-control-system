@@ -87,6 +87,7 @@ talos-control-system/
 - [Branding](docs/BRANDING.md)
 - [Deployment](docs/DEPLOYMENT.md)
 - [Development](docs/DEVELOPMENT.md)
+- [Lab smoke checklist](docs/SMOKE.md)
 
 ## License
 

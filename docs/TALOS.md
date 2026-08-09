@@ -84,6 +84,17 @@ Prefer a maintenance window. Do not restore onto a healthy multi-node etcd witho
 Snapshots are written under `{parent of sqlite_path}/backups/{cluster_id}/`.
 Retention: newest **N** ready backups kept (default 10); older files deleted.
 
+### Schedule
+
+```http
+PUT /api/clusters/{id}/backups/schedule
+{ "scheduleHours": 24, "retention": 10 }
+```
+
+- `scheduleHours`: interval between automatic snapshots; `null` or `0` disables  
+- Scheduler loop ticks about every **15 minutes**  
+- Requires talosconfig on the cluster
+
 ## Common failures
 
 | Error | Cause |

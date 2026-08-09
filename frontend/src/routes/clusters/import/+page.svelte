@@ -56,11 +56,7 @@
     try {
       importResult = await importCluster(name, kubeconfig, talosconfig);
       step = 'done';
-      const n =
-        (importResult as { machines_imported?: number; machinesImported?: number })
-          .machines_imported ??
-        importResult.machinesImported ??
-        0;
+      const n = importResult.machinesImported ?? 0;
       success(`Cluster "${name}" imported with ${n} machines`);
       localStorage.setItem('last-kubeconfig', kubeconfig);
     } catch (e: unknown) {

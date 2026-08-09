@@ -30,6 +30,11 @@ pub struct Cluster {
     pub kubeconfig: Option<String>,
     #[sqlx(rename = "backup_retention")]
     pub backup_retention: Option<i32>,
+    /// If set (hours > 0), automatic etcd snapshots on this interval.
+    #[sqlx(rename = "backup_schedule_hours")]
+    pub backup_schedule_hours: Option<i32>,
+    #[sqlx(rename = "last_auto_backup_at")]
+    pub last_auto_backup_at: Option<DateTime<Utc>>,
     #[sqlx(rename = "created_at")]
     pub created_at: DateTime<Utc>,
     #[sqlx(rename = "updated_at")]
@@ -49,6 +54,8 @@ impl Cluster {
             talosconfig: None,
             kubeconfig: None,
             backup_retention: None,
+            backup_schedule_hours: None,
+            last_auto_backup_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

@@ -371,6 +371,47 @@ pub struct ApplyConfigRequest {
     pub dry_run: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupScheduleRequest {
+    /// Hours between automatic snapshots; null or 0 disables.
+    pub schedule_hours: Option<i32>,
+    pub retention: Option<i32>,
+}
+
+pub async fn set_backup_schedule(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<uuid::Uuid>,
+    Json(payload): Json<BackupScheduleRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller
+        .set_backup_schedule(cluster_id, payload.schedule_hours, payload.retention)
+        .await
+    {
+        Ok(()) => {
+            crate::utils::audit::log_action(
+                &state.db_pool,
+                "system",
+                "backup_schedule",
+                &cluster_id.to_string(),
+                &format!(
+                    "hours={:?} retention={:?}",
+                    payload.schedule_hours, payload.retention
+                ),
+            )
+            .await;
+            // Return updated public cluster view
+            match repos::cluster::get(&state.db_pool, cluster_id).await {
+                Ok(Some(c)) => Ok(Json(cluster_public_json(c))),
+                Ok(None) => Err((StatusCode::NOT_FOUND, "Cluster not found".to_string())),
+                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+            }
+        }
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
 pub async fn apply_cluster_config(
     State(state): State<AppState>,
     Path(cluster_id): Path<uuid::Uuid>,
@@ -1219,6 +1260,7 @@ pub async fn clear_audit_logs(
 // ─── System Info Handler ──────────────────────────────────────────────
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SystemInfoResponse {
     pub version: String,
     pub commit: String,
@@ -1235,6 +1277,7 @@ pub struct SystemInfoResponse {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DiskUsageResponse {
     pub total_bytes: u64,
     pub free_bytes: u64,

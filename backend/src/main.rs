@@ -118,11 +118,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let state = AppState {
         config: Arc::new(config.clone()),
-        db_pool,
+        db_pool: db_pool.clone(),
         branding: branding_manager,
         event_bus,
         cache: app_cache,
     };
+
+    let _backup_sched = talos_control_system::runtime::spawn_backup_scheduler(
+        db_pool,
+        config.database.sqlite_path.clone(),
+        config.auth.jwt_secret.clone(),
+    );
 
     let tls_enabled = config.tls.enabled && config.tls.mode != TlsMode::Disabled;
     let acme_store: AcmeChallengeStore = Arc::new(DashMap::new());

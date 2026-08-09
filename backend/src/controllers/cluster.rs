@@ -98,6 +98,8 @@ impl ClusterController {
             talosconfig,
             kubeconfig,
             backup_retention: Some(DEFAULT_BACKUP_RETENTION),
+            backup_schedule_hours: None,
+            last_auto_backup_at: None,
             created_at: now,
             updated_at: now,
         };
@@ -500,6 +502,36 @@ impl ClusterController {
     /// optionally run Bootstrap with recover_etcd.
     ///
     /// Requires `confirm == true`. Prefer a maintenance window; this can break a healthy cluster.
+    pub async fn set_backup_schedule(
+        &self,
+        cluster_id: Uuid,
+        schedule_hours: Option<i32>,
+        retention: Option<i32>,
+    ) -> Result<(), AppError> {
+        if let Some(h) = schedule_hours {
+            if h < 0 {
+                return Err(AppError::InvalidInput(
+                    "backup_schedule_hours must be >= 0 (0 or null disables)".to_string(),
+                ));
+            }
+        }
+        if let Some(r) = retention {
+            if r < 1 {
+                return Err(AppError::InvalidInput(
+                    "backup_retention must be >= 1".to_string(),
+                ));
+            }
+        }
+        let hours = schedule_hours.and_then(|h| if h == 0 { None } else { Some(h) });
+        crate::db::repos::cluster::set_backup_schedule(
+            &self.pool,
+            cluster_id,
+            hours,
+            retention,
+        )
+        .await
+    }
+
     pub async fn restore_etcd_backup(
         &self,
         cluster_id: Uuid,
