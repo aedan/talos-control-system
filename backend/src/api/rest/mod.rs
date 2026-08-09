@@ -78,6 +78,10 @@ pub fn create_rest_router(state: AppState, branding: &BrandingConfig) -> Router 
             "/clusters/:id/backups/:backup_id/download",
             get(handlers::download_cluster_backup),
         )
+        .route(
+            "/clusters/:id/backups/:backup_id/restore",
+            post(handlers::restore_cluster_backup),
+        )
         .route("/clusters/:id/backups/:backup_id", delete(handlers::delete_cluster_backup))
         // Machine classes
         .route("/machine-classes", get(handlers::list_machine_classes))

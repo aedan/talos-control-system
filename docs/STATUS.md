@@ -22,7 +22,7 @@ Prefer **import + observe + limited Talos actions** over greenfield lifecycle cl
 | Config patches (store) | **Supported** | |
 | Config patches (apply via Talos) | **Supported** | Strategic merge; needs network to :50000 |
 | Etcd snapshot backup / download | **Supported** | Control-plane node; retention configurable |
-| Etcd restore | **Planned** | |
+| Etcd restore | **Supported** | EtcdRecover + optional Bootstrap; destructive; requires confirm |
 | Machine version probe | **Supported** | |
 | Machine reboot | **Supported** | |
 | Machine upgrade | **Supported** | Image string via API |

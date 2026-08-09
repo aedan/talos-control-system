@@ -56,8 +56,28 @@ PUT /api/machines/{id}
 | Apply config patches | `POST /api/clusters/{id}/config/apply` | optional `{ "dry_run": true }` |
 | Etcd snapshot | `POST /api/clusters/{id}/backups` | control-plane node |
 | Download snapshot | `GET /api/clusters/{id}/backups/{id}/download` | |
+| Restore snapshot | `POST /api/clusters/{id}/backups/{id}/restore` | see below |
 | Test Talos connectivity | `POST /api/clusters/{id}/talos/test` | |
 | Refresh nodes from K8s | `POST /api/clusters/{id}/refresh` | stored kubeconfig |
+
+### Etcd restore (disaster recovery)
+
+**Destructive.** Only use when recovering a broken control plane.
+
+```http
+POST /api/clusters/{id}/backups/{backupId}/restore
+{
+  "confirm": true,
+  "runBootstrap": true,
+  "skipHashCheck": false,
+  "machineId": null
+}
+```
+
+1. Uploads the snapshot to a control-plane node via Talos **EtcdRecover**  
+2. If `runBootstrap` is true, calls **Bootstrap** with `recover_etcd=true`  
+
+Prefer a maintenance window. Do not restore onto a healthy multi-node etcd without following Talos recovery docs.
 
 ## Backups
 

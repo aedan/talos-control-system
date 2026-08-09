@@ -1295,13 +1295,13 @@ pub async fn get_system_info(
             "clusterImport": true,
             "talosActions": true,
             "etcdBackup": true,
+            "etcdRestore": true,
             "configApply": true,
             "machineUpgrade": true,
             "clusterProvision": false,
             "siderolink": false,
             "saml": false,
             "postgres": false,
-            "etcdRestore": false,
         }),
     })
 }
@@ -1864,6 +1864,65 @@ pub async fn delete_cluster_backup(
     match repos::cluster_backup::delete(&state.db_pool, backup_id).await {
         Ok(()) => Ok(StatusCode::NO_CONTENT),
         Err(e) => Err((StatusCode::NOT_FOUND, e.to_string())),
+    }
+}
+
+/// Disaster recovery: upload etcd snapshot to a control-plane node, optional bootstrap recover.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreBackupRequest {
+    /// Must be true — guards against accidental clicks.
+    pub confirm: bool,
+    /// After EtcdRecover, call Bootstrap with recover_etcd (default true).
+    #[serde(default = "default_true")]
+    pub run_bootstrap: bool,
+    /// Pass recover_skip_hash_check to Bootstrap.
+    #[serde(default)]
+    pub skip_hash_check: bool,
+    /// Optional control-plane machine to target; otherwise first CP with address / talosconfig endpoint.
+    pub machine_id: Option<uuid::Uuid>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+pub async fn restore_cluster_backup(
+    State(state): State<AppState>,
+    Path((cluster_id, backup_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+    Json(payload): Json<RestoreBackupRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller
+        .restore_etcd_backup(
+            cluster_id,
+            backup_id,
+            payload.confirm,
+            payload.run_bootstrap,
+            payload.skip_hash_check,
+            payload.machine_id,
+        )
+        .await
+    {
+        Ok(result) => {
+            crate::utils::audit::log_action(
+                &state.db_pool,
+                "system",
+                "etcd_restore",
+                &cluster_id.to_string(),
+                &format!("backup={} result={}", backup_id, result),
+            )
+            .await;
+            Ok(Json(result))
+        }
+        Err(e) => {
+            let status = match &e {
+                crate::AppError::NotFound(_) => StatusCode::NOT_FOUND,
+                crate::AppError::InvalidInput(_) => StatusCode::BAD_REQUEST,
+                _ => StatusCode::BAD_GATEWAY,
+            };
+            Err((status, e.to_string()))
+        }
     }
 }
 

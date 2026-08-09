@@ -304,6 +304,84 @@ impl TalosClient {
         Ok(total)
     }
 
+    /// Upload an etcd snapshot to a control-plane node (EtcdRecover client stream).
+    /// The node stores the snapshot for a subsequent bootstrap with recover_etcd.
+    pub async fn etcd_recover(&self, snapshot_path: &Path) -> Result<u64, AppError> {
+        use talos_rust_client::common::Data;
+
+        let mut client = self.connect().await?;
+        let bytes = tokio::fs::read(snapshot_path).await.map_err(|e| {
+            AppError::Io(std::io::Error::new(
+                e.kind(),
+                format!("read snapshot {}: {}", snapshot_path.display(), e),
+            ))
+        })?;
+        if bytes.is_empty() {
+            return Err(AppError::InvalidInput("Snapshot file is empty".to_string()));
+        }
+
+        const CHUNK: usize = 256 * 1024;
+        let chunks: Vec<Data> = bytes
+            .chunks(CHUNK)
+            .map(|c| Data {
+                metadata: None,
+                bytes: c.to_vec(),
+            })
+            .collect();
+        let total = bytes.len() as u64;
+        let stream = futures_util::stream::iter(chunks);
+
+        client
+            .etcd_recover(stream)
+            .await
+            .map_err(|e| {
+                AppError::Grpc(format!(
+                    "EtcdRecover failed on {} (control-plane only): {}",
+                    self.endpoint, e
+                ))
+            })?;
+
+        info!(
+            endpoint = %self.endpoint,
+            path = %snapshot_path.display(),
+            bytes = total,
+            "Etcd snapshot uploaded (recover)"
+        );
+        Ok(total)
+    }
+
+    /// Bootstrap the control plane with etcd recovery from a previously uploaded snapshot.
+    /// Destructive: only use during disaster recovery on a control-plane node.
+    pub async fn bootstrap_recover_etcd(&self, skip_hash_check: bool) -> Result<(), AppError> {
+        use talos_rust_client::machine::BootstrapRequest;
+
+        let mut client = self.connect().await?;
+        let request = BootstrapRequest {
+            recover_etcd: true,
+            recover_skip_hash_check: skip_hash_check,
+        };
+        let response = client.bootstrap(request).await.map_err(|e| {
+            AppError::Grpc(format!(
+                "Bootstrap(recover_etcd) failed on {}: {}",
+                self.endpoint, e
+            ))
+        })?;
+
+        for msg in response.into_inner().messages {
+            if let Some(meta) = &msg.metadata {
+                if !meta.error.is_empty() {
+                    return Err(AppError::Grpc(format!(
+                        "Bootstrap recover error on {}: {}",
+                        self.endpoint, meta.error
+                    )));
+                }
+            }
+        }
+
+        info!(endpoint = %self.endpoint, "Bootstrap etcd recover initiated");
+        Ok(())
+    }
+
     /// Best-effort read of the running machine config from the node filesystem.
     pub async fn get_machine_config(&self) -> Result<String, AppError> {
         let mut client = self.connect().await?;
