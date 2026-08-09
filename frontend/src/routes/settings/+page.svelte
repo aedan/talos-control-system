@@ -56,7 +56,7 @@
       <span class="card-arrow">&rarr;</span>
     </a>
     
-    <div class="settings-card disabled">
+    <a href="/settings/audit-logs" class="settings-card">
       <div class="card-icon">
         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -67,10 +67,10 @@
       </div>
       <h3>Audit Logs</h3>
       <p>View and export system audit trail.</p>
-      <span class="card-badge">Coming Soon</span>
-    </div>
-    
-    <div class="settings-card disabled">
+      <span class="card-arrow">&rarr;</span>
+    </a>
+
+    <a href="/settings/system" class="settings-card">
       <div class="card-icon">
         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="12" cy="12" r="3"/>
@@ -79,8 +79,8 @@
       </div>
       <h3>System</h3>
       <p>Database, networking, and runtime configuration.</p>
-      <span class="card-badge">Coming Soon</span>
-    </div>
+      <span class="card-arrow">&rarr;</span>
+    </a>
   </div>
 </div>
 

@@ -122,3 +122,36 @@ pub fn get_permissions(role: &UserRole) -> Vec<Permission> {
 pub fn check_cluster_permission(user: &User, _cluster_id: &str, action: &Action) -> bool {
     check_permission(user, &Resource::Cluster, action)
 }
+
+pub fn check_permission_by_role(role: &str, resource: &Resource, action: &Action) -> bool {
+    match role {
+        "admin" => true,
+        "operator" => {
+            matches!(
+                (resource, action),
+                (Resource::Cluster, Action::Read)
+                | (Resource::Cluster, Action::Create)
+                | (Resource::Cluster, Action::Update)
+                | (Resource::Machine, Action::Read)
+                | (Resource::Machine, Action::Create)
+                | (Resource::Machine, Action::Update)
+                | (Resource::MachineSet, Action::Read)
+                | (Resource::MachineSet, Action::Create)
+                | (Resource::MachineSet, Action::Update)
+                | (Resource::Config, Action::Read)
+                | (Resource::Config, Action::Update)
+            )
+        },
+        "reader" | _ => {
+            matches!(
+                (resource, action),
+                (Resource::Cluster, Action::Read)
+                | (Resource::Machine, Action::Read)
+                | (Resource::MachineSet, Action::Read)
+                | (Resource::Config, Action::Read)
+                | (Resource::Branding, Action::Read)
+                | (Resource::User, Action::Read)
+            )
+        },
+    }
+}

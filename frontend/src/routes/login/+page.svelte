@@ -85,20 +85,13 @@
     </div>
     
     <div class="alt-auth">
-      <a href="/api/auth/oidc" class="alt-btn oidc">
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="10"/>
-          <path d="M12 6v6l4 2"/>
-        </svg>
-        Single Sign-On
-      </a>
-      <a href="/api/auth/saml" class="alt-btn saml">
+      <button type="button" class="alt-btn saml" disabled title="SAML authentication is not available">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
           <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
           <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
         </svg>
-        SAML
-      </a>
+        SAML (Not Available)
+      </button>
     </div>
   </div>
 </div>
@@ -220,11 +213,14 @@
     text-decoration: none;
   }
   
-  .alt-btn.oidc {
-    border-color: rgba(79, 139, 255, 0.3);
-  }
-  
   .alt-btn.saml {
     border-color: rgba(160, 160, 160, 0.3);
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  
+  .alt-btn.saml:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 </style>

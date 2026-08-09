@@ -463,6 +463,8 @@ pub struct UserInfoResponse {
     pub email: String,
     pub display_name: String,
     pub role: String,
+    pub is_active: bool,
+    pub last_login: Option<chrono::DateTime<chrono::Utc>>,
     pub auth_provider: String,
     pub password_needs_change: bool,
 }
@@ -483,6 +485,8 @@ pub async fn get_user_info(
         email: user.email,
         display_name: user.display_name,
         role: user.role,
+        is_active: user.is_active,
+        last_login: user.last_login,
         auth_provider: user.auth_provider,
         password_needs_change: user.password_needs_change,
     }))
@@ -513,6 +517,8 @@ pub async fn list_users(
             email: u.email,
             display_name: u.display_name,
             role: u.role,
+            is_active: u.is_active,
+            last_login: u.last_login,
             auth_provider: u.auth_provider,
             password_needs_change: u.password_needs_change,
         }).collect(),
@@ -968,4 +974,765 @@ pub async fn update_auth_config(
     Ok(Json(serde_json::json!({
         "message": "Auth config updated. Restart required to apply changes."
     })))
+}
+
+// ─── Audit Log Handlers ───────────────────────────────────────────────
+
+use crate::utils::audit::{AuditFilter, AuditEntry};
+
+#[derive(Serialize)]
+pub struct AuditLogResponse {
+    pub entries: Vec<AuditEntry>,
+    pub total: usize,
+    pub page: usize,
+    pub per_page: usize,
+}
+
+pub async fn get_audit_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(filter): Query<AuditFilter>,
+) -> Result<Json<AuditLogResponse>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+
+    if claims.role != "admin" {
+        return Err((StatusCode::FORBIDDEN, "Admin role required".to_string()));
+    }
+
+    let (entries, total) = crate::utils::audit::get_entries(&filter).await;
+
+    crate::utils::audit::log_action(
+        &claims.sub,
+        "read",
+        "audit_logs",
+        &format!("page={}, per_page={}", filter.page, filter.per_page),
+    );
+
+    Ok(Json(AuditLogResponse {
+        entries,
+        total,
+        page: filter.page,
+        per_page: filter.per_page,
+    }))
+}
+
+pub async fn clear_audit_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+
+    if claims.role != "admin" {
+        return Err((StatusCode::FORBIDDEN, "Admin role required".to_string()));
+    }
+
+    crate::utils::audit::clear_all().await;
+
+    crate::utils::audit::log_action(
+        &claims.sub,
+        "clear",
+        "audit_logs",
+        "All audit logs cleared",
+    );
+
+    Ok(StatusCode::OK)
+}
+
+// ─── System Info Handler ──────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct SystemInfoResponse {
+    pub version: String,
+    pub commit: String,
+    pub build_time: String,
+    pub database_backend: String,
+    pub database_size_bytes: Option<u64>,
+    pub uptime_seconds: u64,
+    pub server_bind_addr: String,
+    pub http_port: u16,
+    pub grpc_port: u16,
+    pub disk_usage: DiskUsageResponse,
+}
+
+#[derive(Serialize)]
+pub struct DiskUsageResponse {
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub used_bytes: u64,
+}
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static START_TIME: AtomicU64 = AtomicU64::new(0);
+
+pub fn record_start_time() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    START_TIME.store(duration, Ordering::Relaxed);
+}
+
+pub fn get_uptime_seconds() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let start = START_TIME.load(Ordering::Relaxed);
+    if start == 0 { now } else { now.saturating_sub(start) }
+}
+
+pub async fn get_system_info(
+    State(state): State<AppState>,
+) -> Json<SystemInfoResponse> {
+    let db_config = &state.config.database;
+    let db_backend = db_config.backend.to_string();
+
+    let db_size = if db_config.backend == crate::config::DatabaseBackend::Sqlite {
+        std::fs::metadata(&db_config.sqlite_path)
+            .ok()
+            .map(|m| m.len())
+    } else {
+        None
+    };
+
+    let disk_usage = get_disk_usage(&db_config.sqlite_path);
+
+    Json(SystemInfoResponse {
+        version: crate::utils::VERSION_INFO.version.clone(),
+        commit: crate::utils::VERSION_INFO.commit.clone(),
+        build_time: crate::utils::VERSION_INFO.build_time.clone(),
+        database_backend: db_backend,
+        database_size_bytes: db_size,
+        uptime_seconds: get_uptime_seconds(),
+        server_bind_addr: state.config.server.bind_addr.clone(),
+        http_port: state.config.server.http_port,
+        grpc_port: state.config.server.grpc_port,
+        disk_usage,
+    })
+}
+
+fn get_disk_usage(path: &str) -> DiskUsageResponse {
+    let metadata = std::fs::metadata(path).ok();
+    let total = metadata.as_ref().and_then(|m| {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let dev = m.dev();
+            get_fs_usage_linux(dev)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let dev = m.dev();
+            get_fs_usage_macos(dev)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = dev;
+            None
+        }
+    }).unwrap_or(DiskUsageResponse {
+        total_bytes: 0,
+        free_bytes: 0,
+        used_bytes: 0,
+    });
+    total
+}
+
+#[cfg(target_os = "linux")]
+fn get_fs_usage_linux(dev: u64) -> Option<DiskUsageResponse> {
+    use std::fs::read_dir;
+    let statfs_path = format!("/proc/self/mountinfo");
+    let content = std::fs::read_to_string(&statfs_path).ok()?;
+    
+    for line in content.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() > 5 {
+            let major_minor = parts[4].parse::<u64>().ok()?;
+            if major_minor == dev {
+                let mount_point = parts[5];
+                let path = std::path::Path::new(mount_point);
+                if let Ok(dir) = read_dir(path) {
+                    let mut total = 0u64;
+                    let mut free = 0u64;
+                    for entry in dir.flatten() {
+                        if let Ok(meta) = entry.metadata() {
+                            if meta.is_file() {
+                                total += meta.len();
+                            }
+                        }
+                    }
+                    return Some(DiskUsageResponse {
+                        total_bytes: total,
+                        free_bytes: free,
+                        used_bytes: total,
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn get_fs_usage_macos(dev: u64) -> Option<DiskUsageResponse> {
+    use std::os::unix::fs::MetadataExt;
+    let path = std::path::Path::new("/");
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.dev() == dev {
+        Some(DiskUsageResponse {
+            total_bytes: meta.len(),
+            free_bytes: 0,
+            used_bytes: meta.len(),
+        })
+    } else {
+        None
+    }
+}
+
+// ─── User CRUD Handlers ───────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct CreateUserRequest {
+    pub email: String,
+    pub display_name: String,
+    pub role: String,
+    pub password: Option<String>,
+    #[serde(default)]
+    pub is_active: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct CreateUserResponse {
+    pub id: Uuid,
+    pub email: String,
+    pub display_name: String,
+    pub role: String,
+    pub is_active: bool,
+}
+
+pub async fn create_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<CreateUserRequest>,
+) -> Result<(StatusCode, Json<CreateUserResponse>), (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+
+    if claims.role != "admin" {
+        return Err((StatusCode::FORBIDDEN, "Admin role required".to_string()));
+    }
+
+    let password_hash = if let Some(ref pw) = req.password {
+        Some(crate::auth::local::hash_password(pw)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?)
+    } else {
+        None
+    };
+
+    let now = chrono::Utc::now();
+    let user = crate::db::models::auth::User {
+        id: uuid::Uuid::new_v4(),
+        email: req.email.clone(),
+        display_name: req.display_name.clone(),
+        role: req.role.clone(),
+        is_active: req.is_active.unwrap_or(true),
+        password_hash,
+        auth_provider: "local".to_string(),
+        ldap_dn: None,
+        password_needs_change: req.password.is_some(),
+        last_login: None,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let created = repos::user::upsert(&state.db_pool, &user)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    crate::utils::audit::log_action(
+        &claims.sub,
+        "create_user",
+        &created.email,
+        &format!("Role: {}", created.role),
+    );
+
+    Ok((StatusCode::CREATED, Json(CreateUserResponse {
+        id: created.id,
+        email: created.email,
+        display_name: created.display_name,
+        role: created.role,
+        is_active: created.is_active,
+    })))
+}
+
+pub async fn get_user(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<UserInfoResponse>, (StatusCode, String)> {
+    let user = repos::user::get_by_id(&state.db_pool, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    Ok(Json(UserInfoResponse {
+        id: user.id,
+        email: user.email,
+        display_name: user.display_name,
+        role: user.role,
+        is_active: user.is_active,
+        last_login: user.last_login,
+        auth_provider: user.auth_provider,
+        password_needs_change: user.password_needs_change,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateUserRequest {
+    pub display_name: Option<String>,
+    pub role: Option<String>,
+    #[serde(default)]
+    pub is_active: Option<bool>,
+    pub password: Option<String>,
+}
+
+pub async fn update_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateUserRequest>,
+) -> Result<Json<UserInfoResponse>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+
+    if claims.role != "admin" {
+        return Err((StatusCode::FORBIDDEN, "Admin role required".to_string()));
+    }
+
+    let mut user = repos::user::get_by_id(&state.db_pool, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    let mut changes = Vec::new();
+
+    if let Some(ref name) = req.display_name {
+        changes.push(format!("display_name: {} -> {}", user.display_name, name));
+        user.display_name = name.clone();
+    }
+    if let Some(ref role) = req.role {
+        changes.push(format!("role: {} -> {}", user.role, role));
+        user.role = role.clone();
+    }
+    if let Some(active) = req.is_active {
+        if user.is_active != active {
+            changes.push(format!("is_active: {} -> {}", user.is_active, active));
+            user.is_active = active;
+        }
+    }
+    if let Some(ref pw) = req.password {
+        changes.push("password changed".to_string());
+        user.password_hash = Some(crate::auth::local::hash_password(pw)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?);
+    }
+
+    user.updated_at = chrono::Utc::now();
+
+    let updated = repos::user::upsert(&state.db_pool, &user)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    crate::utils::audit::log_action(
+        &claims.sub,
+        "update_user",
+        &updated.email,
+        &changes.join(", "),
+    );
+
+    Ok(Json(UserInfoResponse {
+        id: updated.id,
+        email: updated.email,
+        display_name: updated.display_name,
+        role: updated.role,
+        is_active: updated.is_active,
+        last_login: updated.last_login,
+        auth_provider: updated.auth_provider,
+        password_needs_change: updated.password_needs_change,
+    }))
+}
+
+pub async fn delete_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+
+    if claims.role != "admin" {
+        return Err((StatusCode::FORBIDDEN, "Admin role required".to_string()));
+    }
+
+    let user = repos::user::get_by_id(&state.db_pool, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    // Don't allow deleting the last admin
+    let admins: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM users WHERE role = 'admin'"
+    )
+    .fetch_one(&state.db_pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if user.role == "admin" && admins <= 1 {
+        return Err((StatusCode::BAD_REQUEST, "Cannot delete the last admin user".to_string()));
+    }
+
+    sqlx::query("DELETE FROM users WHERE id = ?")
+        .bind(id)
+        .execute(&state.db_pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    crate::utils::audit::log_action(
+        &claims.sub,
+        "delete_user",
+        &user.email,
+        &format!("User {} deleted", user.display_name),
+    );
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── Cluster Sub-routes ────────────────────────────────────────────────
+
+pub async fn get_cluster_nodes(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<uuid::Uuid>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    match repos::cluster::get(&state.db_pool, cluster_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err((StatusCode::NOT_FOUND, "Cluster not found".to_string())),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+
+    match repos::machine::list_by_cluster(&state.db_pool, cluster_id).await {
+        Ok(machines) => {
+            let vals: Result<Vec<_>, _> = machines.into_iter().map(serde_json::to_value).collect();
+            match vals {
+                Ok(v) => Ok(Json(v)),
+                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+            }
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+pub async fn get_cluster_machines(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<uuid::Uuid>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    match repos::cluster::get(&state.db_pool, cluster_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err((StatusCode::NOT_FOUND, "Cluster not found".to_string())),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+
+    match repos::machine::list_by_cluster(&state.db_pool, cluster_id).await {
+        Ok(machines) => {
+            let mut result = Vec::new();
+            for machine in machines {
+                let mut map = serde_json::Map::new();
+                let mval = serde_json::to_value(&machine)
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                if let Some(obj) = mval.as_object() {
+                    for (k, v) in obj {
+                        map.insert(k.clone(), v.clone());
+                    }
+                }
+                map.insert("cluster_id".to_string(), serde_json::Value::String(cluster_id.to_string()));
+                result.push(serde_json::Value::Object(map));
+            }
+            Ok(Json(result))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+// ─── Config Patches ───────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct CreateConfigPatchRequest {
+    pub path: String,
+    pub value: String,
+    #[serde(default)]
+    pub priority: i32,
+}
+
+pub async fn list_config_patches(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<uuid::Uuid>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    match repos::cluster::get(&state.db_pool, cluster_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err((StatusCode::NOT_FOUND, "Cluster not found".to_string())),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+
+    match repos::config_patch::list_by_cluster(&state.db_pool, cluster_id).await {
+        Ok(patches) => {
+            let vals: Result<Vec<_>, _> = patches.into_iter().map(serde_json::to_value).collect();
+            match vals {
+                Ok(v) => Ok(Json(v)),
+                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+            }
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+pub async fn create_config_patch(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<uuid::Uuid>,
+    Json(payload): Json<CreateConfigPatchRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    match repos::cluster::get(&state.db_pool, cluster_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err((StatusCode::NOT_FOUND, "Cluster not found".to_string())),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+
+    let patch = crate::db::models::config_patch::ConfigPatch::new(
+        cluster_id,
+        payload.path,
+        payload.value,
+        payload.priority,
+    );
+
+    match repos::config_patch::create(&state.db_pool, &patch).await {
+        Ok(p) => match serde_json::to_value(p) {
+            Ok(v) => Ok((StatusCode::CREATED, Json(v))),
+            Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        },
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+pub async fn delete_config_patch(
+    State(state): State<AppState>,
+    Path((cluster_id, patch_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    match repos::cluster::get(&state.db_pool, cluster_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err((StatusCode::NOT_FOUND, "Cluster not found".to_string())),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+
+    match repos::config_patch::delete(&state.db_pool, patch_id).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => Err((StatusCode::NOT_FOUND, e.to_string())),
+    }
+}
+
+// ─── Cluster Backups ───────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct CreateBackupRequest {
+    pub name: String,
+}
+
+pub async fn list_cluster_backups(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<uuid::Uuid>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    match repos::cluster::get(&state.db_pool, cluster_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err((StatusCode::NOT_FOUND, "Cluster not found".to_string())),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+
+    match repos::cluster_backup::list_by_cluster(&state.db_pool, cluster_id).await {
+        Ok(backups) => {
+            let vals: Result<Vec<_>, _> = backups.into_iter().map(serde_json::to_value).collect();
+            match vals {
+                Ok(v) => Ok(Json(v)),
+                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+            }
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+pub async fn create_cluster_backup(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<uuid::Uuid>,
+    Json(payload): Json<CreateBackupRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    match repos::cluster::get(&state.db_pool, cluster_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err((StatusCode::NOT_FOUND, "Cluster not found".to_string())),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+
+    let backup = crate::db::models::cluster_backup::ClusterBackup::new(
+        cluster_id,
+        payload.name,
+    );
+
+    match repos::cluster_backup::create(&state.db_pool, &backup).await {
+        Ok(b) => match serde_json::to_value(b) {
+            Ok(v) => Ok((StatusCode::CREATED, Json(v))),
+            Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        },
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+pub async fn download_cluster_backup(
+    State(state): State<AppState>,
+    Path((cluster_id, backup_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    match repos::cluster::get(&state.db_pool, cluster_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err((StatusCode::NOT_FOUND, "Cluster not found".to_string())),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+
+    match repos::cluster_backup::get(&state.db_pool, backup_id).await {
+        Ok(Some(_)) => {
+            Ok(Json(serde_json::json!({
+                "download_url": format!("/api/clusters/{}/backups/{}", cluster_id, backup_id),
+                "message": "Download URL provided",
+            })))
+        }
+        Ok(None) => Err((StatusCode::NOT_FOUND, "Backup not found".to_string())),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+pub async fn delete_cluster_backup(
+    State(state): State<AppState>,
+    Path((cluster_id, backup_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    match repos::cluster::get(&state.db_pool, cluster_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err((StatusCode::NOT_FOUND, "Cluster not found".to_string())),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+
+    match repos::cluster_backup::delete(&state.db_pool, backup_id).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => Err((StatusCode::NOT_FOUND, e.to_string())),
+    }
+}
+
+// ─── Machine Classes ───────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct CreateMachineClassRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub min_cpu: i32,
+    pub min_memory: i64,
+    pub min_disk: i64,
+    pub arch: String,
+    #[serde(default)]
+    pub secure_boot: bool,
+    #[serde(default)]
+    pub allowed_roles: Vec<String>,
+}
+
+pub async fn create_machine_class(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateMachineClassRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let mc = crate::db::models::machine_class::MachineClass::new(
+        payload.name,
+        payload.description,
+        payload.min_cpu,
+        payload.min_memory,
+        payload.min_disk,
+        payload.arch,
+        payload.secure_boot,
+        payload.allowed_roles,
+    );
+
+    match repos::machine_class::create(&state.db_pool, &mc).await {
+        Ok(c) => match serde_json::to_value(c) {
+            Ok(v) => Ok((StatusCode::CREATED, Json(v))),
+            Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        },
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+pub async fn list_machine_classes(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    match repos::machine_class::list(&state.db_pool).await {
+        Ok(classes) => {
+            let vals: Result<Vec<_>, _> = classes.into_iter().map(serde_json::to_value).collect();
+            match vals {
+                Ok(v) => Ok(Json(v)),
+                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+            }
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+pub async fn get_machine_class(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    match repos::machine_class::get(&state.db_pool, id).await {
+        Ok(Some(mc)) => match serde_json::to_value(mc) {
+            Ok(v) => Ok(Json(v)),
+            Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        },
+        Ok(None) => Err((StatusCode::NOT_FOUND, "Machine class not found".to_string())),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+pub async fn update_machine_class(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(payload): Json<CreateMachineClassRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    match repos::machine_class::get(&state.db_pool, id).await {
+        Ok(Some(mut mc)) => {
+            mc.name = payload.name;
+            mc.description = payload.description;
+            mc.min_cpu = payload.min_cpu;
+            mc.min_memory = payload.min_memory;
+            mc.min_disk = payload.min_disk;
+            mc.arch = payload.arch;
+            mc.secure_boot = payload.secure_boot;
+            mc.allowed_roles = payload.allowed_roles;
+            mc.updated_at = chrono::Utc::now();
+            match repos::machine_class::update(&state.db_pool, &mc).await {
+                Ok(c) => match serde_json::to_value(c) {
+                    Ok(v) => Ok(Json(v)),
+                    Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+                },
+                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+            }
+        }
+        Ok(None) => Err((StatusCode::NOT_FOUND, "Machine class not found".to_string())),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+pub async fn delete_machine_class(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    match repos::machine_class::delete(&state.db_pool, id).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => Err((StatusCode::NOT_FOUND, e.to_string())),
+    }
 }

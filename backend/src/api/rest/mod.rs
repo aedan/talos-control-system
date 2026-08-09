@@ -1,61 +1,15 @@
 use axum::Router;
-use axum::body::Body;
-use axum::extract::Request;
 use axum::middleware::from_fn;
 use axum::routing::{delete, get, post, put};
 use tower_http::cors::{AllowHeaders, AllowMethods, Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::auth::jwt::verify_jwt;
 use crate::static_server;
 use crate::AppState;
 use crate::config::BrandingConfig;
 
 pub mod handlers;
-
-async fn auth_middleware(request: Request, next: axum::middleware::Next) -> axum::response::Response {
-    let headers = request.headers();
-
-    if let Some(auth_header) = headers.get(axum::http::header::AUTHORIZATION) {
-        let auth_str = match auth_header.to_str() {
-            Ok(s) => s,
-            Err(_) => {
-                return axum::response::Response::builder()
-                    .status(axum::http::StatusCode::UNAUTHORIZED)
-                    .header(axum::http::header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"error":"Invalid Authorization header"}"#))
-                    .unwrap();
-            }
-        };
-
-        let token = match auth_str.strip_prefix("Bearer ") {
-            Some(t) => t,
-            None => {
-                return axum::response::Response::builder()
-                    .status(axum::http::StatusCode::UNAUTHORIZED)
-                    .header(axum::http::header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"error":"Missing Bearer prefix"}"#))
-                    .unwrap();
-            }
-        };
-
-        if let Err(e) = verify_jwt(token) {
-            return axum::response::Response::builder()
-                .status(axum::http::StatusCode::UNAUTHORIZED)
-                .header(axum::http::header::CONTENT_TYPE, "application/json")
-                .body(Body::from(format!(r#"{{"error":"{}"}}"#, e)))
-                .unwrap();
-        }
-    } else {
-        return axum::response::Response::builder()
-            .status(axum::http::StatusCode::UNAUTHORIZED)
-            .header(axum::http::header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"error":"Missing Authorization header"}"#))
-            .unwrap();
-    }
-
-    next.run(request).await
-}
+pub mod middleware;
 
 pub fn create_rest_router(state: AppState, branding: &BrandingConfig) -> Router {
     let cors = CorsLayer::new()
@@ -75,7 +29,11 @@ pub fn create_rest_router(state: AppState, branding: &BrandingConfig) -> Router 
     let protected_routes = Router::new()
         .route("/auth/me", get(handlers::get_user_info))
         .route("/auth/password", post(handlers::change_password))
-        .route("/auth/users", get(handlers::list_users))
+        .route("/users", get(handlers::list_users))
+        .route("/users", post(handlers::create_user))
+        .route("/users/:id", get(handlers::get_user))
+        .route("/users/:id", put(handlers::update_user))
+        .route("/users/:id", delete(handlers::delete_user))
         .route("/settings/certificates/status", get(handlers::get_cert_status))
         .route("/settings/certificates/config", put(handlers::update_cert_config))
         .route("/settings/certificates/renew", post(handlers::renew_certificate))
@@ -96,7 +54,7 @@ pub fn create_rest_router(state: AppState, branding: &BrandingConfig) -> Router 
         .route("/machines", get(handlers::list_machines))
         .route("/machines/:id", get(handlers::get_machine))
         .route("/machines/:id", delete(handlers::delete_machine))
-        .layer(from_fn(auth_middleware));
+        .layer(from_fn(middleware::rbac_middleware));
 
     let acme_routes = Router::new()
         .route("/.well-known/acme-challenge/*challenge", get(handlers::health_check));
