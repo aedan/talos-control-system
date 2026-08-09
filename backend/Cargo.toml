@@ -75,7 +75,6 @@ rustls-pemfile = "2"
 # DNS providers
 cloudflare = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-tempfile = "3"
 http = "1"
 
 [build-dependencies]

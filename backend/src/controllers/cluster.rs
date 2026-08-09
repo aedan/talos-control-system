@@ -412,11 +412,11 @@ impl ClusterController {
         }
 
         let machines = crate::db::repos::machine::list_by_cluster(&self.pool, cluster_id).await?;
-        let mut applied = Vec::new();
-        let mut errors = Vec::new();
-        let mut documents = Vec::new();
+        let creds = self.load_creds(&cluster)?;
 
-        for machine in &machines {
+        // Build per-machine work items first (CPU-bound YAML only).
+        let mut work = Vec::new();
+        for machine in machines {
             let machine_patches: Vec<(String, String, i32)> = patches
                 .iter()
                 .filter(|p| p.machine_id.is_none() || p.machine_id == Some(machine.id))
@@ -425,34 +425,72 @@ impl ClusterController {
             if machine_patches.is_empty() {
                 continue;
             }
-
-            // Strategic-merge style docs (same shape as `talosctl patch mc --patch`).
             let patch_preview = build_patch_documents(&machine_patches)?;
+            work.push((machine, patch_preview));
+        }
 
-            let client = match self.client_for_machine(&cluster, machine).await {
-                Ok(c) => c,
-                Err(e) => {
-                    errors.push(format!("{}: {}", machine.system_uuid, e));
-                    continue;
+        if work.is_empty() {
+            return Err(AppError::InvalidInput(
+                "No config patches apply to any machine".to_string(),
+            ));
+        }
+
+        let futs: Vec<_> = work
+            .into_iter()
+            .map(|(machine, patch_preview)| {
+                let creds = creds.clone();
+                async move {
+                    let document = serde_json::json!({
+                        "machineId": machine.id,
+                        "address": machine.address,
+                        "patchPreview": patch_preview,
+                    });
+                    let client = match TalosClient::for_machine(
+                        if machine.address.is_empty() {
+                            None
+                        } else {
+                            Some(machine.address.as_str())
+                        },
+                        &creds,
+                    ) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            return (
+                                document,
+                                Err(format!("{}: {}", machine.system_uuid, e)),
+                            );
+                        }
+                    };
+                    match client.apply_config_patch(&patch_preview, dry_run).await {
+                        Ok(()) => {
+                            let tag = if dry_run { "dry-run" } else { "applied" };
+                            (
+                                document,
+                                Ok(format!(
+                                    "{} {} ({})",
+                                    machine.system_uuid, tag, machine.address
+                                )),
+                            )
+                        }
+                        Err(e) => (
+                            document,
+                            Err(format!("{}: {}", machine.system_uuid, e)),
+                        ),
+                    }
                 }
-            };
+            })
+            .collect();
 
-            documents.push(serde_json::json!({
-                "machineId": machine.id,
-                "address": machine.address,
-                "patchPreview": patch_preview,
-            }));
+        let outcomes = futures_util::future::join_all(futs).await;
+        let mut applied = Vec::new();
+        let mut errors = Vec::new();
+        let mut documents = Vec::new();
 
-            // Use talosctl patch mc (handles multi-document MachineConfigs on Talos 1.13+).
-            match client.apply_config_patch(&patch_preview, dry_run).await {
-                Ok(()) => {
-                    let tag = if dry_run { "dry-run" } else { "applied" };
-                    applied.push(format!(
-                        "{} {} ({})",
-                        machine.system_uuid, tag, machine.address
-                    ));
-                }
-                Err(e) => errors.push(format!("{}: {}", machine.system_uuid, e)),
+        for (doc, result) in outcomes {
+            documents.push(doc);
+            match result {
+                Ok(line) => applied.push(line),
+                Err(e) => errors.push(e),
             }
         }
 
@@ -696,16 +734,11 @@ impl ClusterController {
     }
 
     async fn refresh_talos_versions(&self, cluster_id: Uuid) -> Result<(), AppError> {
-        let machines = crate::db::repos::machine::list_by_cluster(&self.pool, cluster_id).await?;
-        for m in machines {
-            if let Err(e) = self.machine_version(m.id).await {
-                tracing::debug!(machine = %m.system_uuid, error = %e, "version probe failed");
-            }
-        }
+        let _ = self.probe_cluster_talos_versions(cluster_id).await;
         Ok(())
     }
 
-    /// Probe Talos version on every machine with an address; update inventory +
+    /// Probe Talos version on every machine in parallel; update inventory +
     /// cluster `talos_version` summary. Returns ok/fail counts.
     pub async fn probe_cluster_talos_versions(
         &self,
@@ -716,34 +749,50 @@ impl ClusterController {
             .ok_or_else(|| AppError::NotFound(format!("Cluster {} not found", cluster_id)))?;
 
         let machines = crate::db::repos::machine::list_by_cluster(&self.pool, cluster_id).await?;
+
+        let futs: Vec<_> = machines
+            .into_iter()
+            .map(|m| {
+                let pool = self.pool.clone();
+                let sqlite_path = self.sqlite_path.clone();
+                let jwt_secret = self.jwt_secret.clone();
+                async move {
+                    let ctrl = ClusterController::with_context(pool, sqlite_path, jwt_secret);
+                    let machine_id = m.id;
+                    let address = m.address.clone();
+                    match ctrl.machine_version(machine_id).await {
+                        Ok(v) => serde_json::json!({
+                            "machineId": machine_id,
+                            "address": address,
+                            "ok": true,
+                            "talosVersion": v,
+                        }),
+                        Err(e) => serde_json::json!({
+                            "machineId": machine_id,
+                            "address": address,
+                            "ok": false,
+                            "error": e.to_string(),
+                        }),
+                    }
+                }
+            })
+            .collect();
+
+        let results = futures_util::future::join_all(futs).await;
         let mut ok = 0u32;
         let mut failed = 0u32;
         let mut versions: Vec<String> = Vec::new();
-        let mut results = Vec::new();
 
-        for m in machines {
-            match self.machine_version(m.id).await {
-                Ok(v) => {
-                    ok += 1;
-                    if !versions.iter().any(|x| x == &v) {
-                        versions.push(v.clone());
+        for r in &results {
+            if r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                ok += 1;
+                if let Some(v) = r.get("talosVersion").and_then(|v| v.as_str()) {
+                    if !versions.iter().any(|x| x == v) {
+                        versions.push(v.to_string());
                     }
-                    results.push(serde_json::json!({
-                        "machineId": m.id,
-                        "address": m.address,
-                        "ok": true,
-                        "talosVersion": v,
-                    }));
                 }
-                Err(e) => {
-                    failed += 1;
-                    results.push(serde_json::json!({
-                        "machineId": m.id,
-                        "address": m.address,
-                        "ok": false,
-                        "error": e.to_string(),
-                    }));
-                }
+            } else {
+                failed += 1;
             }
         }
 
