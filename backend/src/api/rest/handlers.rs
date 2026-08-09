@@ -43,7 +43,7 @@ pub struct BrandingResponse {
 pub async fn get_branding(
     State(state): State<AppState>,
 ) -> Json<BrandingResponse> {
-    let branding = state.branding.get_branding("default");
+    let branding = state.branding.get_branding("default").await;
 
     Json(BrandingResponse {
         name: branding.name,
@@ -107,7 +107,7 @@ pub async fn update_branding(
 pub async fn get_branding_css(
     State(state): State<AppState>,
 ) -> (StatusCode, String) {
-    let branding = state.branding.get_branding("default");
+    let branding = state.branding.get_branding("default").await;
     let css = crate::branding::theme::generate_css_variables(&branding);
 
     (StatusCode::OK, css)
@@ -116,7 +116,7 @@ pub async fn get_branding_css(
 pub async fn get_logo(
     State(state): State<AppState>,
 ) -> (StatusCode, axum::http::HeaderMap, String) {
-    let branding = state.branding.get_branding("default");
+    let branding = state.branding.get_branding("default").await;
     let svg = crate::branding::generator::generate_logo_svg(&branding);
 
     let mut headers = axum::http::HeaderMap::new();
@@ -128,7 +128,7 @@ pub async fn get_logo(
 pub async fn get_favicon(
     State(state): State<AppState>,
 ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
-    let branding = state.branding.get_branding("default");
+    let branding = state.branding.get_branding("default").await;
     let png = crate::branding::generator::generate_favicon_png(&branding);
 
     let mut headers = axum::http::HeaderMap::new();
