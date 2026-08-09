@@ -462,8 +462,20 @@ impl TalosClient {
         Ok(())
     }
 
-    /// Best-effort read of the running machine config from the node filesystem.
+    /// Best-effort read of the running machine config.
+    ///
+    /// On modern Talos the live config is a COSI resource (`MachineConfigs`), not a
+    /// file under `/system/state`. Prefer `talosctl get mc` when available; fall back
+    /// to the historical file path for older images.
     pub async fn get_machine_config(&self) -> Result<String, AppError> {
+        match self.get_machine_config_via_talosctl().await {
+            Ok(s) if !s.trim().is_empty() => return Ok(s),
+            Ok(_) => {}
+            Err(e) => {
+                warn!(endpoint = %self.endpoint, error = %e, "talosctl get mc failed; trying file read");
+            }
+        }
+
         let mut client = self.connect().await?;
         let request = talos_rust_client::machine::ReadRequest {
             path: "/system/state/config.yaml".to_string(),
@@ -489,6 +501,151 @@ impl TalosClient {
 
         String::from_utf8(buf).map_err(|e| {
             AppError::Internal(format!("Machine config is not valid UTF-8: {}", e))
+        })
+    }
+
+    /// Apply a strategic-merge style config patch (same as `talosctl patch mc`).
+    ///
+    /// Partial YAML docs are not accepted by `ApplyConfiguration` alone on Talos 1.13+
+    /// multi-document configs; `talosctl patch mc` merges against the live resource.
+    pub async fn apply_config_patch(&self, patch_yaml: &str, dry_run: bool) -> Result<(), AppError> {
+        let node = self.node_host()?;
+        let (talosconfig_path, patch_path, _tmpdir) = self.write_talosctl_workspace(patch_yaml)?;
+
+        let mut cmd = tokio::process::Command::new("talosctl");
+        cmd.arg("--talosconfig")
+            .arg(&talosconfig_path)
+            .arg("-n")
+            .arg(&node)
+            .arg("patch")
+            .arg("mc")
+            .arg("--patch")
+            .arg(format!("@{}", patch_path.display()))
+            .arg("--mode")
+            .arg("no-reboot");
+        if dry_run {
+            cmd.arg("--dry-run");
+        }
+
+        let output = cmd.output().await.map_err(|e| {
+            AppError::Internal(format!(
+                "Failed to run talosctl (required for config patch apply): {}",
+                e
+            ))
+        })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(AppError::Grpc(format!(
+                "talosctl patch mc failed on {}: {}{}",
+                self.endpoint,
+                stderr.trim(),
+                if stdout.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", stdout.trim())
+                }
+            )));
+        }
+
+        info!(
+            endpoint = %self.endpoint,
+            dry_run,
+            "Config patch applied via talosctl patch mc"
+        );
+        Ok(())
+    }
+
+    fn node_host(&self) -> Result<String, AppError> {
+        let s = self
+            .endpoint
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
+        let host = s
+            .split(['/', '?'])
+            .next()
+            .unwrap_or(s)
+            .split(':')
+            .next()
+            .unwrap_or(s)
+            .to_string();
+        if host.is_empty() {
+            return Err(AppError::InvalidInput(format!(
+                "Cannot derive node host from endpoint {}",
+                self.endpoint
+            )));
+        }
+        Ok(host)
+    }
+
+    /// Write a temporary talosconfig + optional patch file for talosctl.
+    /// Returns (talosconfig_path, patch_path, tempdir_guard).
+    fn write_talosctl_workspace(
+        &self,
+        patch_yaml: &str,
+    ) -> Result<(PathBuf, PathBuf, tempfile::TempDir), AppError> {
+        use base64::Engine;
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().map_err(|e| {
+            AppError::Io(std::io::Error::new(
+                e.kind(),
+                format!("create temp dir for talosctl: {}", e),
+            ))
+        })?;
+
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let node = self.node_host()?;
+        // Minimal single-context talosconfig for this node.
+        let talosconfig = format!(
+            "context: tcs\ncontexts:\n  tcs:\n    endpoints:\n      - {node}\n    nodes:\n      - {node}\n    ca: {ca}\n    crt: {crt}\n    key: {key}\n",
+            node = node,
+            ca = b64(&self.ca),
+            crt = b64(&self.crt),
+            key = b64(&self.key),
+        );
+
+        let talosconfig_path = dir.path().join("talosconfig");
+        let mut f = std::fs::File::create(&talosconfig_path).map_err(AppError::Io)?;
+        f.write_all(talosconfig.as_bytes()).map_err(AppError::Io)?;
+
+        let patch_path = dir.path().join("patch.yaml");
+        let mut p = std::fs::File::create(&patch_path).map_err(AppError::Io)?;
+        p.write_all(patch_yaml.as_bytes()).map_err(AppError::Io)?;
+
+        Ok((talosconfig_path, patch_path, dir))
+    }
+
+    async fn get_machine_config_via_talosctl(&self) -> Result<String, AppError> {
+        let node = self.node_host()?;
+        let (talosconfig_path, _patch_path, _tmpdir) = self.write_talosctl_workspace("")?;
+
+        let output = tokio::process::Command::new("talosctl")
+            .arg("--talosconfig")
+            .arg(&talosconfig_path)
+            .arg("-n")
+            .arg(&node)
+            .arg("get")
+            .arg("mc")
+            .arg("-o")
+            .arg("jsonpath={.spec}")
+            .output()
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!("Failed to run talosctl get mc: {}", e))
+            })?;
+
+        if !output.status.success() {
+            return Err(AppError::Grpc(format!(
+                "talosctl get mc failed on {}: {}",
+                self.endpoint,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+
+        String::from_utf8(output.stdout).map_err(|e| {
+            AppError::Internal(format!("talosctl get mc returned non-UTF8: {}", e))
         })
     }
 
@@ -529,7 +686,7 @@ pub fn path_value_to_yaml_patch(path: &str, value: &str) -> Result<String, AppEr
     })
 }
 
-/// Merge multiple path/value patches into a multi-document YAML string for ApplyConfiguration.
+/// Merge multiple path/value patches into a multi-document YAML string (preview/debug).
 pub fn build_patch_documents(
     patches: &[(String, String, i32)],
 ) -> Result<String, AppError> {
@@ -542,6 +699,53 @@ pub fn build_patch_documents(
     }
 
     Ok(docs.join("---\n"))
+}
+
+/// Deep-merge YAML mappings (patch wins on scalars/sequences).
+/// Used to turn path/value patches into a full machine config for ApplyConfiguration.
+pub fn deep_merge_yaml(base: &mut serde_yaml::Value, patch: serde_yaml::Value) {
+    match (base, patch) {
+        (serde_yaml::Value::Mapping(base_map), serde_yaml::Value::Mapping(patch_map)) => {
+            for (k, v) in patch_map {
+                if let Some(existing) = base_map.get_mut(&k) {
+                    deep_merge_yaml(existing, v);
+                } else {
+                    base_map.insert(k, v);
+                }
+            }
+        }
+        (base_slot, patch_val) => {
+            *base_slot = patch_val;
+        }
+    }
+}
+
+/// Apply ordered path/value patches onto a full machine-config YAML document.
+///
+/// Talos `ApplyConfiguration` validates a **full** config. Strategic-merge style
+/// partial docs (as used by `talosctl patch mc`) must be merged client-side first.
+pub fn merge_patches_into_machine_config(
+    current_config_yaml: &str,
+    patches: &[(String, String, i32)],
+) -> Result<String, AppError> {
+    let mut base: serde_yaml::Value = serde_yaml::from_str(current_config_yaml).map_err(|e| {
+        AppError::Internal(format!("Failed to parse node machine config YAML: {}", e))
+    })?;
+
+    let mut sorted = patches.to_vec();
+    sorted.sort_by_key(|(_, _, prio)| *prio);
+
+    for (path, value, _) in &sorted {
+        let patch_yaml = path_value_to_yaml_patch(path, value)?;
+        let patch_val: serde_yaml::Value = serde_yaml::from_str(&patch_yaml).map_err(|e| {
+            AppError::Internal(format!("Failed to parse patch YAML for {}: {}", path, e))
+        })?;
+        deep_merge_yaml(&mut base, patch_val);
+    }
+
+    serde_yaml::to_string(&base).map_err(|e| {
+        AppError::Internal(format!("Failed to serialize merged machine config: {}", e))
+    })
 }
 
 /// Resolve backup directory next to the SQLite database (or `/var/lib/tcs/backups`).
@@ -602,5 +806,28 @@ mod tests {
         assert!(yaml.contains("machine:"));
         assert!(yaml.contains("sysctls:"));
         assert!(yaml.contains("net.ipv4.ip_forward"));
+    }
+
+    #[test]
+    fn merge_patches_preserves_existing_and_adds_leaf() {
+        let current = r#"
+version: v1alpha1
+machine:
+  type: controlplane
+  network:
+    nameservers:
+      - 8.8.8.8
+cluster:
+  clusterName: demo
+"#;
+        let patches = vec![(
+            "/machine/network/extraHostEntries".to_string(),
+            r#"[{"ip":"127.0.0.1","aliases":["tcs-smoke.local"]}]"#.to_string(),
+            10,
+        )];
+        let merged = merge_patches_into_machine_config(current, &patches).unwrap();
+        assert!(merged.contains("tcs-smoke.local"));
+        assert!(merged.contains("8.8.8.8"));
+        assert!(merged.contains("clusterName: demo") || merged.contains("clusterName:demo"));
     }
 }

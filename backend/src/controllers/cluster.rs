@@ -425,25 +425,38 @@ impl ClusterController {
             if machine_patches.is_empty() {
                 continue;
             }
-            let doc = build_patch_documents(&machine_patches)?;
+
+            // Strategic-merge style docs (same shape as `talosctl patch mc --patch`).
+            let patch_preview = build_patch_documents(&machine_patches)?;
+
+            let client = match self.client_for_machine(&cluster, machine).await {
+                Ok(c) => c,
+                Err(e) => {
+                    errors.push(format!("{}: {}", machine.system_uuid, e));
+                    continue;
+                }
+            };
+
             documents.push(serde_json::json!({
                 "machineId": machine.id,
-                "document": doc,
+                "address": machine.address,
+                "patchPreview": patch_preview,
             }));
-            if dry_run {
-                applied.push(format!("{} (dry-run)", machine.system_uuid));
-                continue;
-            }
-            match self.client_for_machine(&cluster, machine).await {
-                Ok(client) => match client.apply_config_with_options(&doc, dry_run).await {
-                    Ok(()) => applied.push(format!("{} ({})", machine.system_uuid, machine.address)),
-                    Err(e) => errors.push(format!("{}: {}", machine.system_uuid, e)),
-                },
+
+            // Use talosctl patch mc (handles multi-document MachineConfigs on Talos 1.13+).
+            match client.apply_config_patch(&patch_preview, dry_run).await {
+                Ok(()) => {
+                    let tag = if dry_run { "dry-run" } else { "applied" };
+                    applied.push(format!(
+                        "{} {} ({})",
+                        machine.system_uuid, tag, machine.address
+                    ));
+                }
                 Err(e) => errors.push(format!("{}: {}", machine.system_uuid, e)),
             }
         }
 
-        if applied.is_empty() && !dry_run {
+        if applied.is_empty() {
             return Err(AppError::Network(format!(
                 "Failed to apply config patches: {}",
                 errors.join("; ")

@@ -366,6 +366,7 @@ pub async fn set_cluster_talosconfig(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ApplyConfigRequest {
     #[serde(default)]
     pub dry_run: bool,
