@@ -82,14 +82,18 @@ impl TcsOidcProvider {
     }
 
     pub fn authorize_url(&self, state: &str) -> Result<String, AppError> {
-        let params = format!(
-            "response_type=code&client_id={}&redirect_uri={}&state={}&scope={}&nonce={}",
-            &self.config.client_id,
-            &self.config.redirect_url,
-            state,
-            &self.config.scopes.join("+"),
-            Uuid::new_v4()
-        );
+        use url::form_urlencoded::Serializer;
+
+        let scope = self.config.scopes.join(" ");
+        let nonce = Uuid::new_v4().to_string();
+        let mut ser = Serializer::new(String::new());
+        ser.append_pair("response_type", "code");
+        ser.append_pair("client_id", &self.config.client_id);
+        ser.append_pair("redirect_uri", &self.config.redirect_url);
+        ser.append_pair("state", state);
+        ser.append_pair("scope", &scope);
+        ser.append_pair("nonce", &nonce);
+        let params = ser.finish();
 
         if self.authorize_url.contains('?') {
             Ok(format!("{}&{}", self.authorize_url, params))
@@ -265,11 +269,16 @@ impl TcsOidcProvider {
                 user::upsert(pool, &existing).await?
             }
             None => {
+                let role = if self.config.default_role.trim().is_empty() {
+                    "reader".to_string()
+                } else {
+                    self.config.default_role.clone()
+                };
                 let new_user = User {
                     id: Uuid::new_v4(),
                     email: email.clone(),
                     display_name,
-                    role: "reader".to_string(),
+                    role,
                     is_active: true,
                     password_hash: None,
                     auth_provider: "oidc".to_string(),
@@ -310,5 +319,56 @@ impl TcsOidcProvider {
     ) -> Result<String, AppError> {
         let claims = create_claims(subject, &role.to_string(), Duration::from_secs(86400));
         create_jwt(&claims)
+    }
+
+    /// In-memory OIDC `state` parameter store (CSRF protection for auth code flow).
+    pub fn remember_state(state: &str) {
+        oidc_state_store().insert(state.to_string(), std::time::Instant::now());
+        // Opportunistic prune (>10 minutes).
+        oidc_state_store().retain(|_, t| t.elapsed() < Duration::from_secs(600));
+    }
+
+    pub fn take_state(state: &str) -> bool {
+        oidc_state_store().remove(state).is_some()
+    }
+}
+
+fn oidc_state_store() -> &'static dashmap::DashMap<String, std::time::Instant> {
+    use std::sync::OnceLock;
+    static STORE: OnceLock<dashmap::DashMap<String, std::time::Instant>> = OnceLock::new();
+    STORE.get_or_init(dashmap::DashMap::new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_id_token_claims_roundtrip() {
+        // header.payload.sig — payload is base64url JSON
+        let payload = base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            br#"{"sub":"u1","email":"u@example.com","name":"User One"}"#,
+        );
+        let token = format!("e30.{}.sig", payload);
+        let provider = TcsOidcProvider {
+            config: ConfigOidcConfig::default(),
+            http: reqwest::Client::new(),
+            authorize_url: String::new(),
+            token_url: String::new(),
+            userinfo_url: String::new(),
+            jwks_uri: String::new(),
+        };
+        let info = provider.parse_id_token_claims(&token);
+        assert_eq!(info.subject, "u1");
+        assert_eq!(info.email, "u@example.com");
+        assert_eq!(info.display_name, "User One");
+    }
+
+    #[test]
+    fn state_store_single_use() {
+        TcsOidcProvider::remember_state("abc");
+        assert!(TcsOidcProvider::take_state("abc"));
+        assert!(!TcsOidcProvider::take_state("abc"));
     }
 }

@@ -603,36 +603,51 @@ pub async fn login(
     State(state): State<AppState>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, (StatusCode, String)> {
-    let user = repos::user::get_by_email(&state.db_pool, &payload.email)
+    let existing = repos::user::get_by_email(&state.db_pool, &payload.email)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Invalid email or password".to_string()))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    if !user.is_active {
-        return Err((StatusCode::UNAUTHORIZED, "Account is disabled".to_string()));
-    }
-
-    let authenticated_user = match user.auth_provider.as_str() {
-        "local" => {
-            authenticate_local(&state.db_pool, &payload.email, &payload.password)
-                .await
-                .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?
+    let authenticated_user = if let Some(user) = existing {
+        if !user.is_active {
+            return Err((StatusCode::UNAUTHORIZED, "Account is disabled".to_string()));
         }
-        "ldap" => {
-            if let Some(ref ldap_config) = state.config.auth.ldap {
-                let ldap_client = crate::auth::LdapClient::new(ldap_config.clone());
-                ldap_client
-                    .authenticate(&state.db_pool, &payload.email, &payload.password)
-                    .await
-                    .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?
-            } else {
-                return Err((StatusCode::UNAUTHORIZED, "LDAP not configured".to_string()));
+        match user.auth_provider.as_str() {
+            "local" => authenticate_local(&state.db_pool, &payload.email, &payload.password)
+                .await
+                .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?,
+            "ldap" => {
+                if let Some(ref ldap_config) = state.config.auth.ldap {
+                    let ldap_client = crate::auth::LdapClient::new(ldap_config.clone());
+                    ldap_client
+                        .authenticate(&state.db_pool, &payload.email, &payload.password)
+                        .await
+                        .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?
+                } else {
+                    return Err((StatusCode::UNAUTHORIZED, "LDAP not configured".to_string()));
+                }
+            }
+            "oidc" => {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "OIDC users must sign in via the OIDC button".to_string(),
+                ));
+            }
+            other => {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    format!("Auth provider '{}' not supported for password login", other),
+                ));
             }
         }
-        _ => {
-            return Err((StatusCode::UNAUTHORIZED,
-                format!("Auth provider '{}' not supported for login", user.auth_provider)));
-        }
+    } else if let Some(ref ldap_config) = state.config.auth.ldap {
+        // First-time / auto-provision LDAP login when no local row exists yet.
+        let ldap_client = crate::auth::LdapClient::new(ldap_config.clone());
+        ldap_client
+            .authenticate(&state.db_pool, &payload.email, &payload.password)
+            .await
+            .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?
+    } else {
+        return Err((StatusCode::UNAUTHORIZED, "Invalid email or password".to_string()));
     };
 
     let token = create_jwt(
@@ -818,7 +833,12 @@ pub async fn oidc_authorize(
         .as_ref()
         .ok_or_else(|| (StatusCode::BAD_GATEWAY, "OIDC is not configured".to_string()))?;
 
+    if !oidc_config.enabled {
+        return Err((StatusCode::BAD_GATEWAY, "OIDC is disabled".to_string()));
+    }
+
     let state_param = Uuid::new_v4().to_string();
+    crate::auth::TcsOidcProvider::remember_state(&state_param);
 
     let provider = crate::auth::TcsOidcProvider::new(oidc_config.clone())
         .await
@@ -843,6 +863,17 @@ pub async fn oidc_callback(
     let oidc_config = state.config.auth.oidc
         .as_ref()
         .ok_or_else(|| (StatusCode::BAD_GATEWAY, "OIDC is not configured".to_string()))?;
+
+    if !oidc_config.enabled {
+        return Err((StatusCode::BAD_GATEWAY, "OIDC is disabled".to_string()));
+    }
+
+    if !crate::auth::TcsOidcProvider::take_state(&params.state) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid or expired OIDC state (CSRF check failed)".to_string(),
+        ));
+    }
 
     let provider = crate::auth::TcsOidcProvider::new(oidc_config.clone())
         .await
@@ -1145,7 +1176,7 @@ pub async fn get_auth_config(
     });
 
     let oidc = state.config.auth.oidc.as_ref().map(|o| OidcConfigResponse {
-        enabled: true,
+        enabled: o.enabled,
         issuer_url: o.issuer_url.clone(),
         client_id: o.client_id.clone(),
         redirect_url: o.redirect_url.clone(),
@@ -1201,12 +1232,25 @@ pub async fn update_auth_config(
 
     if let Some(ldap_req) = req.ldap {
         let mut ldap_table = toml::value::Table::new();
-        ldap_table.insert("server".to_string(), toml::Value::String(ldap_req.server));
+        // Config file field is `url` (not "server").
+        ldap_table.insert("url".to_string(), toml::Value::String(ldap_req.server));
         ldap_table.insert("bind_dn".to_string(), toml::Value::String(ldap_req.bind_dn));
-        ldap_table.insert("bind_password".to_string(), toml::Value::String(ldap_req.bind_password));
-        ldap_table.insert("user_search_base".to_string(), toml::Value::String(ldap_req.user_search_base));
-        ldap_table.insert("user_search_filter".to_string(), toml::Value::String(ldap_req.user_search_filter));
-        ldap_table.insert("default_role".to_string(), toml::Value::String(ldap_req.default_role));
+        ldap_table.insert(
+            "bind_password".to_string(),
+            toml::Value::String(ldap_req.bind_password),
+        );
+        ldap_table.insert(
+            "user_search_base".to_string(),
+            toml::Value::String(ldap_req.user_search_base),
+        );
+        ldap_table.insert(
+            "user_search_filter".to_string(),
+            toml::Value::String(ldap_req.user_search_filter),
+        );
+        ldap_table.insert(
+            "default_role".to_string(),
+            toml::Value::String(ldap_req.default_role),
+        );
         
         let mut mappings = vec![];
         for m in ldap_req.group_role_mappings {

@@ -997,15 +997,24 @@ cluster:
 version: v1alpha1
 machine:
   type: controlplane
+  ca:
+    crt: BASE64CA
   network:
     nameservers:
       - 8.8.8.8
 cluster:
   clusterName: demo
+  id: abc
 ---
 apiVersion: v1alpha1
 kind: LinkConfig
 name: eno49
+up: true
+mtu: 9000
+---
+apiVersion: v1alpha1
+kind: LinkConfig
+name: eno50
 up: true
 "#;
         let patch = r#"
@@ -1018,8 +1027,31 @@ machine:
 "#;
         let merged = merge_yaml_docs_into_machine_config(current, patch).unwrap();
         assert!(merged.contains("tcs-smoke.local"));
+        assert!(merged.contains("BASE64CA"));
+        assert!(merged.contains("clusterName: demo") || merged.contains("clusterName:demo"));
         assert!(merged.contains("LinkConfig"));
         assert!(merged.contains("eno49"));
+        assert!(merged.contains("eno50"));
         assert!(merged.contains("---"));
+        // Exactly two document separators for 3 docs
+        assert_eq!(merged.matches("---\n").count(), 2);
+    }
+
+    #[test]
+    fn decode_machine_config_spec_from_proto() {
+        use prost::Message;
+        let yaml = "version: v1alpha1\nmachine:\n  type: worker\ncluster:\n  clusterName: x\n";
+        let mcs = TalosMachineConfigSpec {
+            yaml_marshalled: yaml.as_bytes().to_vec(),
+        };
+        let mut buf = Vec::new();
+        mcs.encode(&mut buf).unwrap();
+        let spec = CosiSpec {
+            proto_spec: buf,
+            yaml_spec: String::new(),
+        };
+        let out = decode_machine_config_spec(&spec).expect("decode");
+        assert!(out.contains("worker"));
+        assert!(out.contains("clusterName"));
     }
 }

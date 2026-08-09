@@ -17,3 +17,4 @@ config.toml
 tcs-release.tar.gz
 tcs-release.tar.gz
 tcs-release/
+dist/
