@@ -4127,6 +4127,7 @@ dependencies = [
  "sha2",
  "sqlx",
  "talos-rust-client",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-rustls 0.26.4",
