@@ -131,8 +131,8 @@
     </div>
   </div>
   <p class="hint" style="opacity:0.8;margin-bottom:1rem;">
-    Patches are stored in TCS, merged into each node’s live machine config (COSI), then applied with
-    Talos <code>ApplyConfiguration</code> (no-reboot). Falls back to <code>talosctl patch mc</code> if needed.
+    Patches are stored in TCS, merged into each node’s live machine config (COSI Get), then applied with
+    Talos <code>ApplyConfiguration</code> (no-reboot, pure-Rust — no host <code>talosctl</code>).
     Requires a talosconfig on the cluster and reachability to node :50000.
   </p>
 
