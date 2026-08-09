@@ -8,11 +8,11 @@
   interface User {
     id: string;
     email: string;
-    display_name: string;
+    displayName: string;
     role: 'admin' | 'editor' | 'reader';
-    is_active: boolean;
-    last_login: string | null;
-    created_at: string;
+    isActive: boolean;
+    lastLogin: string | null;
+    createdAt: string;
   }
 
   let users = $state<User[]>([]);
@@ -23,13 +23,13 @@
 
   let addForm = $state({
     email: '',
-    display_name: '',
+    displayName: '',
     role: 'reader' as 'admin' | 'editor' | 'reader',
     password: '',
   });
 
   let editForm = $state({
-    display_name: '',
+    displayName: '',
     role: 'reader' as 'admin' | 'editor' | 'reader',
     password: '',
   });
@@ -48,18 +48,18 @@
   }
 
   async function handleAddUser() {
-    if (!addForm.email || !addForm.display_name) {
+    if (!addForm.email || !addForm.displayName) {
       notifyError('Email and display name are required');
       return;
     }
     try {
       await client.post('/users', {
         email: addForm.email,
-        display_name: addForm.display_name,
+        displayName: addForm.displayName,
         role: addForm.role,
         password: addForm.password || undefined,
       });
-      addForm = { email: '', display_name: '', role: 'reader', password: '' };
+      addForm = { email: '', displayName: '', role: 'reader', password: '' };
       showAddForm = false;
       success('User created');
       await loadUsers();
@@ -71,7 +71,7 @@
   function startEdit(user: User) {
     editingUser = user;
     editForm = {
-      display_name: user.display_name,
+      displayName: user.displayName,
       role: user.role,
       password: '',
     };
@@ -81,7 +81,7 @@
     if (!editingUser) return;
     try {
       await client.put(`/users/${editingUser.id}`, {
-        display_name: editForm.display_name,
+        displayName: editForm.displayName,
         role: editForm.role,
         password: editForm.password || undefined,
       });
@@ -99,16 +99,16 @@
 
   async function toggleActive(user: User) {
     try {
-      await client.put(`/users/${user.id}`, { is_active: !user.is_active });
-      user.is_active = !user.is_active;
-      success(`User ${user.is_active ? 'activated' : 'deactivated'}`);
+      await client.put(`/users/${user.id}`, { isActive: !user.isActive });
+      user.isActive = !user.isActive;
+      success(`User ${user.isActive ? 'activated' : 'deactivated'}`);
     } catch {
       notifyError('Failed to update user');
     }
   }
 
   async function deleteUser(user: User) {
-    if (!confirm(`Delete user "${user.display_name}"?`)) return;
+    if (!confirm(`Delete user "${user.displayName}"?`)) return;
     try {
       await client.delete(`/users/${user.id}`);
       users = users.filter(u => u.id !== user.id);
@@ -144,7 +144,7 @@
         </div>
         <div class="form-group">
           <label for="add-name">Display Name</label>
-          <input id="add-name" type="text" bind:value={addForm.display_name} placeholder="John Doe" required />
+          <input id="add-name" type="text" bind:value={addForm.displayName} placeholder="John Doe" required />
         </div>
         <div class="form-group">
           <label for="add-role">Role</label>
@@ -196,7 +196,7 @@
                   <div class="form-row">
                     <div class="form-group">
                       <label>Display Name</label>
-                      <input type="text" bind:value={editForm.display_name} />
+                      <input type="text" bind:value={editForm.displayName} />
                     </div>
                     <div class="form-group">
                       <label>Role</label>
@@ -220,18 +220,18 @@
             </tr>
           {:else}
             <tr>
-              <td>{user.display_name}</td>
+              <td>{user.displayName}</td>
               <td>{user.email}</td>
               <td><span class="role-badge {user.role}">{user.role}</span></td>
               <td>
                 <label class="toggle">
-                  <input type="checkbox" checked={user.is_active} onchange={() => toggleActive(user)} />
+                  <input type="checkbox" checked={user.isActive} onchange={() => toggleActive(user)} />
                   <span class="toggle-track">
                     <span class="toggle-thumb"></span>
                   </span>
                 </label>
               </td>
-              <td>{formatDate(user.last_login)}</td>
+              <td>{formatDate(user.lastLogin)}</td>
               <td>
                 <div class="actions">
                   <Button variant="ghost" size="sm" onclick={() => startEdit(user)}>Edit</Button>

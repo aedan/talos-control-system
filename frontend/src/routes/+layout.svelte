@@ -94,7 +94,7 @@
     <header class="topbar">
       <span class="brand">{$branding.shortName}</span>
       {#if user}
-        <span class="user-info">{user.display_name || user.email}</span>
+        <span class="user-info">{user.displayName || user.display_name || user.email}</span>
       {/if}
     </header>
     <div class="content">

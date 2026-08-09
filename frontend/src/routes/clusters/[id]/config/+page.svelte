@@ -71,21 +71,42 @@
   }
 
   let applying = $state(false);
+  let lastApply = $state<{
+    dryRun?: boolean;
+    count?: number;
+    appliedTo?: string[];
+    errors?: string[];
+    documents?: Array<{ address?: string; patchPreview?: string }>;
+  } | null>(null);
+
   async function applyAll(dryRun = false) {
     applying = true;
+    lastApply = null;
     try {
       const res = (await client.post(`/clusters/${$page.params.id}/config/apply`, {
-        dry_run: dryRun,
+        dryRun,
       })) as {
         count: number;
         appliedTo?: string[];
         dryRun?: boolean;
+        errors?: string[];
+        documents?: Array<{ address?: string; patchPreview?: string }>;
       };
-      success(
-        dryRun
-          ? `Dry-run OK for ${res.count} machine(s)`
-          : `Applied patches to ${res.count} machine(s)`
-      );
+      lastApply = res;
+      const errN = res.errors?.length ?? 0;
+      if (errN > 0) {
+        notifyError(
+          dryRun
+            ? `Dry-run: ${res.count} ok, ${errN} error(s)`
+            : `Applied ${res.count}; ${errN} error(s)`
+        );
+      } else {
+        success(
+          dryRun
+            ? `Dry-run OK for ${res.count} machine(s)`
+            : `Applied patches to ${res.count} machine(s)`
+        );
+      }
     } catch (e: unknown) {
       notifyError(e instanceof Error ? e.message : 'Failed to apply patches via Talos API');
     } finally {
@@ -110,9 +131,48 @@
     </div>
   </div>
   <p class="hint" style="opacity:0.8;margin-bottom:1rem;">
-    Patches are stored in TCS, then pushed with Talos <code>ApplyConfiguration</code> (strategic merge, no-reboot).
-    Requires a talosconfig on the cluster.
+    Patches are stored in TCS, merged into each node’s live machine config (COSI), then applied with
+    Talos <code>ApplyConfiguration</code> (no-reboot). Falls back to <code>talosctl patch mc</code> if needed.
+    Requires a talosconfig on the cluster and reachability to node :50000.
   </p>
+
+  {#if lastApply}
+    <div class="apply-result">
+      <h3>{lastApply.dryRun ? 'Dry-run result' : 'Apply result'}</h3>
+      <p>
+        {lastApply.count ?? 0} machine(s)
+        {#if lastApply.errors?.length}
+          · {lastApply.errors.length} error(s)
+        {/if}
+      </p>
+      {#if lastApply.documents?.[0]?.patchPreview}
+        <details>
+          <summary>Patch preview</summary>
+          <pre>{lastApply.documents[0].patchPreview}</pre>
+        </details>
+      {/if}
+      {#if lastApply.errors?.length}
+        <details open>
+          <summary>Errors</summary>
+          <ul>
+            {#each lastApply.errors as err}
+              <li class="err-line">{err}</li>
+            {/each}
+          </ul>
+        </details>
+      {/if}
+      {#if lastApply.appliedTo?.length}
+        <details>
+          <summary>Applied to</summary>
+          <ul>
+            {#each lastApply.appliedTo as line}
+              <li>{line}</li>
+            {/each}
+          </ul>
+        </details>
+      {/if}
+    </div>
+  {/if}
   
   {#if showEditor}
     <div class="patch-editor">
@@ -199,6 +259,24 @@
     color: var(--tcs-text-muted);
   }
   .empty-state .hint { font-size: 0.875rem; margin-top: 0.5rem; }
+
+  .apply-result {
+    background: var(--tcs-surface);
+    border: 1px solid var(--tcs-border);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1.5rem;
+  }
+  .apply-result h3 { margin: 0 0 0.5rem; font-size: 1rem; }
+  .apply-result pre {
+    background: var(--tcs-background);
+    padding: 0.75rem;
+    border-radius: 6px;
+    overflow: auto;
+    font-size: 0.8rem;
+  }
+  .apply-result ul { margin: 0.5rem 0 0; padding-left: 1.25rem; }
+  .apply-result .err-line { color: var(--tcs-error, #f87171); font-size: 0.85rem; word-break: break-word; }
   
   .patch-editor {
     background: var(--tcs-surface);

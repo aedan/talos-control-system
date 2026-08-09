@@ -57,6 +57,10 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route("/clusters/:id/talosconfig", put(handlers::set_cluster_talosconfig))
         .route("/clusters/:id/refresh", post(handlers::refresh_cluster))
         .route("/clusters/:id/talos/test", post(handlers::test_cluster_talos))
+        .route(
+            "/clusters/:id/talos/versions",
+            post(handlers::probe_cluster_versions),
+        )
         .route("/machines", get(handlers::list_machines))
         .route("/machines/:id", get(handlers::get_machine))
         .route("/machines/:id", put(handlers::update_machine))

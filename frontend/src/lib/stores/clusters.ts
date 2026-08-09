@@ -85,6 +85,6 @@ export async function applyClusterConfig(
   dryRun = false
 ): Promise<{ count: number; dryRun?: boolean }> {
   return (await client.post(`/clusters/${clusterId}/config/apply`, {
-    dry_run: dryRun,
+    dryRun,
   })) as { count: number; dryRun?: boolean };
 }

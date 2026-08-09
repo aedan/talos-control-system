@@ -6,10 +6,10 @@
   import Spinner from '$lib/components/Spinner.svelte';
   import Button from '$lib/components/Button.svelte';
 
-  let name = '';
-  let kubeconfig = '';
-  let talosconfig = '';
-  let step = 'input' as 'input' | 'preview' | 'importing' | 'done';
+  let name = $state('');
+  let kubeconfig = $state('');
+  let talosconfig = $state('');
+  let step = $state<'input' | 'preview' | 'importing' | 'done'>('input');
   let preview = $state<DiscoveredCluster | null>(null);
   let err = $state<string | null>(null);
   let isTalos = $state(false);

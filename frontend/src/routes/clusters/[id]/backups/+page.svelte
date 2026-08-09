@@ -16,6 +16,7 @@
   let restoreMachineId = $state('');
   let scheduleHours = $state(0);
   let retention = $state(10);
+  let lastAutoBackupAt = $state<string | null>(null);
   let savingSchedule = $state(false);
 
   async function reload() {
@@ -26,12 +27,14 @@
       client.get(`/clusters/${id}`) as Promise<{
         backupScheduleHours?: number | null;
         backupRetention?: number | null;
+        lastAutoBackupAt?: string | null;
       }>,
     ]);
     backups = Array.isArray(b) ? b : [];
     machines = Array.isArray(m) ? m : [];
     scheduleHours = c.backupScheduleHours ?? 0;
     retention = c.backupRetention ?? 10;
+    lastAutoBackupAt = c.lastAutoBackupAt ?? null;
     const cps = machines.filter(isControlPlane);
     if (cps.length && !restoreMachineId) {
       restoreMachineId = cps[0].id;
@@ -179,6 +182,14 @@
         {savingSchedule ? 'Saving…' : 'Save schedule'}
       </Button>
     </div>
+    <p class="hint" style="margin-top:0.75rem;">
+      Last automatic backup:
+      {#if lastAutoBackupAt}
+        <strong>{new Date(lastAutoBackupAt).toLocaleString()}</strong>
+      {:else}
+        <em>never</em>
+      {/if}
+    </p>
   </section>
 
   <section class="panel">

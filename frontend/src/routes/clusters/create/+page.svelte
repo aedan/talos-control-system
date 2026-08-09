@@ -18,8 +18,8 @@
       // Inventory only — alpha does not provision Talos/Kubernetes clusters.
       await client.post('/clusters', {
         name: name.trim(),
-        control_plane_version: controlPlaneVersion,
-        talos_version: talosVersion,
+        controlPlaneVersion,
+        talosVersion,
       });
       success('Inventory record created. Use Import for real clusters.');
       goto('/clusters');
