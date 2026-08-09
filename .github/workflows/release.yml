@@ -23,9 +23,12 @@ jobs:
           fetch-depth: 0
 
       - name: Install Rust stable
-        uses: rust-lang/setup-rust-toolchain@v1
-        with:
-          target: x86_64-unknown-linux-gnu
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          source "$HOME/.cargo/env"
+          rustup target add x86_64-unknown-linux-gnu
+          echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
+          echo "PATH=$HOME/.cargo/bin:$PATH" >> $GITHUB_ENV
 
       - name: Cache cargo registry
         uses: actions/cache@v4
