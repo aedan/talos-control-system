@@ -115,8 +115,8 @@
 
     try {
       await client.post('/api/auth/password', {
-        current_password: passwordForm.currentPassword,
-        new_password: passwordForm.newPassword
+        currentPassword: passwordForm.currentPassword,
+        newPassword: passwordForm.newPassword
       });
       passwordSuccess = 'Password changed successfully';
       passwordForm.currentPassword = '';

@@ -704,4 +704,62 @@ impl ClusterController {
         }
         Ok(())
     }
+
+    /// Probe Talos version on every machine with an address; update inventory +
+    /// cluster `talos_version` summary. Returns ok/fail counts.
+    pub async fn probe_cluster_talos_versions(
+        &self,
+        cluster_id: Uuid,
+    ) -> Result<serde_json::Value, AppError> {
+        let _cluster = crate::db::repos::cluster::get(&self.pool, cluster_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Cluster {} not found", cluster_id)))?;
+
+        let machines = crate::db::repos::machine::list_by_cluster(&self.pool, cluster_id).await?;
+        let mut ok = 0u32;
+        let mut failed = 0u32;
+        let mut versions: Vec<String> = Vec::new();
+        let mut results = Vec::new();
+
+        for m in machines {
+            match self.machine_version(m.id).await {
+                Ok(v) => {
+                    ok += 1;
+                    if !versions.iter().any(|x| x == &v) {
+                        versions.push(v.clone());
+                    }
+                    results.push(serde_json::json!({
+                        "machineId": m.id,
+                        "address": m.address,
+                        "ok": true,
+                        "talosVersion": v,
+                    }));
+                }
+                Err(e) => {
+                    failed += 1;
+                    results.push(serde_json::json!({
+                        "machineId": m.id,
+                        "address": m.address,
+                        "ok": false,
+                        "error": e.to_string(),
+                    }));
+                }
+            }
+        }
+
+        if !versions.is_empty() {
+            if let Ok(Some(mut c)) = crate::db::repos::cluster::get(&self.pool, cluster_id).await {
+                c.talos_version = versions.join(", ");
+                c.updated_at = chrono::Utc::now();
+                let _ = crate::db::repos::cluster::update(&self.pool, &c).await;
+            }
+        }
+
+        Ok(serde_json::json!({
+            "ok": ok,
+            "failed": failed,
+            "versions": versions,
+            "results": results,
+        }))
+    }
 }

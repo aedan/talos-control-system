@@ -12,6 +12,7 @@ export interface Cluster {
   hasKubeconfig?: boolean;
   backupRetention?: number | null;
   backupScheduleHours?: number | null;
+  lastAutoBackupAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }

@@ -13,17 +13,17 @@
     try {
       await client.put('/branding', {
         name: form.name,
-        short_name: form.shortName,
+        shortName: form.shortName,
         tagline: form.tagline,
-        primary_color: form.primaryColor,
-        secondary_color: form.secondaryColor,
-        background_color: form.backgroundColor,
-        surface_color: form.surfaceColor,
-        text_color: form.textColor,
-        text_muted_color: form.textMutedColor,
-        font_family: form.fontFamily,
-        docs_url: form.docsUrl,
-        support_url: form.supportUrl
+        primaryColor: form.primaryColor,
+        secondaryColor: form.secondaryColor,
+        backgroundColor: form.backgroundColor,
+        surfaceColor: form.surfaceColor,
+        textColor: form.textColor,
+        textMutedColor: form.textMutedColor,
+        fontFamily: form.fontFamily,
+        docsUrl: form.docsUrl,
+        supportUrl: form.supportUrl
       });
       branding.set(form);
       applyBranding(form);

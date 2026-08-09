@@ -12,19 +12,25 @@ use crate::db::repos::{self, user};
 use crate::AppState;
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+    pub commit: String,
+    pub build_time: String,
 }
 
 pub async fn health_check() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
         version: crate::utils::version::VERSION_INFO.version.clone(),
+        commit: crate::utils::version::VERSION_INFO.commit.clone(),
+        build_time: crate::utils::version::VERSION_INFO.build_time.clone(),
     })
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BrandingResponse {
     pub name: String,
     pub short_name: String,
@@ -62,6 +68,7 @@ pub async fn get_branding(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateBrandingRequest {
     pub name: Option<String>,
     pub short_name: Option<String>,
@@ -138,11 +145,10 @@ pub async fn get_favicon(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateClusterRequest {
     pub name: String,
-    #[serde(alias = "controlPlaneVersion")]
     pub control_plane_version: String,
-    #[serde(alias = "talosVersion")]
     pub talos_version: String,
 }
 
@@ -457,6 +463,27 @@ pub async fn test_cluster_talos(
     }
 }
 
+pub async fn probe_cluster_versions(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller.probe_cluster_talos_versions(cluster_id).await {
+        Ok(v) => {
+            crate::utils::audit::log_action(
+                &state.db_pool,
+                "system",
+                "talos_version_probe",
+                &cluster_id.to_string(),
+                &v.to_string(),
+            )
+            .await;
+            Ok(Json(v))
+        }
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
 pub async fn reboot_machine(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
@@ -663,6 +690,7 @@ pub async fn refresh_token(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChangePasswordRequest {
     pub current_password: String,
     pub new_password: String,
@@ -698,6 +726,7 @@ pub async fn change_password(
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UserInfoResponse {
     pub id: Uuid,
     pub email: String,
@@ -1133,6 +1162,7 @@ pub struct AuthConfigRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuthLdapRequest {
     pub server: String,
     pub bind_dn: String,
@@ -1144,12 +1174,14 @@ pub struct AuthLdapRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuthGroupMappingRequest {
     pub group_dn_pattern: String,
     pub role: String,
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuthOidcRequest {
     pub enabled: bool,
     pub issuer_url: String,
@@ -1456,6 +1488,7 @@ fn get_fs_usage_macos(dev: u64) -> Option<DiskUsageResponse> {
 // ─── User CRUD Handlers ───────────────────────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateUserRequest {
     pub email: String,
     pub display_name: String,
@@ -1549,6 +1582,7 @@ pub async fn get_user(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateUserRequest {
     pub display_name: Option<String>,
     pub role: Option<String>,

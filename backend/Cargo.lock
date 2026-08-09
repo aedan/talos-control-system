@@ -4099,6 +4099,7 @@ dependencies = [
  "futures",
  "futures-util",
  "hex",
+ "http 1.5.0",
  "hyper 1.11.0",
  "hyper-util",
  "indexmap 2.14.0",

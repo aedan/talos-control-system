@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use futures_util::StreamExt;
+use serde::Deserialize;
 use talos_rust_client::machine::apply_configuration_request::Mode as ApplyMode;
 use talos_rust_client::machine::reboot_request::Mode as RebootMode;
 use talos_rust_client::machine::{
@@ -462,20 +463,111 @@ impl TalosClient {
         Ok(())
     }
 
-    /// Best-effort read of the running machine config.
+    /// Read the running machine config YAML (multi-document supported).
     ///
-    /// On modern Talos the live config is a COSI resource (`MachineConfigs`), not a
-    /// file under `/system/state`. Prefer `talosctl get mc` when available; fall back
-    /// to the historical file path for older images.
+    /// Prefer COSI `MachineConfigs.config.talos.dev` (Talos 1.6+). Fall back to the
+    /// legacy `/system/state/config.yaml` file path, then `talosctl get mc` if present.
     pub async fn get_machine_config(&self) -> Result<String, AppError> {
-        match self.get_machine_config_via_talosctl().await {
+        match self.get_machine_config_via_cosi().await {
             Ok(s) if !s.trim().is_empty() => return Ok(s),
             Ok(_) => {}
             Err(e) => {
-                warn!(endpoint = %self.endpoint, error = %e, "talosctl get mc failed; trying file read");
+                warn!(endpoint = %self.endpoint, error = %e, "COSI MachineConfig get failed");
             }
         }
 
+        if let Ok(s) = self.get_machine_config_via_file().await {
+            if !s.trim().is_empty() {
+                return Ok(s);
+            }
+        }
+
+        self.get_machine_config_via_talosctl().await
+    }
+
+    /// Apply a strategic-merge style patch against the live machine config.
+    ///
+    /// Pure-Rust path: COSI Get → deep-merge → `ApplyConfiguration` (full multi-doc).
+    /// Falls back to `talosctl patch mc` when COSI/get is unavailable.
+    pub async fn apply_config_patch(&self, patch_yaml: &str, dry_run: bool) -> Result<(), AppError> {
+        match self.apply_config_patch_pure(patch_yaml, dry_run).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                warn!(
+                    endpoint = %self.endpoint,
+                    error = %e,
+                    "pure-Rust config patch failed; trying talosctl fallback"
+                );
+            }
+        }
+        self.apply_config_patch_via_talosctl(patch_yaml, dry_run).await
+    }
+
+    async fn apply_config_patch_pure(&self, patch_yaml: &str, dry_run: bool) -> Result<(), AppError> {
+        let current = self.get_machine_config().await?;
+        // Treat the patch YAML (possibly multi-doc) as path-style documents by
+        // merging each YAML document into the live multi-doc machine config.
+        let merged = merge_yaml_docs_into_machine_config(&current, patch_yaml)?;
+        self.apply_config_with_options(&merged, dry_run).await?;
+        info!(
+            endpoint = %self.endpoint,
+            dry_run,
+            "Config patch applied via pure-Rust merge+ApplyConfiguration"
+        );
+        Ok(())
+    }
+
+    /// COSI State.Get for MachineConfigs.config.talos.dev / persistent|active.
+    async fn get_machine_config_via_cosi(&self) -> Result<String, AppError> {
+        use prost::Message;
+        use tonic::Request;
+
+        let channel = self.connect_channel().await?;
+        let mut client = CosiStateClient::new(channel);
+
+        for id in ["persistent", "active", "v1alpha1"] {
+            let req = CosiGetRequest {
+                namespace: "config".to_string(),
+                r#type: "MachineConfigs.config.talos.dev".to_string(),
+                id: id.to_string(),
+                options: None,
+            };
+            match client.get(Request::new(req)).await {
+                Ok(resp) => {
+                    let inner = resp.into_inner();
+                    if let Some(resource) = inner.resource {
+                        if let Some(spec) = resource.spec {
+                            if !spec.yaml_spec.trim().is_empty() {
+                                return Ok(spec.yaml_spec);
+                            }
+                            // Some versions put the YAML in proto_spec as UTF-8.
+                            if !spec.proto_spec.is_empty() {
+                                if let Ok(s) = String::from_utf8(spec.proto_spec) {
+                                    if s.contains("machine:") || s.contains("version:") {
+                                        return Ok(s);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(status) if status.code() == tonic::Code::NotFound => continue,
+                Err(e) => {
+                    return Err(AppError::Grpc(format!(
+                        "COSI Get MachineConfig failed on {}: {}",
+                        self.endpoint, e
+                    )));
+                }
+            }
+        }
+
+        Err(AppError::NotFound(format!(
+            "No MachineConfig resource on {}",
+            self.endpoint
+        )))
+    }
+
+    async fn get_machine_config_via_file(&self) -> Result<String, AppError> {
         let mut client = self.connect().await?;
         let request = talos_rust_client::machine::ReadRequest {
             path: "/system/state/config.yaml".to_string(),
@@ -504,11 +596,27 @@ impl TalosClient {
         })
     }
 
-    /// Apply a strategic-merge style config patch (same as `talosctl patch mc`).
-    ///
-    /// Partial YAML docs are not accepted by `ApplyConfiguration` alone on Talos 1.13+
-    /// multi-document configs; `talosctl patch mc` merges against the live resource.
-    pub async fn apply_config_patch(&self, patch_yaml: &str, dry_run: bool) -> Result<(), AppError> {
+    async fn connect_channel(&self) -> Result<tonic::transport::Channel, AppError> {
+        let key = ensure_pkcs8_pem(&self.key)?;
+        TalosConnector::new(&self.endpoint)
+            .ca_pem(self.ca.clone())
+            .cert_pem(self.crt.clone())
+            .key_pem(key)
+            .connect()
+            .await
+            .map_err(|e| {
+                AppError::Network(format!(
+                    "Failed to connect to Talos API at {}: {}",
+                    self.endpoint, e
+                ))
+            })
+    }
+
+    async fn apply_config_patch_via_talosctl(
+        &self,
+        patch_yaml: &str,
+        dry_run: bool,
+    ) -> Result<(), AppError> {
         let node = self.node_host()?;
         let (talosconfig_path, patch_path, _tmpdir) = self.write_talosctl_workspace(patch_yaml)?;
 
@@ -529,7 +637,7 @@ impl TalosClient {
 
         let output = cmd.output().await.map_err(|e| {
             AppError::Internal(format!(
-                "Failed to run talosctl (required for config patch apply): {}",
+                "Failed to run talosctl (fallback for config patch): {}",
                 e
             ))
         })?;
@@ -552,7 +660,7 @@ impl TalosClient {
         info!(
             endpoint = %self.endpoint,
             dry_run,
-            "Config patch applied via talosctl patch mc"
+            "Config patch applied via talosctl patch mc (fallback)"
         );
         Ok(())
     }
@@ -579,8 +687,6 @@ impl TalosClient {
         Ok(host)
     }
 
-    /// Write a temporary talosconfig + optional patch file for talosctl.
-    /// Returns (talosconfig_path, patch_path, tempdir_guard).
     fn write_talosctl_workspace(
         &self,
         patch_yaml: &str,
@@ -597,7 +703,6 @@ impl TalosClient {
 
         let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
         let node = self.node_host()?;
-        // Minimal single-context talosconfig for this node.
         let talosconfig = format!(
             "context: tcs\ncontexts:\n  tcs:\n    endpoints:\n      - {node}\n    nodes:\n      - {node}\n    ca: {ca}\n    crt: {crt}\n    key: {key}\n",
             node = node,
@@ -651,6 +756,81 @@ impl TalosClient {
 
     pub fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+}
+
+// ─── Minimal COSI State.Get client (MachineConfig only) ─────────────────
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct CosiGetRequest {
+    #[prost(string, tag = "1")]
+    namespace: String,
+    #[prost(string, tag = "2")]
+    r#type: String,
+    #[prost(string, tag = "3")]
+    id: String,
+    #[prost(message, optional, tag = "4")]
+    options: Option<CosiGetOptions>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct CosiGetOptions {}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct CosiGetResponse {
+    #[prost(message, optional, tag = "1")]
+    resource: Option<CosiResource>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct CosiResource {
+    #[prost(message, optional, tag = "1")]
+    metadata: Option<CosiMetadata>,
+    #[prost(message, optional, tag = "2")]
+    spec: Option<CosiSpec>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct CosiMetadata {
+    #[prost(string, tag = "1")]
+    namespace: String,
+    #[prost(string, tag = "2")]
+    r#type: String,
+    #[prost(string, tag = "3")]
+    id: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct CosiSpec {
+    #[prost(bytes = "vec", tag = "1")]
+    proto_spec: Vec<u8>,
+    #[prost(string, tag = "2")]
+    yaml_spec: String,
+}
+
+#[derive(Debug, Clone)]
+struct CosiStateClient {
+    inner: tonic::client::Grpc<tonic::transport::Channel>,
+}
+
+impl CosiStateClient {
+    fn new(channel: tonic::transport::Channel) -> Self {
+        Self {
+            inner: tonic::client::Grpc::new(channel),
+        }
+    }
+
+    async fn get(
+        &mut self,
+        request: tonic::Request<CosiGetRequest>,
+    ) -> Result<tonic::Response<CosiGetResponse>, tonic::Status> {
+        self.inner
+            .ready()
+            .await
+            .map_err(|e| tonic::Status::unknown(format!("COSI service not ready: {e}")))?;
+        let codec = tonic::codec::ProstCodec::default();
+        let path = http::uri::PathAndQuery::from_static("/cosi.resource.State/Get");
+        self.inner.unary(request, path, codec).await
     }
 }
 
@@ -720,32 +900,96 @@ pub fn deep_merge_yaml(base: &mut serde_yaml::Value, patch: serde_yaml::Value) {
     }
 }
 
-/// Apply ordered path/value patches onto a full machine-config YAML document.
+/// Apply ordered path/value patches onto a (possibly multi-document) machine config.
 ///
 /// Talos `ApplyConfiguration` validates a **full** config. Strategic-merge style
 /// partial docs (as used by `talosctl patch mc`) must be merged client-side first.
+/// Only the primary v1alpha1 machine document is mutated; other docs (LinkConfig, …)
+/// are preserved in order.
 pub fn merge_patches_into_machine_config(
     current_config_yaml: &str,
     patches: &[(String, String, i32)],
 ) -> Result<String, AppError> {
-    let mut base: serde_yaml::Value = serde_yaml::from_str(current_config_yaml).map_err(|e| {
-        AppError::Internal(format!("Failed to parse node machine config YAML: {}", e))
-    })?;
+    let patch_yaml = build_patch_documents(patches)?;
+    merge_yaml_docs_into_machine_config(current_config_yaml, &patch_yaml)
+}
 
-    let mut sorted = patches.to_vec();
-    sorted.sort_by_key(|(_, _, prio)| *prio);
-
-    for (path, value, _) in &sorted {
-        let patch_yaml = path_value_to_yaml_patch(path, value)?;
-        let patch_val: serde_yaml::Value = serde_yaml::from_str(&patch_yaml).map_err(|e| {
-            AppError::Internal(format!("Failed to parse patch YAML for {}: {}", path, e))
-        })?;
-        deep_merge_yaml(&mut base, patch_val);
+/// Merge one or more strategic-merge YAML documents into a multi-doc machine config.
+pub fn merge_yaml_docs_into_machine_config(
+    current_config_yaml: &str,
+    patch_yaml: &str,
+) -> Result<String, AppError> {
+    let mut docs = parse_yaml_documents(current_config_yaml)?;
+    if docs.is_empty() {
+        return Err(AppError::Internal(
+            "Node machine config is empty".to_string(),
+        ));
     }
 
-    serde_yaml::to_string(&base).map_err(|e| {
-        AppError::Internal(format!("Failed to serialize merged machine config: {}", e))
-    })
+    let target_idx = docs
+        .iter()
+        .position(is_primary_machine_config_doc)
+        .unwrap_or(0);
+
+    let patch_docs = parse_yaml_documents(patch_yaml)?;
+    for patch in patch_docs {
+        deep_merge_yaml(&mut docs[target_idx], patch);
+    }
+
+    serialize_yaml_documents(&docs)
+}
+
+fn parse_yaml_documents(yaml: &str) -> Result<Vec<serde_yaml::Value>, AppError> {
+    let mut docs = Vec::new();
+    for doc in serde_yaml::Deserializer::from_str(yaml) {
+        let v = serde_yaml::Value::deserialize(doc).map_err(|e| {
+            AppError::Internal(format!("Failed to parse YAML document: {}", e))
+        })?;
+        if !v.is_null() {
+            docs.push(v);
+        }
+    }
+    if docs.is_empty() {
+        // Single-document fallback for parsers that skip empty streams.
+        if let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(yaml) {
+            if !v.is_null() {
+                docs.push(v);
+            }
+        }
+    }
+    Ok(docs)
+}
+
+fn is_primary_machine_config_doc(doc: &serde_yaml::Value) -> bool {
+    let Some(map) = doc.as_mapping() else {
+        return false;
+    };
+    // Multi-doc "document configs" use kind/apiVersion; the classic machine config
+    // has top-level `machine` / `cluster` / `version: v1alpha1`.
+    if map.contains_key(serde_yaml::Value::String("kind".into())) {
+        return false;
+    }
+    map.contains_key(serde_yaml::Value::String("machine".into()))
+        || map.contains_key(serde_yaml::Value::String("cluster".into()))
+}
+
+fn serialize_yaml_documents(docs: &[serde_yaml::Value]) -> Result<String, AppError> {
+    let mut out = String::new();
+    for (i, doc) in docs.iter().enumerate() {
+        if i > 0 {
+            out.push_str("---\n");
+        }
+        let s = serde_yaml::to_string(doc).map_err(|e| {
+            AppError::Internal(format!("Failed to serialize machine config YAML: {}", e))
+        })?;
+        // serde_yaml may prefix with "---\n"; normalize.
+        let trimmed = s.trim_start_matches("---\n").trim_start_matches("---\r\n");
+        out.push_str(trimmed);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    Ok(out)
 }
 
 /// Resolve backup directory next to the SQLite database (or `/var/lib/tcs/backups`).
@@ -829,5 +1073,37 @@ cluster:
         assert!(merged.contains("tcs-smoke.local"));
         assert!(merged.contains("8.8.8.8"));
         assert!(merged.contains("clusterName: demo") || merged.contains("clusterName:demo"));
+    }
+
+    #[test]
+    fn merge_preserves_secondary_docs() {
+        let current = r#"
+version: v1alpha1
+machine:
+  type: controlplane
+  network:
+    nameservers:
+      - 8.8.8.8
+cluster:
+  clusterName: demo
+---
+apiVersion: v1alpha1
+kind: LinkConfig
+name: eno49
+up: true
+"#;
+        let patch = r#"
+machine:
+  network:
+    extraHostEntries:
+      - ip: 127.0.0.1
+        aliases:
+          - tcs-smoke.local
+"#;
+        let merged = merge_yaml_docs_into_machine_config(current, patch).unwrap();
+        assert!(merged.contains("tcs-smoke.local"));
+        assert!(merged.contains("LinkConfig"));
+        assert!(merged.contains("eno49"));
+        assert!(merged.contains("---"));
     }
 }

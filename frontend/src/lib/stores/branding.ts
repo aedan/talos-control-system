@@ -68,19 +68,19 @@ export async function fetchBranding(): Promise<void> {
     
     const b: Branding = {
       name: data.name || defaults.name,
-      shortName: data.short_name || defaults.shortName,
+      shortName: data.shortName || data.short_name || defaults.shortName,
       tagline: data.tagline || defaults.tagline,
-      primaryColor: data.primary_color || defaults.primaryColor,
-      secondaryColor: data.secondary_color || defaults.secondaryColor,
-      backgroundColor: data.background_color || defaults.backgroundColor,
-      surfaceColor: data.surface_color || defaults.surfaceColor,
-      textColor: data.text_color || defaults.textColor,
-      textMutedColor: data.text_muted_color || defaults.textMutedColor,
-      fontFamily: data.font_family || defaults.fontFamily,
-      logoPath: data.logo_path || defaults.logoPath,
-      faviconPath: data.favicon_path || defaults.faviconPath,
-      docsUrl: data.docs_url || '',
-      supportUrl: data.support_url || ''
+      primaryColor: data.primaryColor || data.primary_color || defaults.primaryColor,
+      secondaryColor: data.secondaryColor || data.secondary_color || defaults.secondaryColor,
+      backgroundColor: data.backgroundColor || data.background_color || defaults.backgroundColor,
+      surfaceColor: data.surfaceColor || data.surface_color || defaults.surfaceColor,
+      textColor: data.textColor || data.text_color || defaults.textColor,
+      textMutedColor: data.textMutedColor || data.text_muted_color || defaults.textMutedColor,
+      fontFamily: data.fontFamily || data.font_family || defaults.fontFamily,
+      logoPath: data.logoPath || data.logo_path || defaults.logoPath,
+      faviconPath: data.faviconPath || data.favicon_path || defaults.faviconPath,
+      docsUrl: data.docsUrl || data.docs_url || '',
+      supportUrl: data.supportUrl || data.support_url || ''
     };
     
     branding.set(b);

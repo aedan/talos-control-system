@@ -53,6 +53,26 @@
     }
   }
 
+  async function probeVersions() {
+    busy = true;
+    try {
+      const res = (await client.post(`/clusters/${$page.params.id}/talos/versions`, {})) as {
+        ok: number;
+        failed: number;
+        versions?: string[];
+      };
+      cluster = await client.get(`/clusters/${$page.params.id}`);
+      success(
+        `Version probe: ${res.ok} ok, ${res.failed} failed` +
+          (res.versions?.length ? ` (${res.versions.join(', ')})` : '')
+      );
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Version probe failed');
+    } finally {
+      busy = false;
+    }
+  }
+
   async function saveTalosconfig() {
     if (!talosconfigText.trim()) return;
     busy = true;
@@ -82,6 +102,7 @@
       <div class="actions">
         <Button variant="secondary" size="sm" onclick={refresh} disabled={busy}>Refresh from K8s</Button>
         <Button variant="secondary" size="sm" onclick={testTalos} disabled={busy}>Test Talos</Button>
+        <Button variant="secondary" size="sm" onclick={probeVersions} disabled={busy}>Probe versions</Button>
       </div>
     </div>
 
@@ -105,6 +126,14 @@
       <div class="info-item">
         <span class="info-label">Kubeconfig</span>
         <span class="info-value">{cluster.hasKubeconfig || cluster.has_kubeconfig ? 'Stored' : 'Missing'}</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">Last auto backup</span>
+        <span class="info-value">
+          {cluster.lastAutoBackupAt
+            ? new Date(cluster.lastAutoBackupAt).toLocaleString()
+            : '—'}
+        </span>
       </div>
     </div>
 
