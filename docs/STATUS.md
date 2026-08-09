@@ -25,6 +25,7 @@ Prefer **import + observe + limited Talos actions** over greenfield lifecycle cl
 | Scheduled etcd backups | **Supported** | Per-cluster interval hours; ~15m scheduler tick |
 | Etcd restore | **Supported** | EtcdRecover + optional Bootstrap; destructive; requires confirm |
 | Machine version probe | **Supported** | |
+| Machine hostname / service list | **Supported** | Day-2 inspection via Talos API |
 | Machine reboot | **Supported** | |
 | Machine upgrade | **Supported** | Image string via API |
 | Cluster create (provision) | **Not implemented** | UI creates **inventory record only** |

@@ -513,6 +513,28 @@ pub async fn get_machine_version(
     }
 }
 
+pub async fn get_machine_services(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller.machine_services(id).await {
+        Ok(services) => Ok(Json(serde_json::json!({ "services": services }))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+pub async fn get_machine_hostname(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller.machine_hostname(id).await {
+        Ok(hostname) => Ok(Json(serde_json::json!({ "hostname": hostname }))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct UpdateMachineRequest {
     pub address: Option<String>,
@@ -1341,6 +1363,8 @@ pub async fn get_system_info(
             "etcdRestore": true,
             "configApply": true,
             "machineUpgrade": true,
+            "machineServices": true,
+            "scheduledBackups": true,
             "clusterProvision": false,
             "siderolink": false,
             "saml": false,
@@ -1972,6 +1996,7 @@ pub async fn restore_cluster_backup(
 // ─── Machine Classes ───────────────────────────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateMachineClassRequest {
     pub name: String,
     #[serde(default)]

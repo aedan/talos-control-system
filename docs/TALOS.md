@@ -51,6 +51,8 @@ PUT /api/machines/{id}
 | Action | Method | Requires |
 |--------|--------|----------|
 | Probe version | `GET /api/machines/{id}/version` | talosconfig + address |
+| Hostname | `GET /api/machines/{id}/hostname` | talosconfig + address |
+| Service list | `GET /api/machines/{id}/services` | talosconfig + address |
 | Reboot | `POST /api/machines/{id}/reboot` | talosconfig + address |
 | Upgrade | `POST /api/machines/{id}/upgrade` | `{ "image": "ghcr.io/siderolabs/installer:v1.x" }` |
 | Apply config patches | `POST /api/clusters/{id}/config/apply` | optional `{ "dry_run": true }` |
