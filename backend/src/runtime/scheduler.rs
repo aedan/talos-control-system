@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{self, Interval};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, broadcast};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -29,9 +29,10 @@ impl ReconciliationMode {
 pub struct ControllerScheduler {
     modes: HashMap<ControllerId, ReconciliationMode>,
     task_handles: HashMap<ControllerId, JoinHandle<()>>,
-    _shutdown_tx: mpsc::Sender<ShutdownMessage>,
+    shutdown_tx: broadcast::Sender<ShutdownMessage>,
 }
 
+#[derive(Clone)]
 enum ShutdownMessage {
     Stop(ControllerId),
     UpdateMode(ControllerId, ReconciliationMode),
@@ -39,13 +40,12 @@ enum ShutdownMessage {
 
 impl ControllerScheduler {
     pub fn new() -> Self {
-        let (shutdown_tx, _shutdown_rx) = mpsc::channel(32);
-        let _ = _shutdown_rx;
+        let (shutdown_tx, _) = broadcast::channel(32);
 
         Self {
             modes: HashMap::new(),
             task_handles: HashMap::new(),
-            _shutdown_tx: shutdown_tx,
+            shutdown_tx,
         }
     }
 
@@ -67,25 +67,56 @@ impl ControllerScheduler {
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
+        let mut rx = self.shutdown_tx.subscribe();
         tokio::spawn(async move {
             let mut interval: Interval = time::interval(mode.interval());
+            // Skip initial immediate tick
+            interval.tick().await;
 
             loop {
-                interval.tick().await;
-                reconcile_fn().await;
+                tokio::select! {
+                    _ = interval.tick() => {
+                        reconcile_fn().await;
+                    }
+                    result = rx.recv() => {
+                        match result {
+                            Ok(msg) => {
+                                match msg {
+                                    ShutdownMessage::Stop(ctrl_id) if ctrl_id == id => {
+                                        info!(controller = %id, "Controller stopped via shutdown signal");
+                                        break;
+                                    }
+                                    ShutdownMessage::UpdateMode(ctrl_id, new_mode) if ctrl_id == id => {
+                                        info!(controller = %id, ?new_mode, "Controller mode updated");
+                                        interval = time::interval(new_mode.interval());
+                                        interval.tick().await;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Lagged(n)) => {
+                                warn!(count = n, "Shutdown channel lagged for controller {}", id);
+                            }
+                            Err(broadcast::error::RecvError::Closed) => {
+                                info!(controller = %id, "Shutdown channel closed, stopping");
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         })
     }
 
     pub async fn update_mode(&self, id: &ControllerId, mode: ReconciliationMode) -> Result<(), String> {
-        self._shutdown_tx.send(ShutdownMessage::UpdateMode(*id, mode)).await
+        self.shutdown_tx.send(ShutdownMessage::UpdateMode(*id, mode))
             .map_err(|e| format!("Failed to update mode: {}", e))?;
         Ok(())
     }
 
     pub async fn shutdown(&self) {
         for id in self.task_handles.keys() {
-            let _ = self._shutdown_tx.send(ShutdownMessage::Stop(*id)).await;
+            let _ = self.shutdown_tx.send(ShutdownMessage::Stop(*id));
         }
     }
 }

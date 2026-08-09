@@ -214,8 +214,15 @@ impl ClusterController {
         Ok(())
     }
 
-    async fn cascade_cleanup(&self, _cluster: &Cluster) -> Result<(), AppError> {
-        tracing::info!(cluster_id = %_cluster.id, "Performing cascade cleanup");
+    async fn cascade_cleanup(&self, cluster: &Cluster) -> Result<(), AppError> {
+        tracing::info!(cluster_id = %cluster.id, "Performing cascade cleanup");
+        let machines = crate::db::repos::machine::list_by_cluster(&self.pool, cluster.id).await?;
+        for machine in machines {
+            tracing::info!(machine_id = %machine.id, "Deleting machine in cascade cleanup");
+            let _ = crate::db::repos::machine::delete(&self.pool, machine.id).await;
+        }
+        let _ = crate::db::repos::cluster::delete(&self.pool, cluster.id).await;
+        tracing::info!(cluster_id = %cluster.id, "Cascade cleanup complete");
         Ok(())
     }
 }

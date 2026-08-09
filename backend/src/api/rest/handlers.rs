@@ -155,7 +155,10 @@ pub async fn create_cluster(
     );
 
     match repos::cluster::create(&state.db_pool, &cluster).await {
-        Ok(c) => Ok((StatusCode::CREATED, Json(serde_json::to_value(c).unwrap()))),
+        Ok(c) => match serde_json::to_value(c) {
+            Ok(v) => Ok((StatusCode::CREATED, Json(v))),
+            Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        },
         Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
     }
 }
@@ -164,7 +167,13 @@ pub async fn list_clusters(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     match repos::cluster::list(&state.db_pool).await {
-        Ok(clusters) => Ok(Json(clusters.into_iter().map(|c| serde_json::to_value(c).unwrap()).collect())),
+        Ok(clusters) => {
+            let vals: Result<Vec<_>, _> = clusters.into_iter().map(serde_json::to_value).collect();
+            match vals {
+                Ok(v) => Ok(Json(v)),
+                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+            }
+        }
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
 }
@@ -174,7 +183,10 @@ pub async fn get_cluster(
     Path(id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     match repos::cluster::get(&state.db_pool, id).await {
-        Ok(Some(cluster)) => Ok(Json(serde_json::to_value(cluster).unwrap())),
+        Ok(Some(cluster)) => match serde_json::to_value(cluster) {
+            Ok(v) => Ok(Json(v)),
+            Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        },
         Ok(None) => Err((StatusCode::NOT_FOUND, "Cluster not found".to_string())),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
@@ -191,7 +203,10 @@ pub async fn update_cluster(
                 cluster.name = name.to_string();
             }
             match repos::cluster::update(&state.db_pool, &cluster).await {
-                Ok(c) => Ok(Json(serde_json::to_value(c).unwrap())),
+                Ok(c) => match serde_json::to_value(c) {
+                    Ok(v) => Ok(Json(v)),
+                    Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+                },
                 Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
             }
         },
@@ -214,7 +229,13 @@ pub async fn list_machines(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     match repos::machine::list(&state.db_pool).await {
-        Ok(machines) => Ok(Json(machines.into_iter().map(|m| serde_json::to_value(m).unwrap()).collect())),
+        Ok(machines) => {
+            let vals: Result<Vec<_>, _> = machines.into_iter().map(serde_json::to_value).collect();
+            match vals {
+                Ok(v) => Ok(Json(v)),
+                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+            }
+        }
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
 }
@@ -224,7 +245,10 @@ pub async fn get_machine(
     Path(id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     match repos::machine::get(&state.db_pool, id).await {
-        Ok(Some(machine)) => Ok(Json(serde_json::to_value(machine).unwrap())),
+        Ok(Some(machine)) => match serde_json::to_value(machine) {
+            Ok(v) => Ok(Json(v)),
+            Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        },
         Ok(None) => Err((StatusCode::NOT_FOUND, "Machine not found".to_string())),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
@@ -273,7 +297,7 @@ pub async fn import_cluster(
                 .unwrap_or_default();
 
             Ok((StatusCode::CREATED, Json(ImportClusterResponse {
-                cluster: serde_json::to_value(cluster).unwrap(),
+                cluster: serde_json::to_value(cluster).unwrap_or_default(),
                 machines_imported: machines.len() as i32,
             })))
         }
@@ -288,7 +312,10 @@ pub async fn preview_import(
     let controller = crate::controllers::cluster::ClusterController::new(state.db_pool.clone());
 
     match controller.preview_import(payload.kubeconfig).await {
-        Ok(discovered) => Ok(Json(serde_json::to_value(discovered).unwrap())),
+        Ok(discovered) => match serde_json::to_value(discovered) {
+            Ok(v) => Ok(Json(v)),
+            Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        },
         Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
     }
 }
@@ -356,12 +383,43 @@ pub async fn login(
     }))
 }
 
-pub async fn logout() -> StatusCode {
+pub async fn logout(
+    headers: HeaderMap,
+) -> StatusCode {
+    if let Some(auth_header) = headers.get(axum::http::header::AUTHORIZATION) {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if let Some(token) = auth_str.strip_prefix("Bearer ") {
+                if let Ok(token_data) = verify_jwt(token) {
+                    tracing::info!(email = %token_data.claims.sub, "User logged out");
+                }
+            }
+        }
+    }
     StatusCode::OK
 }
 
-pub async fn refresh_token() -> StatusCode {
-    StatusCode::OK
+pub async fn refresh_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<LoginResponse>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+
+    // Issue new token with same claims
+    let new_token = create_jwt(&create_claims(
+        &claims.sub,
+        &claims.role,
+        std::time::Duration::from_secs(3600),
+    )).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let user = repos::user::get_by_email(&state.db_pool, &claims.sub)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "User not found".to_string()))?;
+
+    Ok(Json(LoginResponse {
+        token: new_token,
+        user,
+    }))
 }
 
 #[derive(Deserialize)]

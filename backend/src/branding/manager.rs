@@ -9,6 +9,7 @@ use crate::AppError;
 pub struct BrandingManager {
     defaults: BrandingConfig,
     pool: sqlx::SqlitePool,
+    cache: Arc<tokio::sync::RwLock<HashMap<String, BrandingConfig>>>,
 }
 
 impl BrandingManager {
@@ -16,6 +17,7 @@ impl BrandingManager {
         let manager = Self {
             defaults: defaults.clone(),
             pool: pool.clone(),
+            cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         };
 
         manager.load_from_db().await?;
@@ -23,22 +25,72 @@ impl BrandingManager {
         Ok(manager)
     }
 
-    pub fn get_branding(&self, _tenant_id: &str) -> BrandingConfig {
-        self.defaults.clone()
+    pub fn get_branding(&self, tenant_id: &str) -> BrandingConfig {
+        // Fast path: check in-memory cache
+        {
+            let cache = self.cache.blocking_read();
+            if let Some(b) = cache.get(tenant_id) {
+                return b.clone();
+            }
+        }
+
+        // Slow path: query database synchronously
+        let pool = self.pool.clone();
+        let defaults = self.defaults.clone();
+        let tid = tenant_id.to_string();
+        let cache = Arc::clone(&self.cache);
+
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            match rt.block_on(sqlx::query_as::<_, TenantBranding>(
+                "SELECT * FROM tenant_branding WHERE tenant_id = ?"
+            ).bind(&tid).fetch_optional(&pool)) {
+                Ok(Some(tenant)) => {
+                    let b = tenant.merge_with_defaults(&defaults);
+                    let mut cache = cache.blocking_write();
+                    cache.insert(tid, b.clone());
+                    b
+                }
+                _ => defaults,
+            }
+        })
     }
 
-    pub async fn update_branding(&self, _tenant_id: &str, branding: &TenantBranding) -> Result<(), AppError> {
+    pub async fn update_branding(&self, tenant_id: &str, branding: &TenantBranding) -> Result<(), AppError> {
         repos::branding::upsert_tenant_branding(&self.pool, branding).await?;
-        tracing::info!(tenant_id = %branding.tenant_id, "Branding updated");
+        {
+            let mut cache = self.cache.write().await;
+            cache.remove(tenant_id);
+        }
+        tracing::info!(tenant_id = %branding.tenant_id, "Branding updated and cache invalidated");
         Ok(())
     }
 
     pub async fn reload(&self) -> Result<(), AppError> {
-        self.load_from_db().await
+        let mut cache = self.cache.write().await;
+        cache.clear();
+        self.load_from_db_internal(&mut *cache).await?;
+        Ok(())
     }
 
     async fn load_from_db(&self) -> Result<(), AppError> {
-        let _ = repos::branding::get_default_branding(&self.pool).await;
+        let mut cache = self.cache.write().await;
+        self.load_from_db_internal(&mut *cache).await
+    }
+
+    async fn load_from_db_internal(&self, cache: &mut HashMap<String, BrandingConfig>) -> Result<(), AppError> {
+        let rows = sqlx::query_as::<_, TenantBranding>(
+            "SELECT * FROM tenant_branding"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        for tenant in rows {
+            let branding = tenant.merge_with_defaults(&self.defaults);
+            cache.insert(tenant.tenant_id.clone(), branding);
+        }
+
+        tracing::info!(count = cache.len(), "Loaded tenant branding from database");
         Ok(())
     }
 

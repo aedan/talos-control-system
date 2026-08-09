@@ -186,15 +186,10 @@ async fn build_client_from_kubeconfig(config: &Kubeconfig) -> Result<kube::Clien
     let ca_data = extract_ca_data(config);
     let (_client_ca, client_cert, token) = extract_auth(config);
 
-    let kubeconfig_yaml = serde_yaml::to_string(config).map_err(|e| {
-        AppError::InvalidInput(format!("Failed to serialize kubeconfig: {}", e))
-    })?;
-
-    let ca_data = extract_ca_data(config);
-    let (_client_ca, client_cert, token) = extract_auth(config);
-
     let mut kube_config = kube::config::Config::new(
-        cluster.cluster.server.parse().unwrap()
+        cluster.cluster.server.parse().map_err(|e| {
+            AppError::InvalidInput(format!("Invalid server URL: {}", e))
+        })?
     );
 
     if !ca_data.is_empty() {
@@ -217,16 +212,131 @@ async fn build_client_from_kubeconfig(config: &Kubeconfig) -> Result<kube::Clien
 pub struct KubernetesClient {
     cluster_id: uuid::Uuid,
     endpoint: String,
+    client: Option<kube::Client>,
 }
 
 impl KubernetesClient {
-    pub async fn new(cluster_id: uuid::Uuid, endpoint: String, _ca_data: Vec<u8>, _token: String) -> Result<Self, AppError> {
+    pub async fn new(cluster_id: uuid::Uuid, endpoint: String, ca_data: Vec<u8>, token: String) -> Result<Self, AppError> {
         info!(cluster_id = %cluster_id, endpoint = %endpoint, "Kubernetes client initialized");
-        Ok(Self { cluster_id, endpoint })
+        let client = if !ca_data.is_empty() || !token.is_empty() {
+            let mut kube_config = kube::config::Config::new(endpoint.parse().map_err(|e| {
+                AppError::InvalidInput(format!("Invalid endpoint URL: {}", e))
+            })?);
+
+            if !ca_data.is_empty() {
+                kube_config.root_cert = Some(vec![ca_data]);
+            }
+            if !token.is_empty() {
+                kube_config.auth_info.token = Some(token.into());
+            }
+
+            Some(kube::Client::try_from(kube_config).map_err(|e| {
+                AppError::Internal(format!("Failed to build kube client: {}", e))
+            })?)
+        } else {
+            None
+        };
+
+        Ok(Self { cluster_id, endpoint, client })
     }
 
     pub async fn apply_manifest(&self, manifest: &str) -> Result<(), AppError> {
-        tracing::debug!(manifest_len = manifest.len(), "Applying manifest");
+        // Split YAML by document separator and parse each
+        let docs: Vec<&str> = manifest
+            .split("\n---")
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+
+        for doc in docs {
+            let value: serde_json::Value = serde_yaml::from_str(doc)
+                .map_err(|e| AppError::InvalidInput(format!("Invalid YAML document: {}", e)))?;
+
+            let kind = value.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+            let api_version = value.get("apiVersion").and_then(|v| v.as_str()).unwrap_or("");
+            let name = value.get("metadata").and_then(|m| m.get("name")).and_then(|n| n.as_str()).unwrap_or("");
+            let namespace = value.get("metadata").and_then(|m| m.get("namespace")).and_then(|n| n.as_str());
+
+            if kind.is_empty() || name.is_empty() {
+                continue;
+            }
+
+            tracing::info!(kind, api_version, name, namespace, "Applying manifest document");
+
+            // Build the K8s API URL
+            let ns_segment = namespace.map(|ns| format!("/namespaces/{}", ns)).unwrap_or_default();
+            let resource_kind = match kind {
+                "Namespace" => "namespaces",
+                "ConfigMap" => "configmaps",
+                "Service" => "services",
+                "Deployment" => "deployments",
+                "ServiceAccount" => "serviceaccounts",
+                "Role" => "roles",
+                "RoleBinding" => "rolebindings",
+                "ClusterRole" => "clusterroles",
+                "ClusterRoleBinding" => "clusterrolebindings",
+                "Ingress" => "ingresses",
+                _ => {
+                    tracing::warn!(kind, "Unsupported resource kind, skipping");
+                    continue;
+                }
+            };
+
+            let api_group = match api_version {
+                "v1" => "",
+                "apps/v1" => "apps",
+                "rbac.authorization.k8s.io/v1" => "rbac.authorization.k8s.io",
+                "networking.k8s.io/v1" => "networking.k8s.io",
+                other => {
+                    other.split('/').next().unwrap_or("")
+                }
+            };
+
+            let api_prefix = if api_group.is_empty() {
+                "api/v1".to_string()
+            } else {
+                format!("apis/{}/{}", api_group, api_version.split('/').last().unwrap_or("v1"))
+            };
+
+            let url = if kind == "Namespace" || matches!(kind, "ClusterRole" | "ClusterRoleBinding") {
+                format!("{}/{}/{}/{}", self.endpoint, api_prefix, resource_kind, name)
+            } else {
+                format!("{}/{}/{}{}/{}", self.endpoint, api_prefix, ns_segment, resource_kind, name)
+            };
+
+            let apply_body = serde_json::json!({
+                "apiVersion": api_version,
+                "kind": kind,
+                "metadata": {
+                    "name": name,
+                    "namespace": namespace,
+                    "ownerReferences": [{
+                        "apiVersion": "v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "Service",
+                        "name": "tcs-manager",
+                        "uid": "tcs-manager"
+                    }]
+                },
+                "spec": value.get("spec").unwrap_or(&serde_json::Value::Object(Default::default())),
+            });
+
+            let client = reqwest::Client::new();
+            let req = client.patch(&url)
+                .header("Content-Type", "application/apply-patch+json")
+                .query(&[("fieldManager", "tcs"), ("force", "true")])
+                .body(apply_body.to_string());
+
+            let resp = req.send().await
+                .map_err(|e| AppError::Network(format!("Failed to apply {}: {}", kind, e)))?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                tracing::warn!(kind, name, status = %status, body, "Failed to apply manifest (non-fatal)");
+            }
+        }
+
         Ok(())
     }
 

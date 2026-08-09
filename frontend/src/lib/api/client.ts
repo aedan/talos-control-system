@@ -48,7 +48,6 @@ export class TcsClient {
     if (res.status === 401 && typeof window !== 'undefined') {
       if (window.location.pathname !== '/login') {
         localStorage.removeItem('tcs_token');
-        window.location.href = '/login';
       }
       const err: ApiError = new Error('Authentication required');
       err.status = 401;

@@ -5,12 +5,13 @@
   
   let cluster = $state(null as any);
   let loading = $state(true);
+  let error = $state('');
   
   onMount(async () => {
     try {
       cluster = await client.get(`/clusters/${$page.params.id}`);
-    } catch {
-      // Handle error
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : 'Failed to load cluster';
     } finally {
       loading = false;
     }
@@ -18,9 +19,11 @@
 </script>
 
 <div class="cluster-detail">
-  {#if loading}
+{#if loading}
     <p>Loading...</p>
-  {:else if cluster}
+{:else if error}
+    <div class="error-banner">{error}</div>
+{:else if cluster}
     <h1>{cluster.name}</h1>
     
     <div class="info-grid">
@@ -39,10 +42,10 @@
     </div>
     
     <nav class="tabs">
-      <a href="/clusters/{cluster.id}/nodes">Nodes</a>
-      <a href="/clusters/{cluster.id}/machines">Machines</a>
-      <a href="/clusters/{cluster.id}/config">Config</a>
-      <a href="/clusters/{cluster.id}/backups">Backups</a>
+      <a href="/clusters/{$page.params.id}/nodes">Nodes</a>
+      <a href="/clusters/{$page.params.id}/machines">Machines</a>
+      <a href="/clusters/{$page.params.id}/config">Config</a>
+      <a href="/clusters/{$page.params.id}/backups">Backups</a>
     </nav>
     
     <slot />
@@ -64,4 +67,14 @@
     transition: all 0.15s;
   }
   .tabs a:hover { color: var(--tcs-text); text-decoration: none; }
+
+  .error-banner {
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    color: var(--tcs-error, #ef4444);
+    font-size: 0.875rem;
+    margin-bottom: 1.5rem;
+  }
 </style>

@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { page } from '$app/stores';
   import { client } from '$lib/api/client';
   import { success, error as notifyError } from '$lib/stores/notifications';
+  import { goto } from '$app/navigation';
   import Button from '$lib/components/Button.svelte';
   
   let name = '';
@@ -25,7 +25,7 @@
         ]
       });
       success('Cluster created successfully');
-      window.location.href = '/clusters';
+      goto('/clusters');
     } catch (e: unknown) {
       notifyError(e instanceof Error ? e.message : 'Failed to create cluster');
     } finally {

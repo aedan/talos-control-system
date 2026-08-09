@@ -20,6 +20,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 moka = { version = "0.12", features = ["future"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+crc32fast = "1"
+flate2 = "1"
+fastrand = "2"
 prometheus = "0.13"
 jsonwebtoken = "9"
 oauth2 = "4"

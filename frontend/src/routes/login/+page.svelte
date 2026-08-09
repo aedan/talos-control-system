@@ -1,6 +1,7 @@
 <script lang="ts">
   import Logo from '$lib/branding/components/Logo.svelte';
   import Button from '$lib/components/Button.svelte';
+  import { goto } from '$app/navigation';
   
   let email = '';
   let password = '';
@@ -23,7 +24,7 @@
       }
       const data = await res.json();
       localStorage.setItem('tcs_token', data.token);
-      window.location.href = '/';
+      goto('/');
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Authentication failed';
     } finally {
