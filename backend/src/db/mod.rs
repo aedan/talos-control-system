@@ -22,8 +22,6 @@ pub async fn init_pool(config: &DatabaseConfig) -> Result<SqlitePool, AppError> 
 }
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
-    let migration_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
-
     // Create migration tracking table
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS _tcs_migrations (
@@ -35,29 +33,26 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
     .execute(pool)
     .await?;
 
-    let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(&migration_dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".sql"))
-        .collect();
-
-    entries.sort_by_key(|e| e.file_name());
+    // Use embedded migrations (via include_str!) to avoid filesystem dependency
+    let migrations = [
+        ("001_initial.sql", include_str!("migrations/001_initial.sql")),
+        ("002_auth_extensions.sql", include_str!("migrations/002_auth_extensions.sql")),
+    ];
 
     let mut tx = pool.begin().await?;
 
-    for entry in entries {
-        let name = entry.file_name().to_string_lossy().to_string();
+    for (name, sql) in migrations {
         let existing: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM _tcs_migrations WHERE name = ?)"
         )
-        .bind(&name)
+        .bind(name)
         .fetch_one(&mut *tx)
         .await?;
 
         if !existing {
-            let sql = std::fs::read_to_string(entry.path())?;
-            sqlx::query(&sql).execute(&mut *tx).await?;
+            sqlx::query(sql).execute(&mut *tx).await?;
             sqlx::query("INSERT INTO _tcs_migrations (name) VALUES (?)")
-                .bind(&name)
+                .bind(name)
                 .execute(&mut *tx)
                 .await?;
             tracing::info!(file = %name, "Migration applied");

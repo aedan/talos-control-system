@@ -14,3 +14,4 @@ frontend/build/
 .vscode/
 *.pid
 config.toml
+tcs-release.tar.gz
