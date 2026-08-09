@@ -9,8 +9,8 @@ pub async fn create(pool: &SqlitePool, machine: &Machine) -> Result<Machine, App
     }
 
     let result = sqlx::query(
-        "INSERT INTO machines (id, system_uuid, machine_type, cluster_id, status, talos_version, secure_boot, siderolink_connected, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO machines (id, system_uuid, machine_type, cluster_id, status, talos_version, secure_boot, siderolink_connected, address, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(machine.id)
     .bind(&machine.system_uuid)
@@ -20,6 +20,7 @@ pub async fn create(pool: &SqlitePool, machine: &Machine) -> Result<Machine, App
     .bind(&machine.talos_version)
     .bind(machine.secure_boot)
     .bind(machine.siderolink_connected)
+    .bind(&machine.address)
     .bind(machine.created_at)
     .bind(machine.updated_at)
     .execute(pool)
@@ -77,7 +78,7 @@ pub async fn list_by_cluster(pool: &SqlitePool, cluster_id: uuid::Uuid) -> Resul
 
 pub async fn update(pool: &SqlitePool, machine: &Machine) -> Result<Machine, AppError> {
     let result = sqlx::query(
-        "UPDATE machines SET system_uuid = ?, machine_type = ?, cluster_id = ?, status = ?, talos_version = ?, secure_boot = ?, siderolink_connected = ?, updated_at = ?
+        "UPDATE machines SET system_uuid = ?, machine_type = ?, cluster_id = ?, status = ?, talos_version = ?, secure_boot = ?, siderolink_connected = ?, address = ?, updated_at = ?
          WHERE id = ?"
     )
     .bind(&machine.system_uuid)
@@ -87,6 +88,7 @@ pub async fn update(pool: &SqlitePool, machine: &Machine) -> Result<Machine, App
     .bind(&machine.talos_version)
     .bind(machine.secure_boot)
     .bind(machine.siderolink_connected)
+    .bind(&machine.address)
     .bind(machine.updated_at)
     .bind(machine.id)
     .execute(pool)

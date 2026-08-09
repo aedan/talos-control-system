@@ -19,6 +19,9 @@ pub struct Cluster {
     pub control_plane_size: i32,
     #[sqlx(rename = "worker_size")]
     pub worker_size: i32,
+    /// Full talosconfig YAML (mTLS certs + endpoints). Sensitive — omit from list APIs.
+    #[sqlx(rename = "talosconfig")]
+    pub talosconfig: Option<String>,
     #[sqlx(rename = "created_at")]
     pub created_at: DateTime<Utc>,
     #[sqlx(rename = "updated_at")]
@@ -35,9 +38,17 @@ impl Cluster {
             status: "unknown".to_string(),
             control_plane_size: 1,
             worker_size: 1,
+            talosconfig: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    pub fn has_talos_credentials(&self) -> bool {
+        self.talosconfig
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
     }
 
     pub fn update_status(&mut self, status: &str) {

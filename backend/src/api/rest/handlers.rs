@@ -155,10 +155,7 @@ pub async fn create_cluster(
     );
 
     match repos::cluster::create(&state.db_pool, &cluster).await {
-        Ok(c) => match serde_json::to_value(c) {
-            Ok(v) => Ok((StatusCode::CREATED, Json(v))),
-            Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-        },
+        Ok(c) => Ok((StatusCode::CREATED, Json(cluster_public_json(c)))),
         Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
     }
 }
@@ -167,13 +164,9 @@ pub async fn list_clusters(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     match repos::cluster::list(&state.db_pool).await {
-        Ok(clusters) => {
-            let vals: Result<Vec<_>, _> = clusters.into_iter().map(serde_json::to_value).collect();
-            match vals {
-                Ok(v) => Ok(Json(v)),
-                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-            }
-        }
+        Ok(clusters) => Ok(Json(
+            clusters.into_iter().map(cluster_public_json).collect(),
+        )),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
 }
@@ -183,10 +176,7 @@ pub async fn get_cluster(
     Path(id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     match repos::cluster::get(&state.db_pool, id).await {
-        Ok(Some(cluster)) => match serde_json::to_value(cluster) {
-            Ok(v) => Ok(Json(v)),
-            Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-        },
+        Ok(Some(cluster)) => Ok(Json(cluster_public_json(cluster))),
         Ok(None) => Err((StatusCode::NOT_FOUND, "Cluster not found".to_string())),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
@@ -203,13 +193,10 @@ pub async fn update_cluster(
                 cluster.name = name.to_string();
             }
             match repos::cluster::update(&state.db_pool, &cluster).await {
-                Ok(c) => match serde_json::to_value(c) {
-                    Ok(v) => Ok(Json(v)),
-                    Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-                },
+                Ok(c) => Ok(Json(cluster_public_json(c))),
                 Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
             }
-        },
+        }
         Ok(None) => Err((StatusCode::NOT_FOUND, "Cluster not found".to_string())),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
@@ -277,6 +264,9 @@ pub async fn get_metrics() -> String {
 pub struct ImportClusterRequest {
     pub name: String,
     pub kubeconfig: String,
+    /// Optional talosconfig YAML (mTLS client credentials). Required for backups / apply / reboot.
+    #[serde(default)]
+    pub talosconfig: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -285,21 +275,45 @@ pub struct ImportClusterResponse {
     pub machines_imported: i32,
 }
 
+fn cluster_public_json(mut cluster: crate::db::models::cluster::Cluster) -> serde_json::Value {
+    let has_creds = cluster.has_talos_credentials();
+    cluster.talosconfig = None;
+    let mut v = serde_json::to_value(&cluster).unwrap_or_default();
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("has_talosconfig".to_string(), serde_json::Value::Bool(has_creds));
+    }
+    v
+}
+
+fn controller_for(state: &AppState) -> crate::controllers::cluster::ClusterController {
+    crate::controllers::cluster::ClusterController::with_sqlite_path(
+        state.db_pool.clone(),
+        state.config.database.sqlite_path.clone(),
+    )
+}
+
 pub async fn import_cluster(
     State(state): State<AppState>,
     Json(payload): Json<ImportClusterRequest>,
 ) -> Result<(StatusCode, Json<ImportClusterResponse>), (StatusCode, String)> {
-    let controller = crate::controllers::cluster::ClusterController::new(state.db_pool.clone());
+    let controller = controller_for(&state);
 
-    match controller.import_cluster(payload.name, payload.kubeconfig).await {
+    match controller
+        .import_cluster(payload.name, payload.kubeconfig, payload.talosconfig)
+        .await
+    {
         Ok(cluster) => {
-            let machines = crate::db::repos::machine::list_by_cluster(&state.db_pool, cluster.id).await
+            let machines = crate::db::repos::machine::list_by_cluster(&state.db_pool, cluster.id)
+                .await
                 .unwrap_or_default();
 
-            Ok((StatusCode::CREATED, Json(ImportClusterResponse {
-                cluster: serde_json::to_value(cluster).unwrap_or_default(),
-                machines_imported: machines.len() as i32,
-            })))
+            Ok((
+                StatusCode::CREATED,
+                Json(ImportClusterResponse {
+                    cluster: cluster_public_json(cluster),
+                    machines_imported: machines.len() as i32,
+                }),
+            ))
         }
         Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
     }
@@ -309,13 +323,72 @@ pub async fn preview_import(
     State(state): State<AppState>,
     Json(payload): Json<ImportClusterRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let controller = crate::controllers::cluster::ClusterController::new(state.db_pool.clone());
+    let controller = controller_for(&state);
 
     match controller.preview_import(payload.kubeconfig).await {
         Ok(discovered) => match serde_json::to_value(discovered) {
             Ok(v) => Ok(Json(v)),
             Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
         },
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SetTalosconfigRequest {
+    pub talosconfig: String,
+}
+
+pub async fn set_cluster_talosconfig(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<uuid::Uuid>,
+    Json(payload): Json<SetTalosconfigRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller
+        .set_talosconfig(cluster_id, payload.talosconfig)
+        .await
+    {
+        Ok(()) => Ok(Json(serde_json::json!({
+            "ok": true,
+            "has_talosconfig": true,
+        }))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+pub async fn apply_cluster_config(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller.apply_config_patches(cluster_id).await {
+        Ok(applied) => Ok(Json(serde_json::json!({
+            "applied_to": applied,
+            "count": applied.len(),
+        }))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+pub async fn reboot_machine(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller.reboot_machine(id).await {
+        Ok(()) => Ok(Json(serde_json::json!({ "ok": true, "action": "reboot" }))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+pub async fn get_machine_version(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller.machine_version(id).await {
+        Ok(version) => Ok(Json(serde_json::json!({ "talos_version": version }))),
         Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
     }
 }
@@ -1570,46 +1643,86 @@ pub async fn create_cluster_backup(
     Path(cluster_id): Path<uuid::Uuid>,
     Json(payload): Json<CreateBackupRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
-    match repos::cluster::get(&state.db_pool, cluster_id).await {
-        Ok(Some(_)) => {}
-        Ok(None) => return Err((StatusCode::NOT_FOUND, "Cluster not found".to_string())),
-        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-    }
-
-    let backup = crate::db::models::cluster_backup::ClusterBackup::new(
-        cluster_id,
-        payload.name,
-    );
-
-    match repos::cluster_backup::create(&state.db_pool, &backup).await {
+    let controller = controller_for(&state);
+    match controller.create_etcd_backup(cluster_id, payload.name).await {
         Ok(b) => match serde_json::to_value(b) {
             Ok(v) => Ok((StatusCode::CREATED, Json(v))),
             Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
         },
-        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+        Err(e) => {
+            let status = match &e {
+                crate::AppError::NotFound(_) => StatusCode::NOT_FOUND,
+                crate::AppError::InvalidInput(_) => StatusCode::BAD_REQUEST,
+                _ => StatusCode::BAD_GATEWAY,
+            };
+            Err((status, e.to_string()))
+        }
     }
 }
 
 pub async fn download_cluster_backup(
     State(state): State<AppState>,
     Path((cluster_id, backup_id)): Path<(uuid::Uuid, uuid::Uuid)>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::body::Body;
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    use tokio_util::io::ReaderStream;
+
     match repos::cluster::get(&state.db_pool, cluster_id).await {
         Ok(Some(_)) => {}
         Ok(None) => return Err((StatusCode::NOT_FOUND, "Cluster not found".to_string())),
         Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
 
-    match repos::cluster_backup::get(&state.db_pool, backup_id).await {
-        Ok(Some(_)) => {
-            Ok(Json(serde_json::json!({
-                "download_url": format!("/api/clusters/{}/backups/{}", cluster_id, backup_id),
-                "message": "Download URL provided",
-            })))
-        }
-        Ok(None) => Err((StatusCode::NOT_FOUND, "Backup not found".to_string())),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    let backup = match repos::cluster_backup::get(&state.db_pool, backup_id).await {
+        Ok(Some(b)) => b,
+        Ok(None) => return Err((StatusCode::NOT_FOUND, "Backup not found".to_string())),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    };
+
+    if backup.cluster_id != cluster_id {
+        return Err((StatusCode::NOT_FOUND, "Backup not found".to_string()));
     }
+
+    if backup.status != "ready" {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("Backup is not ready (status: {})", backup.status),
+        ));
+    }
+
+    let path = backup.file_path.as_ref().ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            "Backup has no file on disk".to_string(),
+        )
+    })?;
+
+    let file = tokio::fs::File::open(path).await.map_err(|e| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("Backup file missing: {}", e),
+        )
+    })?;
+
+    let stream = ReaderStream::new(file);
+    let body = Body::from_stream(stream);
+    let filename = format!("{}.snapshot", backup.name);
+
+    let mut response = body.into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        "application/octet-stream".parse().unwrap(),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        format!("attachment; filename=\"{}\"", filename)
+            .parse()
+            .unwrap(),
+    );
+    Ok(response)
 }
 
 pub async fn delete_cluster_backup(
@@ -1620,6 +1733,16 @@ pub async fn delete_cluster_backup(
         Ok(Some(_)) => {}
         Ok(None) => return Err((StatusCode::NOT_FOUND, "Cluster not found".to_string())),
         Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+
+    let backup = match repos::cluster_backup::get(&state.db_pool, backup_id).await {
+        Ok(Some(b)) => b,
+        Ok(None) => return Err((StatusCode::NOT_FOUND, "Backup not found".to_string())),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    };
+
+    if let Some(path) = &backup.file_path {
+        let _ = tokio::fs::remove_file(path).await;
     }
 
     match repos::cluster_backup::delete(&state.db_pool, backup_id).await {

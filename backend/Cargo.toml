@@ -11,6 +11,8 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 
 tokio = { version = "1", features = ["full"] }
 tonic = "0.12"
+talos-rust-client = { version = "0.1.3", features = ["talosconfig"] }
+tower = "0.4"
 prost = "0.13"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "postgres", "chrono", "uuid"] }
 serde = { version = "1", features = ["derive"] }

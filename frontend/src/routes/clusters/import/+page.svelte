@@ -8,6 +8,7 @@
 
   let name = '';
   let kubeconfig = '';
+  let talosconfig = '';
   let step = 'input' as 'input' | 'preview' | 'importing' | 'done';
   let preview = $state<DiscoveredCluster | null>(null);
   let err = $state<string | null>(null);
@@ -53,9 +54,14 @@
     storeLoading.set(true);
     err = null;
     try {
-      importResult = await importCluster(name, kubeconfig);
+      importResult = await importCluster(name, kubeconfig, talosconfig);
       step = 'done';
-      success(`Cluster "${name}" imported with ${importResult.machinesImported} machines`);
+      const n =
+        (importResult as { machines_imported?: number; machinesImported?: number })
+          .machines_imported ??
+        importResult.machinesImported ??
+        0;
+      success(`Cluster "${name}" imported with ${n} machines`);
       localStorage.setItem('last-kubeconfig', kubeconfig);
     } catch (e: unknown) {
       err = e instanceof Error ? e.message : 'Failed to import cluster';
@@ -114,6 +120,28 @@ clusters:
 - cluster:
     server: https://..."
           rows={16}
+          class="input kubeconfig-input"
+        ></textarea>
+      </div>
+
+      <div class="form-group">
+        <label for="talosconfig">Talosconfig YAML (optional, recommended)</label>
+        <p class="hint">
+          Paste <code>~/.talos/config</code> so TCS can call the Talos API (etcd backups, config apply, reboot).
+          Without it, import still works for inventory only.
+        </p>
+        <textarea
+          id="talosconfig"
+          bind:value={talosconfig}
+          placeholder="context: my-cluster
+contexts:
+  my-cluster:
+    endpoints:
+      - https://10.0.0.2:50000
+    ca: ...
+    crt: ...
+    key: ..."
+          rows={10}
           class="input kubeconfig-input"
         ></textarea>
       </div>

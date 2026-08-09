@@ -4033,6 +4033,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "sqlx",
+ "talos-rust-client",
  "thiserror 1.0.69",
  "tokio",
  "tokio-rustls 0.26.4",
@@ -4040,6 +4041,7 @@ dependencies = [
  "toml",
  "tonic",
  "tonic-build",
+ "tower 0.4.13",
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
@@ -4048,6 +4050,32 @@ dependencies = [
  "webpki-roots 0.26.11",
  "x25519-dalek",
  "x509-parser",
+]
+
+[[package]]
+name = "talos-rust-client"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91e5e3890930f0f3a17c5c90fb65cf60c921b0d3aa9fc324ee17e00a5283b171"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "futures-util",
+ "prost",
+ "prost-build",
+ "prost-types",
+ "rustls 0.23.43",
+ "rustls-pemfile 2.2.0",
+ "serde",
+ "serde_yaml",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tonic",
+ "tonic-build",
+ "tower 0.4.13",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -4333,8 +4361,11 @@ dependencies = [
  "percent-encoding",
  "pin-project",
  "prost",
+ "rustls-native-certs",
+ "rustls-pemfile 2.2.0",
  "socket2 0.5.10",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tokio-stream",
  "tower 0.4.13",
  "tower-layer",

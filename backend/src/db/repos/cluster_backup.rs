@@ -66,3 +66,24 @@ pub async fn delete(pool: &SqlitePool, id: uuid::Uuid) -> Result<(), AppError> {
 
     Ok(())
 }
+
+pub async fn update(pool: &SqlitePool, backup: &ClusterBackup) -> Result<ClusterBackup, AppError> {
+    let result = sqlx::query(
+        "UPDATE cluster_backups SET name = ?, status = ?, file_path = ?, size_bytes = ?, updated_at = ?
+         WHERE id = ?"
+    )
+    .bind(&backup.name)
+    .bind(&backup.status)
+    .bind(&backup.file_path)
+    .bind(backup.size_bytes)
+    .bind(backup.updated_at)
+    .bind(backup.id)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("Backup {} not found", backup.id)));
+    }
+
+    Ok(backup.clone())
+}

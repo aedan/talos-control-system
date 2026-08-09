@@ -69,15 +69,40 @@
       loading = false;
     }
   }
+
+  let applying = $state(false);
+  async function applyAll() {
+    applying = true;
+    try {
+      const res = (await client.post(`/clusters/${$page.params.id}/config/apply`, {})) as {
+        count: number;
+        applied_to: string[];
+      };
+      success(`Applied patches to ${res.count} machine(s)`);
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Failed to apply patches via Talos API');
+    } finally {
+      applying = false;
+    }
+  }
 </script>
 
 <div class="config-page">
   <div class="page-header">
     <h1>Config Patches</h1>
-    <Button variant="primary" onclick={() => showEditor = !showEditor}>
-      {showEditor ? 'Cancel' : 'Add Patch'}
-    </Button>
+    <div class="header-actions" style="display:flex;gap:0.5rem;">
+      <Button variant="secondary" onclick={applyAll} disabled={applying || patches.length === 0}>
+        {applying ? 'Applying…' : 'Apply to cluster'}
+      </Button>
+      <Button variant="primary" onclick={() => showEditor = !showEditor}>
+        {showEditor ? 'Cancel' : 'Add Patch'}
+      </Button>
+    </div>
   </div>
+  <p class="hint" style="opacity:0.8;margin-bottom:1rem;">
+    Patches are stored in TCS, then pushed with Talos <code>ApplyConfiguration</code> (strategic merge, no-reboot).
+    Requires a talosconfig on the cluster.
+  </p>
   
   {#if showEditor}
     <div class="patch-editor">

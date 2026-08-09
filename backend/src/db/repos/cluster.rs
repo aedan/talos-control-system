@@ -10,8 +10,8 @@ pub async fn create(pool: &SqlitePool, cluster: &Cluster) -> Result<Cluster, App
     }
 
     let result = sqlx::query(
-        "INSERT INTO clusters (id, name, control_plane_version, talos_version, status, control_plane_size, worker_size, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO clusters (id, name, control_plane_version, talos_version, status, control_plane_size, worker_size, talosconfig, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(cluster.id)
     .bind(&cluster.name)
@@ -20,6 +20,7 @@ pub async fn create(pool: &SqlitePool, cluster: &Cluster) -> Result<Cluster, App
     .bind(&cluster.status)
     .bind(cluster.control_plane_size)
     .bind(cluster.worker_size)
+    .bind(&cluster.talosconfig)
     .bind(cluster.created_at)
     .bind(cluster.updated_at)
     .execute(pool)
@@ -100,5 +101,26 @@ pub async fn update_status(pool: &SqlitePool, id: uuid::Uuid, status: &str) -> R
     .execute(pool)
     .await?;
 
+    Ok(())
+}
+
+pub async fn set_talosconfig(
+    pool: &SqlitePool,
+    id: uuid::Uuid,
+    talosconfig: &str,
+) -> Result<(), AppError> {
+    let now = chrono::Utc::now();
+    let result = sqlx::query(
+        "UPDATE clusters SET talosconfig = ?, updated_at = ? WHERE id = ?"
+    )
+    .bind(talosconfig)
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("Cluster {} not found", id)));
+    }
     Ok(())
 }

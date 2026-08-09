@@ -30,6 +30,7 @@
   let machine = $state<Machine | null>(null);
   let loading = $state(true);
   let error = $state('');
+  let actionBusy = $state(false);
   
   onMount(async () => {
     try {
@@ -46,6 +47,43 @@
     if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
     return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
   }
+
+  function displayName(m: Machine): string {
+    return (m as { hostname?: string | null; system_uuid?: string; systemUuid?: string }).hostname
+      || (m as { system_uuid?: string }).system_uuid
+      || m.systemUuid
+      || m.id;
+  }
+
+  async function probeVersion() {
+    actionBusy = true;
+    try {
+      const res = (await client.get(`/machines/${$page.params.id}/version`)) as {
+        talos_version: string;
+      };
+      if (machine) {
+        machine = { ...machine, talosVersion: res.talos_version };
+      }
+      success(`Talos version: ${res.talos_version}`);
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Version probe failed (need talosconfig)');
+    } finally {
+      actionBusy = false;
+    }
+  }
+
+  async function reboot() {
+    if (!confirm('Reboot this machine via Talos API?')) return;
+    actionBusy = true;
+    try {
+      await client.post(`/machines/${$page.params.id}/reboot`, {});
+      success('Reboot initiated');
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Reboot failed');
+    } finally {
+      actionBusy = false;
+    }
+  }
 </script>
 
 <div class="machine-detail">
@@ -55,10 +93,12 @@
     <div class="error">{error}</div>
   {:else if machine}
     <div class="detail-header">
-      <h1>{machine.hostname || machine.systemUuid.slice(0, 8)}</h1>
+      <h1>{displayName(machine)}</h1>
       <div class="header-actions">
         <span class="status-badge {machine.status}">{machine.status}</span>
-        <span class="type-badge">{machine.machineType}</span>
+        <span class="type-badge">{machine.machineType || (machine as { machine_type?: string }).machine_type}</span>
+        <Button variant="secondary" size="sm" onclick={probeVersion} disabled={actionBusy}>Probe version</Button>
+        <Button variant="danger" size="sm" onclick={reboot} disabled={actionBusy}>Reboot</Button>
       </div>
     </div>
     

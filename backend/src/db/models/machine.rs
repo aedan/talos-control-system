@@ -21,6 +21,9 @@ pub struct Machine {
     pub secure_boot: bool,
     #[sqlx(rename = "siderolink_connected")]
     pub siderolink_connected: bool,
+    /// Node address (IP or host) used for Talos API (port 50000).
+    #[sqlx(rename = "address")]
+    pub address: String,
     #[sqlx(rename = "created_at")]
     pub created_at: DateTime<Utc>,
     #[sqlx(rename = "updated_at")]
@@ -38,6 +41,7 @@ impl Machine {
             talos_version: String::new(),
             secure_boot: false,
             siderolink_connected: false,
+            address: String::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
