@@ -93,6 +93,41 @@
       notifyError('Failed to delete backup');
     }
   }
+
+  let restoringId = $state<string | null>(null);
+  async function restoreBackup(backup: Backup) {
+    const ok = confirm(
+      `DISASTER RECOVERY\n\nRestore etcd snapshot "${backup.name}" to a control-plane node?\n\n` +
+        `This uploads the snapshot (EtcdRecover) and runs Bootstrap with recover_etcd.\n` +
+        `Do NOT use on a healthy cluster. Continue?`
+    );
+    if (!ok) return;
+    const typed = prompt('Type RESTORE to confirm:');
+    if (typed !== 'RESTORE') {
+      notifyError('Restore cancelled');
+      return;
+    }
+    restoringId = backup.id;
+    try {
+      const res = (await client.post(
+        `/clusters/${$page.params.id}/backups/${backup.id}/restore`,
+        {
+          confirm: true,
+          runBootstrap: true,
+          skipHashCheck: false,
+        }
+      )) as { ok?: boolean; message?: string; bootstrapError?: string };
+      if (res.ok === false || res.bootstrapError) {
+        notifyError(res.bootstrapError || res.message || 'Restore completed with errors');
+      } else {
+        success(res.message || 'Etcd restore requested');
+      }
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Restore failed');
+    } finally {
+      restoringId = null;
+    }
+  }
   
   function formatSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
@@ -119,10 +154,13 @@
       <p>No etcd snapshots yet</p>
       <p class="hint">
         Creates a real Talos etcd snapshot via the machine API (control-plane node).
-        Requires a talosconfig on the cluster.
+        Requires a talosconfig on the cluster. Restore is disaster-recovery only.
       </p>
     </div>
   {:else}
+    <p class="hint" style="opacity:0.85;margin-bottom:1rem;">
+      Restore uploads a snapshot (EtcdRecover) and runs Bootstrap(recover_etcd). Use only for broken control planes.
+    </p>
     <table class="data-table">
       <thead>
         <tr>
@@ -150,6 +188,12 @@
                   onclick={() => downloadBackup(backup)}
                   disabled={backup.status !== 'ready'}
                 >Download</Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onclick={() => restoreBackup(backup)}
+                  disabled={backup.status !== 'ready' || restoringId === backup.id}
+                >{restoringId === backup.id ? 'Restoring…' : 'Restore'}</Button>
                 <Button variant="danger" size="sm" onclick={() => deleteBackup(backup)}>Delete</Button>
               </div>
             </td>

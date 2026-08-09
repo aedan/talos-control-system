@@ -12,7 +12,7 @@
 - Cluster **import** via kubeconfig (+ optional talosconfig)
 - Inventory CRUD for clusters and machines
 - Config patches stored and **applied** via Talos `ApplyConfiguration`
-- **Real etcd snapshots** (download + retention)
+- **Real etcd snapshots** (download, retention, disaster-recovery restore)
 - Machine version probe, reboot, upgrade
 
 ## What does **not** work yet

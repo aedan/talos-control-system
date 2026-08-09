@@ -496,6 +496,129 @@ impl ClusterController {
         crate::db::repos::machine::update(&self.pool, &machine).await
     }
 
+    /// Disaster recovery: upload a stored etcd snapshot to a control-plane node,
+    /// optionally run Bootstrap with recover_etcd.
+    ///
+    /// Requires `confirm == true`. Prefer a maintenance window; this can break a healthy cluster.
+    pub async fn restore_etcd_backup(
+        &self,
+        cluster_id: Uuid,
+        backup_id: Uuid,
+        confirm: bool,
+        run_bootstrap: bool,
+        skip_hash_check: bool,
+        machine_id: Option<Uuid>,
+    ) -> Result<serde_json::Value, AppError> {
+        if !confirm {
+            return Err(AppError::InvalidInput(
+                "Restore requires confirm=true. This is destructive disaster recovery."
+                    .to_string(),
+            ));
+        }
+
+        let cluster = crate::db::repos::cluster::get(&self.pool, cluster_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Cluster {} not found", cluster_id)))?;
+
+        let backup = crate::db::repos::cluster_backup::get(&self.pool, backup_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Backup {} not found", backup_id)))?;
+
+        if backup.cluster_id != cluster_id {
+            return Err(AppError::NotFound("Backup not found for cluster".to_string()));
+        }
+        if backup.status != "ready" {
+            return Err(AppError::InvalidInput(format!(
+                "Backup is not ready (status: {})",
+                backup.status
+            )));
+        }
+
+        let path_str = backup.file_path.as_ref().ok_or_else(|| {
+            AppError::InvalidInput("Backup has no file on disk".to_string())
+        })?;
+        let path = PathBuf::from(path_str);
+
+        // Prevent path traversal: file must live under the backup root
+        let root = backup_root_from_sqlite_path(&self.sqlite_path);
+        let canon_root = root.canonicalize().unwrap_or(root.clone());
+        let canon_path = path.canonicalize().map_err(|e| {
+            AppError::NotFound(format!("Backup file missing: {}", e))
+        })?;
+        if !canon_path.starts_with(&canon_root) {
+            return Err(AppError::InvalidInput(
+                "Backup path is outside the configured backup directory".to_string(),
+            ));
+        }
+
+        let creds = self.load_creds(&cluster)?;
+        let machines = crate::db::repos::machine::list_by_cluster(&self.pool, cluster_id).await?;
+
+        let address = if let Some(mid) = machine_id {
+            let m = machines
+                .iter()
+                .find(|m| m.id == mid)
+                .ok_or_else(|| AppError::NotFound(format!("Machine {} not found", mid)))?;
+            if m.machine_type != "control-plane" && m.machine_type != "controlplane" {
+                return Err(AppError::InvalidInput(
+                    "Etcd restore target must be a control-plane machine".to_string(),
+                ));
+            }
+            if m.address.is_empty() {
+                return Err(AppError::InvalidInput(
+                    "Target machine has no address".to_string(),
+                ));
+            }
+            m.address.clone()
+        } else {
+            let pairs: Vec<(String, Option<String>)> = machines
+                .iter()
+                .map(|m| {
+                    (
+                        m.machine_type.clone(),
+                        if m.address.is_empty() {
+                            None
+                        } else {
+                            Some(m.address.clone())
+                        },
+                    )
+                })
+                .collect();
+            pick_control_plane_address(&pairs, &creds)?
+        };
+
+        let client = TalosClient::from_credentials(&address, &creds);
+        let uploaded = client.etcd_recover(&canon_path).await?;
+
+        let mut bootstrap_ok = false;
+        let mut bootstrap_error: Option<String> = None;
+        if run_bootstrap {
+            match client.bootstrap_recover_etcd(skip_hash_check).await {
+                Ok(()) => bootstrap_ok = true,
+                Err(e) => bootstrap_error = Some(e.to_string()),
+            }
+        }
+
+        Ok(serde_json::json!({
+            "ok": bootstrap_error.is_none(),
+            "backupId": backup_id,
+            "target": address,
+            "bytesUploaded": uploaded,
+            "bootstrapRequested": run_bootstrap,
+            "bootstrapOk": bootstrap_ok,
+            "bootstrapError": bootstrap_error,
+            "message": if run_bootstrap {
+                if bootstrap_ok {
+                    "Snapshot uploaded and Bootstrap(recover_etcd) requested"
+                } else {
+                    "Snapshot uploaded but Bootstrap failed — see bootstrapError"
+                }
+            } else {
+                "Snapshot uploaded via EtcdRecover. Call restore again with runBootstrap=true, or bootstrap manually."
+            },
+        }))
+    }
+
     async fn cluster_and_machine(
         &self,
         machine_id: Uuid,
