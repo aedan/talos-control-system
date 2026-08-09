@@ -42,6 +42,8 @@ jobs:
         working-directory: frontend
         run: |
           npm ci
+          # Generates .svelte-kit/tsconfig.json required by svelte-check
+          npx svelte-kit sync
           npm run check
 
       - name: Backend unit tests
