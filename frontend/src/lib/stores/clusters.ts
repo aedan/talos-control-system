@@ -82,12 +82,17 @@ export async function previewImport(kubeconfig: string, name?: string): Promise<
   }
 }
 
-export async function importCluster(name: string, kubeconfig: string): Promise<ImportResult> {
+export async function importCluster(
+  name: string,
+  kubeconfig: string,
+  talosconfig?: string
+): Promise<ImportResult> {
   error.set(null);
   try {
     const data = await client.post('/clusters/import', {
       name,
       kubeconfig,
+      talosconfig: talosconfig?.trim() || undefined,
     });
     const result = data as ImportResult;
     clusters.update((items) => [result.cluster, ...items]);
@@ -96,4 +101,18 @@ export async function importCluster(name: string, kubeconfig: string): Promise<I
     error.set(e instanceof Error ? e.message : 'Failed to import cluster');
     throw e;
   }
+}
+
+export async function setClusterTalosconfig(
+  clusterId: string,
+  talosconfig: string
+): Promise<void> {
+  await client.put(`/clusters/${clusterId}/talosconfig`, { talosconfig });
+}
+
+export async function applyClusterConfig(clusterId: string): Promise<{ applied_to: string[]; count: number }> {
+  return (await client.post(`/clusters/${clusterId}/config/apply`, {})) as {
+    applied_to: string[];
+    count: number;
+  };
 }

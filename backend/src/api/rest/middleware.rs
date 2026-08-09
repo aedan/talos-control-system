@@ -31,6 +31,8 @@ pub fn map_route_to_resource(uri: &str) -> Option<Resource> {
         Some(Resource::Cluster)
     } else if uri.starts_with("/api/machines") {
         Some(Resource::Machine)
+    } else if uri.starts_with("/api/machine-classes") {
+        Some(Resource::MachineSet)
     } else if uri.starts_with("/api/machine-sets") || uri.starts_with("/api/machinesets") {
         Some(Resource::MachineSet)
     } else if uri.starts_with("/api/settings") {

@@ -24,14 +24,14 @@ pub struct ClusterBackup {
 }
 
 impl ClusterBackup {
-    pub fn new(cluster_id: Uuid, name: String) -> Self {
+    pub fn pending(cluster_id: Uuid, name: String) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
             cluster_id,
             name,
-            status: "completed".to_string(),
-            file_path: Some(format!("/backups/{}/{}.snapshot", cluster_id, Uuid::new_v4())),
+            status: "creating".to_string(),
+            file_path: None,
             size_bytes: 0,
             created_at: now,
             updated_at: now,

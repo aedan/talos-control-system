@@ -9,11 +9,12 @@
   interface Backup {
     id: string;
     name: string;
-    type: 'etcd-snapshot' | 'k8s-backup';
-    size: number;
-    status: 'ready' | 'creating' | 'failed';
-    createdAt: string;
-    expiresAt: string;
+    status: 'ready' | 'creating' | 'failed' | string;
+    size_bytes?: number;
+    size?: number;
+    created_at?: string;
+    createdAt?: string;
+    file_path?: string | null;
   }
   
   let backups = $state<Backup[]>([]);
@@ -35,13 +36,16 @@
     creating = true;
     try {
       const backup = await client.post(`/clusters/${$page.params.id}/backups`, {
-        name: `backup-${Date.now()}`,
-        type: 'etcd-snapshot'
+        name: `etcd-${Date.now()}`,
       }) as Backup;
       backups = [backup, ...backups];
-      success('Backup created');
-    } catch {
-      notifyError('Failed to create backup');
+      if (backup.status === 'ready') {
+        success('Etcd snapshot created');
+      } else {
+        success(`Backup status: ${backup.status}`);
+      }
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Failed to create etcd snapshot (need talosconfig + control-plane reachability)');
     } finally {
       creating = false;
     }
@@ -49,17 +53,34 @@
   
   async function downloadBackup(backup: Backup) {
     try {
-      const res = await fetch(`/api/clusters/${$page.params.id}/backups/${backup.id}/download`);
+      const token = localStorage.getItem('tcs_token');
+      const res = await fetch(
+        `/api/clusters/${$page.params.id}/backups/${backup.id}/download`,
+        {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        }
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || res.statusText);
+      }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${backup.name}.tar.gz`;
+      a.download = `${backup.name}.snapshot`;
       a.click();
       URL.revokeObjectURL(url);
-    } catch {
-      notifyError('Failed to download backup');
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Failed to download backup');
     }
+  }
+
+  function backupSize(b: Backup): number {
+    return b.size_bytes ?? b.size ?? 0;
+  }
+  function backupCreated(b: Backup): string {
+    return b.created_at ?? b.createdAt ?? '';
   }
   
   async function deleteBackup(backup: Backup) {
@@ -95,8 +116,11 @@
     <div class="error">{error}</div>
   {:else if backups.length === 0}
     <div class="empty-state">
-      <p>No backups yet</p>
-      <p class="hint">Create a backup to safeguard your cluster's etcd data.</p>
+      <p>No etcd snapshots yet</p>
+      <p class="hint">
+        Creates a real Talos etcd snapshot via the machine API (control-plane node).
+        Requires a talosconfig on the cluster.
+      </p>
     </div>
   {:else}
     <table class="data-table">
@@ -107,7 +131,6 @@
           <th>Size</th>
           <th>Status</th>
           <th>Created</th>
-          <th>Expires</th>
           <th>Actions</th>
         </tr>
       </thead>
@@ -115,14 +138,18 @@
         {#each backups as backup (backup.id)}
           <tr>
             <td>{backup.name}</td>
-            <td><span class="type-badge">{backup.type}</span></td>
-            <td>{formatSize(backup.size)}</td>
+            <td><span class="type-badge">etcd-snapshot</span></td>
+            <td>{formatSize(backupSize(backup))}</td>
             <td><span class="status-badge {backup.status}">{backup.status}</span></td>
-            <td>{new Date(backup.createdAt).toLocaleString()}</td>
-            <td>{backup.expiresAt ? new Date(backup.expiresAt).toLocaleDateString() : 'Never'}</td>
+            <td>{backupCreated(backup) ? new Date(backupCreated(backup)).toLocaleString() : '—'}</td>
             <td>
               <div class="actions">
-                <Button variant="ghost" size="sm" onclick={() => downloadBackup(backup)}>Download</Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onclick={() => downloadBackup(backup)}
+                  disabled={backup.status !== 'ready'}
+                >Download</Button>
                 <Button variant="danger" size="sm" onclick={() => deleteBackup(backup)}>Delete</Button>
               </div>
             </td>

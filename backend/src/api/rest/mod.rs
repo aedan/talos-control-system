@@ -51,18 +51,26 @@ pub fn create_rest_router(state: AppState, branding: &BrandingConfig) -> Router 
         .route("/clusters/:id", get(handlers::get_cluster))
         .route("/clusters/:id", put(handlers::update_cluster))
         .route("/clusters/:id", delete(handlers::delete_cluster))
+        .route("/clusters/:id/talosconfig", put(handlers::set_cluster_talosconfig))
         .route("/machines", get(handlers::list_machines))
         .route("/machines/:id", get(handlers::get_machine))
         .route("/machines/:id", delete(handlers::delete_machine))
+        .route("/machines/:id/reboot", post(handlers::reboot_machine))
+        .route("/machines/:id/version", get(handlers::get_machine_version))
         // Cluster sub-routes
         .route("/clusters/:id/nodes", get(handlers::get_cluster_nodes))
         .route("/clusters/:id/machines", get(handlers::get_cluster_machines))
         .route("/clusters/:id/config", get(handlers::list_config_patches))
         .route("/clusters/:id/config", post(handlers::create_config_patch))
+        .route("/clusters/:id/config/apply", post(handlers::apply_cluster_config))
         .route("/clusters/:id/config/:patch_id", delete(handlers::delete_config_patch))
         .route("/clusters/:id/backups", get(handlers::list_cluster_backups))
         .route("/clusters/:id/backups", post(handlers::create_cluster_backup))
         .route("/clusters/:id/backups/:backup_id", get(handlers::download_cluster_backup))
+        .route(
+            "/clusters/:id/backups/:backup_id/download",
+            get(handlers::download_cluster_backup),
+        )
         .route("/clusters/:id/backups/:backup_id", delete(handlers::delete_cluster_backup))
         // Machine classes
         .route("/machine-classes", get(handlers::list_machine_classes))
