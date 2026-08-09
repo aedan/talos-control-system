@@ -4,6 +4,7 @@ use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[serde(rename_all = "camelCase")]
 pub struct Machine {
     #[sqlx(rename = "id")]
     pub id: Uuid,
@@ -21,7 +22,6 @@ pub struct Machine {
     pub secure_boot: bool,
     #[sqlx(rename = "siderolink_connected")]
     pub siderolink_connected: bool,
-    /// Node address (IP or host) used for Talos API (port 50000).
     #[sqlx(rename = "address")]
     pub address: String,
     #[sqlx(rename = "created_at")]

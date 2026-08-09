@@ -8,16 +8,36 @@ use crate::AppError;
 pub type Pool = SqlitePool;
 
 pub async fn init_pool(config: &DatabaseConfig) -> Result<SqlitePool, AppError> {
+    if config.backend == DatabaseBackend::Postgres {
+        return Err(AppError::Config(
+            "PostgreSQL is not implemented in this alpha. Set database.backend = \"sqlite\"."
+                .to_string(),
+        ));
+    }
+
+    // Ensure parent directory exists for the SQLite file
+    if let Some(parent) = std::path::Path::new(&config.sqlite_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                AppError::Config(format!(
+                    "Cannot create database directory {}: {}",
+                    parent.display(),
+                    e
+                ))
+            })?;
+        }
+    }
+
     let pool = SqlitePool::connect_with(
         sqlx::sqlite::SqliteConnectOptions::new()
             .filename(&config.sqlite_path)
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::default())
-            .foreign_keys(true)
+            .foreign_keys(true),
     )
     .await?;
 
-    tracing::info!(backend = %config.backend, "Database pool initialized");
+    tracing::info!(backend = %config.backend, path = %config.sqlite_path, "Database pool initialized");
     Ok(pool)
 }
 
@@ -39,6 +59,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
         ("002_auth_extensions.sql", include_str!("migrations/002_auth_extensions.sql")),
         ("003_features.sql", include_str!("migrations/003_features.sql")),
         ("004_talos_control.sql", include_str!("migrations/004_talos_control.sql")),
+        ("005_control_plane.sql", include_str!("migrations/005_control_plane.sql")),
     ];
 
     let mut tx = pool.begin().await?;

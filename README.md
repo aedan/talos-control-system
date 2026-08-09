@@ -1,111 +1,93 @@
 # Talos Control System
 
-**Talos Control System (TCS)** is a web-based management platform for [Talos Linux](https://www.talos.dev/) clusters. Deploy, configure, monitor, and backup your Kubernetes infrastructure from a single white-labelable interface.
+**Status: Alpha** — see [docs/STATUS.md](docs/STATUS.md) for an honest feature matrix.
 
-## Features
+**Talos Control System (TCS)** is a self-hosted web UI for managing [Talos Linux](https://www.talos.dev/) clusters. Import existing clusters, inventory machines, apply config patches, take etcd snapshots, and run limited machine actions (version, reboot, upgrade) over the Talos gRPC API.
 
-- **Cluster Lifecycle Management** — Create, scale, and destroy Talos clusters from the UI
-- **Machine Discovery** — Automatic machine registration via siderolink tunnels
-- **Config Patches** — Apply Talos configuration overrides per cluster or per machine
-- **Backup & Restore** — Etcd snapshots with download and retention policies
-- **White-Label Branding** — Full color, logo, and identity customization via UI or config
-- **Per-Tenant Branding** — Serve different branding to different tenants
-- **RBAC** — Role-based access control with OIDC and SAML support
-- **Audit Logging** — Full trail of user actions and system events
-- **Minimal Image** — Production builds on `scratch` with Rust backend + SvelteKit frontend
+## What works today
 
-## Screenshots
+- Local auth (Argon2) + JWT, basic RBAC (admin / operator / reader)
+- OIDC and LDAP (implemented; validate in your environment)
+- White-label branding
+- Cluster **import** via kubeconfig (+ optional talosconfig)
+- Inventory CRUD for clusters and machines
+- Config patches stored and **applied** via Talos `ApplyConfiguration`
+- **Real etcd snapshots** (download + retention)
+- Machine version probe, reboot, upgrade
 
-<!-- TODO: Add screenshots -->
+## What does **not** work yet
 
-| Dashboard | Cluster Detail | Branding Editor |
-|-----------|----------------|-----------------|
-| *(screenshot)* | *(screenshot)* | *(screenshot)* |
+- Greenfield cluster create / scale / destroy (UI “create” is inventory-only)
+- Siderolink machine discovery
+- SAML
+- Postgres (SQLite only)
+- Docker image / Compose (binary-first distribution)
+- Multi-tenant branding
 
-## Quick Start
+## Quick start
 
-### Docker Compose
+### Local development
 
 ```bash
-docker compose up -d
+# Backend (serves API + embedded UI after frontend build)
+cd frontend && npm install && npm run build && cd ..
+cd backend && cargo run
 # Open http://localhost:8081
 ```
 
-### Kubernetes (Helm)
+Default admin is created on first boot (`admin@tcs.local`). Password is random
+unless `TCS_DEFAULT_ADMIN_PASSWORD` is set — check process logs.
+
+**Required for production:**
 
 ```bash
-helm repo add tcs https://charts.talos.dev
-helm install tcs tcs/tcs --set ingress.enabled=true --set ingress.hosts[0].host=tcs.example.com
+export TCS_AUTH_JWT_SECRET="$(openssl rand -hex 32)"
+# or set TCS_ALLOW_INSECURE=1 only for local lab use
 ```
 
-### Local Development
+### Binary install
 
-```bash
-# Backend
-cd backend && cargo run
+See [docs/INSTALL.md](docs/INSTALL.md). Release assets are built by GitHub Actions
+(musl where configured).
 
-# Frontend
-cd frontend && npm install && npm run dev
-# Open http://localhost:5173
-```
+### Helm
+
+Chart sources live under `deploy/helm` and are **experimental**. There is no
+public chart repo at `charts.talos.dev`.
 
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│  SvelteKit  │────▶│   Axum API   │────▶│  SQLite/PG  │
-│  Frontend   │     │  (Rust)      │     │  Database   │
-└─────────────┘     └──────┬───────┘     └─────────────┘
-                           │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-         ┌────────┐  ┌──────────┐  ┌────────┐
-         │  gRPC  │  │gRPC+TLS  │  │ Sidero │
-         │ Talos  │  │K8s API   │  │ link   │
-         │ Client │  │  Client  │  │ Tunnel │
-         └────────┘  └──────────┘  └────────┘
+SvelteKit UI  →  Axum REST (/api)  →  SQLite
+                      │
+         outbound gRPC+mTLS → Talos nodes :50000
+         outbound HTTPS     → Kubernetes API (import/refresh)
 ```
 
-## Project Structure
+## Project layout
 
 ```
 talos-control-system/
-├── Dockerfile
-├── deploy/
-│   └── helm/              # Helm chart
-├── docs/                  # Documentation
-├── backend/               # Rust (Axum + Tonic)
-│   ├── src/
-│   │   ├── api/           # REST + gRPC layers
-│   │   ├── auth/          # JWT, OIDC, SAML, RBAC
-│   │   ├── branding/      # White-label engine
-│   │   ├── config/        # TOML config loader
-│   │   ├── controllers/   # Business logic
-│   │   ├── db/            # Models + repositories
-│   │   ├── integration/   # Talos + K8s clients
-│   │   ├── network/       # Siderolink, proxy, DNS
-│   │   ├── runtime/       # Event bus, DAG, cache
-│   │   └── utils/         # Metrics, logging, version
-│   └── migrations/
-└── frontend/              # SvelteKit + Tailwind CSS
-    └── src/
-        ├── lib/
-        │   ├── api/       # REST client
-        │   ├── branding/  # Logo component
-        │   ├── components/
-        │   ├── stores/    # Svelte stores
-        │   └── styles/
-        └── routes/
+├── backend/          # Rust (Axum + Talos gRPC client)
+├── frontend/         # SvelteKit + Tailwind (embedded in binary)
+├── deploy/helm/      # Experimental Helm chart
+├── docs/             # Guides + STATUS.md
+├── config.example.toml
+└── LICENSE           # Apache-2.0
 ```
 
 ## Documentation
 
-- [Installation Guide](docs/INSTALL.md)
-- [Configuration Reference](docs/CONFIGURATION.md)
-- [White-Label Branding](docs/BRANDING.md)
-- [Kubernetes Deployment](docs/DEPLOYMENT.md)
-- [Local Development](docs/DEVELOPMENT.md)
+- [Status / feature matrix](docs/STATUS.md)
+- [Installation](docs/INSTALL.md)
+- [Configuration](docs/CONFIGURATION.md)
+- [Talos API control](docs/TALOS.md)
+- [Authentication](docs/AUTH.md)
+- [TLS](docs/TLS.md)
+- [Branding](docs/BRANDING.md)
+- [Deployment](docs/DEPLOYMENT.md)
+- [Development](docs/DEVELOPMENT.md)
 
 ## License
 
-Apache-2.0 — See [LICENSE](LICENSE) for details.
+Apache-2.0 — see [LICENSE](LICENSE).

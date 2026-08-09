@@ -1,4 +1,8 @@
-# Deployment Guide
+# Kubernetes / Host Deployment
+
+> **Alpha notes:** SQLite only; Siderolink not implemented; prefer binary install. See [STATUS.md](STATUS.md) and [TALOS.md](TALOS.md).
+
+Guide
 
 This guide covers deploying TCS as a standalone systemd service with production-grade configuration.
 

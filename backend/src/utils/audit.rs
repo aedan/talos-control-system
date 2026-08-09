@@ -1,14 +1,16 @@
-use std::collections::VecDeque;
-use std::sync::LazyLock;
+//! Durable audit log backed by the `audit_logs` table.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use sqlx::SqlitePool;
+use uuid::Uuid;
 
-const MAX_ENTRIES: usize = 10000;
+use crate::AppError;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuditEntry {
+    pub id: Uuid,
     pub timestamp: DateTime<Utc>,
     pub user_email: String,
     pub action: String,
@@ -17,6 +19,7 @@ pub struct AuditEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuditFilter {
     #[serde(default)]
     pub user: String,
@@ -32,21 +35,22 @@ pub struct AuditFilter {
     pub per_page: usize,
 }
 
-fn default_page() -> usize { 1 }
-fn default_per_page() -> usize { 50 }
+fn default_page() -> usize {
+    1
+}
+fn default_per_page() -> usize {
+    50
+}
 
-static AUDIT_LOG: LazyLock<RwLock<VecDeque<AuditEntry>>> = LazyLock::new(|| {
-    RwLock::new(VecDeque::with_capacity(MAX_ENTRIES))
-});
-
-pub fn log_action(email: &str, action: &str, resource: &str, details: &str) {
-    let entry = AuditEntry {
-        timestamp: Utc::now(),
-        user_email: email.to_string(),
-        action: action.to_string(),
-        resource: resource.to_string(),
-        details: details.to_string(),
-    };
+pub async fn log_action(
+    pool: &SqlitePool,
+    email: &str,
+    action: &str,
+    resource: &str,
+    details: &str,
+) {
+    let id = Uuid::new_v4();
+    let now = Utc::now();
 
     tracing::info!(
         audit_action = %action,
@@ -55,22 +59,70 @@ pub fn log_action(email: &str, action: &str, resource: &str, details: &str) {
         "Audit"
     );
 
-    tokio::spawn(async move {
-        let mut guard = AUDIT_LOG.write().await;
-        if guard.len() >= MAX_ENTRIES {
-            guard.pop_front();
-        }
-        guard.push_back(entry);
-    });
+    if let Err(e) = sqlx::query(
+        "INSERT INTO audit_logs (id, user_id, resource_type, resource_id, action, details, created_at)
+         VALUES (?, NULL, ?, ?, ?, ?, ?)",
+    )
+    .bind(id)
+    .bind(resource)
+    .bind("") // resource_id optional legacy column
+    .bind(action)
+    .bind(format!("{} | user={}", details, email))
+    .bind(now)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!(error = %e, "Failed to write audit log");
+    }
 }
 
-pub async fn get_entries(filter: &AuditFilter) -> (Vec<AuditEntry>, usize) {
-    let log = AUDIT_LOG.read().await;
-    let total = log.len();
+pub async fn get_entries(
+    pool: &SqlitePool,
+    filter: &AuditFilter,
+) -> Result<(Vec<AuditEntry>, usize), AppError> {
+    // Load recent rows then filter in memory (alpha-scale)
+    let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT id, action, resource_type, COALESCE(details, ''), created_at
+         FROM audit_logs
+         ORDER BY created_at DESC
+         LIMIT 5000",
+    )
+    .fetch_all(pool)
+    .await?;
 
-    let filtered: Vec<AuditEntry> = log
-        .iter()
-        .rev()
+    let mut entries: Vec<AuditEntry> = Vec::new();
+    for (id, action, resource, details, created_at) in rows {
+        let user_email = details
+            .split(" | user=")
+            .nth(1)
+            .unwrap_or("system")
+            .to_string();
+        let clean_details = details
+            .split(" | user=")
+            .next()
+            .unwrap_or(&details)
+            .to_string();
+        let timestamp = DateTime::parse_from_rfc3339(&created_at)
+            .map(|d| d.with_timezone(&Utc))
+            .or_else(|_| {
+                chrono::NaiveDateTime::parse_from_str(&created_at, "%Y-%m-%d %H:%M:%S")
+                    .map(|n| DateTime::from_naive_utc_and_offset(n, Utc))
+            })
+            .unwrap_or_else(|_| Utc::now());
+
+        let uuid = Uuid::parse_str(&id).unwrap_or_else(|_| Uuid::new_v4());
+        entries.push(AuditEntry {
+            id: uuid,
+            timestamp,
+            user_email,
+            action,
+            resource,
+            details: clean_details,
+        });
+    }
+
+    let filtered: Vec<AuditEntry> = entries
+        .into_iter()
         .filter(|entry| {
             if !filter.user.is_empty() && entry.user_email != filter.user {
                 return false;
@@ -79,14 +131,14 @@ pub async fn get_entries(filter: &AuditFilter) -> (Vec<AuditEntry>, usize) {
                 return false;
             }
             if !filter.from.is_empty() {
-                if let Ok(from) = chrono::DateTime::parse_from_rfc3339(&filter.from) {
+                if let Ok(from) = DateTime::parse_from_rfc3339(&filter.from) {
                     if entry.timestamp < from.with_timezone(&Utc) {
                         return false;
                     }
                 }
             }
             if !filter.to.is_empty() {
-                if let Ok(to) = chrono::DateTime::parse_from_rfc3339(&filter.to) {
+                if let Ok(to) = DateTime::parse_from_rfc3339(&filter.to) {
                     if entry.timestamp > to.with_timezone(&Utc) {
                         return false;
                     }
@@ -94,9 +146,9 @@ pub async fn get_entries(filter: &AuditFilter) -> (Vec<AuditEntry>, usize) {
             }
             true
         })
-        .cloned()
         .collect();
 
+    let total = filtered.len();
     let start = (filter.page.saturating_sub(1)) * filter.per_page;
     let end = start.saturating_add(filter.per_page).min(filtered.len());
     let page_entries = if start < filtered.len() {
@@ -105,15 +157,17 @@ pub async fn get_entries(filter: &AuditFilter) -> (Vec<AuditEntry>, usize) {
         vec![]
     };
 
-    (page_entries, total)
+    Ok((page_entries, total))
 }
 
-pub async fn clear_all() {
-    let mut log = AUDIT_LOG.write().await;
-    log.clear();
+pub async fn clear_all(pool: &SqlitePool) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM audit_logs").execute(pool).await?;
+    Ok(())
 }
 
-pub async fn count() -> usize {
-    let log = AUDIT_LOG.read().await;
-    log.len()
+pub async fn count(pool: &SqlitePool) -> Result<usize, AppError> {
+    let (c,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM audit_logs")
+        .fetch_one(pool)
+        .await?;
+    Ok(c as usize)
 }

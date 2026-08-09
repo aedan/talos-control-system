@@ -145,17 +145,10 @@ rm /var/lib/tcs/data.db
 cargo run  # Migrations run automatically on startup
 ```
 
-### Using PostgreSQL locally
+### PostgreSQL
 
-```bash
-# Start PostgreSQL with Docker
-docker run --name tcs-postgres -e POSTGRES_DB=tcs -e POSTGRES_USER=tcs -e POSTGRES_PASSWORD=tcs -p 5432:5432 -d postgres:16
-
-# Configure TCS
-export TCS_DATABASE_BACKEND=postgres
-export TCS_DATABASE_POSTGRES_URL="postgresql://tcs:tcs@localhost:5432/tcs"
-cargo run
-```
+**Not implemented.** Setting `database.backend = "postgres"` causes startup to fail.
+Use SQLite for alpha.
 
 ## Adding a New Page
 
@@ -178,16 +171,22 @@ Edit `frontend/src/routes/+layout.svelte`:
 
 Add handler in `backend/src/api/rest/handlers.rs` and register the route in `backend/src/api/rest/mod.rs`.
 
-## Docker Build
+## Container image
+
+No Dockerfile is shipped in alpha (binary-first distribution). See `docs/STATUS.md`.
+
+## Tests
 
 ```bash
-docker build -t tcs:dev .
+cd backend && cargo test --lib
+cd frontend && npm run check
 ```
 
-Or multi-arch:
+Lab JWT:
 
 ```bash
-docker buildx build --platform linux/amd64,linux/arm64 -t tcs:dev .
+export TCS_ALLOW_INSECURE=1
+export TCS_DEFAULT_ADMIN_PASSWORD=admin
 ```
 
 ## Git Hooks (Optional)

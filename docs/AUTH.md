@@ -1,13 +1,28 @@
 # Authentication
 
-TCS supports three authentication backends: local passwords, LDAP/Active Directory, and OIDC.
+TCS supports **local passwords**, **LDAP/Active Directory**, and **OIDC**.
+**SAML is not available** in alpha (login button is disabled).
+
+## JWT secret (required in production)
+
+```bash
+export TCS_AUTH_JWT_SECRET="$(openssl rand -hex 32)"
+```
+
+Or set `auth.jwt_secret` in config. Starting with the built-in default secret is
+**refused** unless `TCS_ALLOW_INSECURE=1` (local lab only).
+
+The JWT secret also derives the key used to **encrypt talosconfig/kubeconfig** at rest.
+Changing it makes previously stored secrets unreadable.
 
 ## Auth Providers
 
 ### Local (Default)
 - Passwords hashed with argon2id
 - JWT tokens issued on login
-- Default admin created on first boot (random 16-char password printed to stdout)
+- Default admin `admin@tcs.local` created on first boot
+- Random password printed to logs unless `TCS_DEFAULT_ADMIN_PASSWORD` is set
+- `password_needs_change` forced on first login
 
 ### LDAP / Active Directory
 - Simple bind authentication via `ldap3`

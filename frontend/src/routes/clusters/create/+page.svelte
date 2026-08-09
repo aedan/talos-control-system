@@ -15,19 +15,16 @@
     if (!name.trim()) return;
     creating = true;
     try {
+      // Inventory only — alpha does not provision Talos/Kubernetes clusters.
       await client.post('/clusters', {
         name: name.trim(),
-        controlPlaneVersion,
-        talosVersion,
-        machineSets: [
-          { role: 'controlplane', size: controlPlaneSize },
-          { role: 'worker', size: workerSize }
-        ]
+        control_plane_version: controlPlaneVersion,
+        talos_version: talosVersion,
       });
-      success('Cluster created successfully');
+      success('Inventory record created. Use Import for real clusters.');
       goto('/clusters');
     } catch (e: unknown) {
-      notifyError(e instanceof Error ? e.message : 'Failed to create cluster');
+      notifyError(e instanceof Error ? e.message : 'Failed to create cluster record');
     } finally {
       creating = false;
     }
@@ -35,7 +32,12 @@
 </script>
 
 <div class="create-page">
-  <h1>Create Cluster</h1>
+  <h1>Create inventory record</h1>
+  <p class="hint" style="opacity:0.85;margin-bottom:1rem;">
+    Alpha does <strong>not</strong> provision Talos clusters. Prefer
+    <a href="/clusters/import">Import</a> with kubeconfig + talosconfig for real environments.
+    This form only inserts a placeholder row in the TCS database.
+  </p>
   
   <form class="create-form" onsubmit={(e) => { e.preventDefault(); handleCreate(); }}>
     <div class="form-group">

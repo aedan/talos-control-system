@@ -1,6 +1,5 @@
 use sqlx::SqlitePool;
 use crate::db::models::cluster::Cluster;
-use crate::db::models::machine::Machine;
 use crate::AppError;
 
 pub async fn create(pool: &SqlitePool, cluster: &Cluster) -> Result<Cluster, AppError> {
@@ -10,8 +9,8 @@ pub async fn create(pool: &SqlitePool, cluster: &Cluster) -> Result<Cluster, App
     }
 
     let result = sqlx::query(
-        "INSERT INTO clusters (id, name, control_plane_version, talos_version, status, control_plane_size, worker_size, talosconfig, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO clusters (id, name, control_plane_version, talos_version, status, control_plane_size, worker_size, talosconfig, kubeconfig, backup_retention, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(cluster.id)
     .bind(&cluster.name)
@@ -21,6 +20,8 @@ pub async fn create(pool: &SqlitePool, cluster: &Cluster) -> Result<Cluster, App
     .bind(cluster.control_plane_size)
     .bind(cluster.worker_size)
     .bind(&cluster.talosconfig)
+    .bind(&cluster.kubeconfig)
+    .bind(cluster.backup_retention)
     .bind(cluster.created_at)
     .bind(cluster.updated_at)
     .execute(pool)
@@ -56,13 +57,14 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<Cluster>, AppError> {
 
 pub async fn update(pool: &SqlitePool, cluster: &Cluster) -> Result<Cluster, AppError> {
     let result = sqlx::query(
-        "UPDATE clusters SET name = ?, status = ?, control_plane_size = ?, worker_size = ?, updated_at = ?
+        "UPDATE clusters SET name = ?, status = ?, control_plane_size = ?, worker_size = ?, backup_retention = ?, updated_at = ?
          WHERE id = ?"
     )
     .bind(&cluster.name)
     .bind(&cluster.status)
     .bind(cluster.control_plane_size)
     .bind(cluster.worker_size)
+    .bind(cluster.backup_retention)
     .bind(cluster.updated_at)
     .bind(cluster.id)
     .execute(pool)
@@ -114,6 +116,27 @@ pub async fn set_talosconfig(
         "UPDATE clusters SET talosconfig = ?, updated_at = ? WHERE id = ?"
     )
     .bind(talosconfig)
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("Cluster {} not found", id)));
+    }
+    Ok(())
+}
+
+pub async fn set_kubeconfig(
+    pool: &SqlitePool,
+    id: uuid::Uuid,
+    kubeconfig: &str,
+) -> Result<(), AppError> {
+    let now = chrono::Utc::now();
+    let result = sqlx::query(
+        "UPDATE clusters SET kubeconfig = ?, updated_at = ? WHERE id = ?"
+    )
+    .bind(kubeconfig)
     .bind(now)
     .bind(id)
     .execute(pool)

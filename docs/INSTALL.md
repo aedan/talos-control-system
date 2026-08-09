@@ -15,10 +15,11 @@ The installer downloads the binary, creates a systemd unit, sets up directories,
 
 ```bash
 # x86_64
-curl -sL https://github.com/siderolabs/talos-control-system/releases/download/v0.1.0/tcs-installer-linux-amd64.sh -o tcs-install.sh
+# Replace OWNER/REPO with your fork (e.g. aedan/talos-control-system) and the tag you released
+curl -sL https://github.com/OWNER/REPO/releases/download/v0.1.0/tcs-0.1.0-linux-x86_64.sh -o tcs-install.sh
 
-# ARM64
-curl -sL https://github.com/siderolabs/talos-control-system/releases/download/v0.1.0/tcs-installer-linux-arm64.sh -o tcs-install.sh
+# ARM64 (if published)
+curl -sL https://github.com/OWNER/REPO/releases/download/v0.1.0/tcs-0.1.0-linux-aarch64.sh -o tcs-install.sh
 ```
 
 ### 2. Run the installer

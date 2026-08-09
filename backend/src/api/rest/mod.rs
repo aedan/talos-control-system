@@ -17,16 +17,23 @@ pub fn create_rest_router(state: AppState, branding: &BrandingConfig) -> Router 
         .allow_methods(AllowMethods::mirror_request())
         .allow_headers(AllowHeaders::mirror_request());
 
+    // Public: health, auth entrypoints, branding for login page
     let public_routes = Router::new()
         .route("/health", get(handlers::health_check))
-        .route("/metrics", get(handlers::get_metrics))
         .route("/auth/login", post(handlers::login))
         .route("/auth/logout", post(handlers::logout))
         .route("/auth/token", post(handlers::refresh_token))
         .route("/auth/oidc", get(handlers::oidc_authorize))
-        .route("/auth/oidc/callback", get(handlers::oidc_callback));
+        .route("/auth/oidc/callback", get(handlers::oidc_callback))
+        .route("/branding", get(handlers::get_branding))
+        .route("/branding/css", get(handlers::get_branding_css))
+        .route("/branding/logo", get(handlers::get_logo))
+        .route("/branding/favicon", get(handlers::get_favicon));
 
+    // Metrics intentionally not on public API; use /metrics on metrics_port when exposed separately.
+    // Kept behind auth for alpha simplicity:
     let protected_routes = Router::new()
+        .route("/metrics", get(handlers::get_metrics))
         .route("/auth/me", get(handlers::get_user_info))
         .route("/auth/password", post(handlers::change_password))
         .route("/users", get(handlers::list_users))
@@ -39,11 +46,7 @@ pub fn create_rest_router(state: AppState, branding: &BrandingConfig) -> Router 
         .route("/settings/certificates/renew", post(handlers::renew_certificate))
         .route("/settings/auth/config", get(handlers::get_auth_config))
         .route("/settings/auth/config", put(handlers::update_auth_config))
-        .route("/branding", get(handlers::get_branding))
         .route("/branding", put(handlers::update_branding))
-        .route("/branding/css", get(handlers::get_branding_css))
-        .route("/branding/logo", get(handlers::get_logo))
-        .route("/branding/favicon", get(handlers::get_favicon))
         .route("/clusters", get(handlers::list_clusters))
         .route("/clusters", post(handlers::create_cluster))
         .route("/clusters/import", post(handlers::import_cluster))
@@ -52,10 +55,14 @@ pub fn create_rest_router(state: AppState, branding: &BrandingConfig) -> Router 
         .route("/clusters/:id", put(handlers::update_cluster))
         .route("/clusters/:id", delete(handlers::delete_cluster))
         .route("/clusters/:id/talosconfig", put(handlers::set_cluster_talosconfig))
+        .route("/clusters/:id/refresh", post(handlers::refresh_cluster))
+        .route("/clusters/:id/talos/test", post(handlers::test_cluster_talos))
         .route("/machines", get(handlers::list_machines))
         .route("/machines/:id", get(handlers::get_machine))
+        .route("/machines/:id", put(handlers::update_machine))
         .route("/machines/:id", delete(handlers::delete_machine))
         .route("/machines/:id/reboot", post(handlers::reboot_machine))
+        .route("/machines/:id/upgrade", post(handlers::upgrade_machine))
         .route("/machines/:id/version", get(handlers::get_machine_version))
         // Cluster sub-routes
         .route("/clusters/:id/nodes", get(handlers::get_cluster_nodes))
@@ -84,11 +91,7 @@ pub fn create_rest_router(state: AppState, branding: &BrandingConfig) -> Router 
         .route("/settings/system/info", get(handlers::get_system_info))
         .layer(from_fn(middleware::rbac_middleware));
 
-    let acme_routes = Router::new()
-        .route("/.well-known/acme-challenge/*challenge", get(handlers::health_check));
-
     let api_routes = Router::new()
-        .merge(acme_routes)
         .merge(public_routes)
         .merge(protected_routes);
 

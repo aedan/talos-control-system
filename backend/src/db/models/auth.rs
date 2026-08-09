@@ -4,14 +4,17 @@ use sqlx::FromRow;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[serde(rename_all = "camelCase")]
 pub struct User {
     pub id: Uuid,
     pub email: String,
     pub display_name: String,
     pub role: String,
     pub is_active: bool,
+    #[serde(skip_serializing)]
     pub password_hash: Option<String>,
     pub auth_provider: String,
+    #[serde(skip_serializing)]
     pub ldap_dn: Option<String>,
     pub password_needs_change: bool,
     pub last_login: Option<DateTime<Utc>>,

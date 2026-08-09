@@ -140,7 +140,9 @@ pub async fn get_favicon(
 #[derive(Deserialize)]
 pub struct CreateClusterRequest {
     pub name: String,
+    #[serde(alias = "controlPlaneVersion")]
     pub control_plane_version: String,
+    #[serde(alias = "talosVersion")]
     pub talos_version: String,
 }
 
@@ -148,6 +150,7 @@ pub async fn create_cluster(
     State(state): State<AppState>,
     Json(payload): Json<CreateClusterRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    // Inventory-only: does not provision Talos or Kubernetes.
     let cluster = crate::db::models::cluster::Cluster::new(
         payload.name,
         payload.control_plane_version,
@@ -270,6 +273,7 @@ pub struct ImportClusterRequest {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImportClusterResponse {
     pub cluster: serde_json::Value,
     pub machines_imported: i32,
@@ -277,18 +281,22 @@ pub struct ImportClusterResponse {
 
 fn cluster_public_json(mut cluster: crate::db::models::cluster::Cluster) -> serde_json::Value {
     let has_creds = cluster.has_talos_credentials();
+    let has_kube = cluster.has_kubeconfig();
     cluster.talosconfig = None;
+    cluster.kubeconfig = None;
     let mut v = serde_json::to_value(&cluster).unwrap_or_default();
     if let Some(obj) = v.as_object_mut() {
-        obj.insert("has_talosconfig".to_string(), serde_json::Value::Bool(has_creds));
+        obj.insert("hasTalosconfig".to_string(), serde_json::Value::Bool(has_creds));
+        obj.insert("hasKubeconfig".to_string(), serde_json::Value::Bool(has_kube));
     }
     v
 }
 
 fn controller_for(state: &AppState) -> crate::controllers::cluster::ClusterController {
-    crate::controllers::cluster::ClusterController::with_sqlite_path(
+    crate::controllers::cluster::ClusterController::with_context(
         state.db_pool.clone(),
         state.config.database.sqlite_path.clone(),
+        state.config.auth.jwt_secret.clone(),
     )
 }
 
@@ -351,22 +359,58 @@ pub async fn set_cluster_talosconfig(
     {
         Ok(()) => Ok(Json(serde_json::json!({
             "ok": true,
-            "has_talosconfig": true,
+            "hasTalosconfig": true,
         }))),
         Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
     }
 }
 
+#[derive(Deserialize)]
+pub struct ApplyConfigRequest {
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
 pub async fn apply_cluster_config(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<uuid::Uuid>,
+    payload: Option<Json<ApplyConfigRequest>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let dry_run = payload.map(|p| p.0.dry_run).unwrap_or(false);
+    let controller = controller_for(&state);
+    match controller.apply_config_patches(cluster_id, dry_run).await {
+        Ok(result) => {
+            crate::utils::audit::log_action(
+                &state.db_pool,
+                "system",
+                if dry_run { "config_apply_dry_run" } else { "config_apply" },
+                &cluster_id.to_string(),
+                &result.to_string(),
+            ).await;
+            Ok(Json(result))
+        }
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+pub async fn refresh_cluster(
     State(state): State<AppState>,
     Path(cluster_id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let controller = controller_for(&state);
-    match controller.apply_config_patches(cluster_id).await {
-        Ok(applied) => Ok(Json(serde_json::json!({
-            "applied_to": applied,
-            "count": applied.len(),
-        }))),
+    match controller.refresh_from_kubeconfig(cluster_id).await {
+        Ok(n) => Ok(Json(serde_json::json!({ "ok": true, "machines": n }))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+pub async fn test_cluster_talos(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller.test_talos_connectivity(cluster_id).await {
+        Ok(results) => Ok(Json(serde_json::json!({ "results": results }))),
         Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
     }
 }
@@ -377,7 +421,42 @@ pub async fn reboot_machine(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let controller = controller_for(&state);
     match controller.reboot_machine(id).await {
-        Ok(()) => Ok(Json(serde_json::json!({ "ok": true, "action": "reboot" }))),
+        Ok(()) => {
+            crate::utils::audit::log_action(
+                &state.db_pool,
+                "system",
+                "reboot",
+                &id.to_string(),
+                "Machine reboot requested",
+            ).await;
+            Ok(Json(serde_json::json!({ "ok": true, "action": "reboot" })))
+        }
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct UpgradeMachineRequest {
+    pub image: String,
+}
+
+pub async fn upgrade_machine(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(payload): Json<UpgradeMachineRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller.upgrade_machine(id, &payload.image).await {
+        Ok(()) => {
+            crate::utils::audit::log_action(
+                &state.db_pool,
+                "system",
+                "upgrade",
+                &id.to_string(),
+                &format!("image={}", payload.image),
+            ).await;
+            Ok(Json(serde_json::json!({ "ok": true, "action": "upgrade", "image": payload.image })))
+        }
         Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
     }
 }
@@ -388,8 +467,32 @@ pub async fn get_machine_version(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let controller = controller_for(&state);
     match controller.machine_version(id).await {
-        Ok(version) => Ok(Json(serde_json::json!({ "talos_version": version }))),
+        Ok(version) => Ok(Json(serde_json::json!({ "talosVersion": version }))),
         Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct UpdateMachineRequest {
+    pub address: Option<String>,
+}
+
+pub async fn update_machine(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(payload): Json<UpdateMachineRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if let Some(addr) = payload.address {
+        let controller = controller_for(&state);
+        match controller.update_machine_address(id, addr).await {
+            Ok(m) => match serde_json::to_value(m) {
+                Ok(v) => Ok(Json(v)),
+                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+            },
+            Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+        }
+    } else {
+        Err((StatusCode::BAD_REQUEST, "No fields to update".to_string()))
     }
 }
 
@@ -1072,14 +1175,17 @@ pub async fn get_audit_logs(
         return Err((StatusCode::FORBIDDEN, "Admin role required".to_string()));
     }
 
-    let (entries, total) = crate::utils::audit::get_entries(&filter).await;
+    let (entries, total) = crate::utils::audit::get_entries(&state.db_pool, &filter)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     crate::utils::audit::log_action(
+        &state.db_pool,
         &claims.sub,
         "read",
         "audit_logs",
         &format!("page={}, per_page={}", filter.page, filter.per_page),
-    );
+    ).await;
 
     Ok(Json(AuditLogResponse {
         entries,
@@ -1099,14 +1205,13 @@ pub async fn clear_audit_logs(
         return Err((StatusCode::FORBIDDEN, "Admin role required".to_string()));
     }
 
-    crate::utils::audit::clear_all().await;
+    crate::utils::audit::clear_all(&state.db_pool).await.ok();
 
-    crate::utils::audit::log_action(
-        &claims.sub,
+    crate::utils::audit::log_action(&state.db_pool, &claims.sub,
         "clear",
         "audit_logs",
         "All audit logs cleared",
-    );
+    ).await;
 
     Ok(StatusCode::OK)
 }
@@ -1125,6 +1230,8 @@ pub struct SystemInfoResponse {
     pub http_port: u16,
     pub grpc_port: u16,
     pub disk_usage: DiskUsageResponse,
+    /// Alpha capability flags for UI gating
+    pub features: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -1184,6 +1291,18 @@ pub async fn get_system_info(
         http_port: state.config.server.http_port,
         grpc_port: state.config.server.grpc_port,
         disk_usage,
+        features: serde_json::json!({
+            "clusterImport": true,
+            "talosActions": true,
+            "etcdBackup": true,
+            "configApply": true,
+            "machineUpgrade": true,
+            "clusterProvision": false,
+            "siderolink": false,
+            "saml": false,
+            "postgres": false,
+            "etcdRestore": false,
+        }),
     })
 }
 
@@ -1325,12 +1444,11 @@ pub async fn create_user(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    crate::utils::audit::log_action(
-        &claims.sub,
+    crate::utils::audit::log_action(&state.db_pool, &claims.sub,
         "create_user",
         &created.email,
         &format!("Role: {}", created.role),
-    );
+    ).await;
 
     Ok((StatusCode::CREATED, Json(CreateUserResponse {
         id: created.id,
@@ -1416,12 +1534,11 @@ pub async fn update_user(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    crate::utils::audit::log_action(
-        &claims.sub,
+    crate::utils::audit::log_action(&state.db_pool, &claims.sub,
         "update_user",
         &updated.email,
         &changes.join(", "),
-    );
+    ).await;
 
     Ok(Json(UserInfoResponse {
         id: updated.id,
@@ -1469,12 +1586,11 @@ pub async fn delete_user(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    crate::utils::audit::log_action(
-        &claims.sub,
+    crate::utils::audit::log_action(&state.db_pool, &claims.sub,
         "delete_user",
         &user.email,
         &format!("User {} deleted", user.display_name),
-    );
+    ).await;
 
     Ok(StatusCode::NO_CONTENT)
 }

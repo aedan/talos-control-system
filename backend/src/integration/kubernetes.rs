@@ -65,6 +65,7 @@ pub struct KubeconfigContextSpec {
 
 /// Discovered cluster info from a running Kubernetes cluster
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DiscoveredCluster {
     pub name: String,
     pub server: String,
@@ -77,6 +78,7 @@ pub struct DiscoveredCluster {
 
 /// Discovered node info
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DiscoveredNode {
     pub name: String,
     pub internal_ip: String,
@@ -379,12 +381,12 @@ impl KubernetesClientPool {
             KubernetesClient::new(cluster_id, endpoint.clone(), ca_data, token).await?
         );
 
-        self.cache.insert(cluster_id, Arc::clone(&client));
+        self.cache.insert(cluster_id, Arc::clone(&client)).await;
         Ok(client)
     }
 
-    pub fn invalidate(&self, cluster_id: &uuid::Uuid) {
-        self.cache.invalidate(cluster_id);
+    pub async fn invalidate(&self, cluster_id: &uuid::Uuid) {
+        self.cache.invalidate(cluster_id).await;
     }
 }
 
