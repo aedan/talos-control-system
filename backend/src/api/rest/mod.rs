@@ -54,6 +54,26 @@ pub fn create_rest_router(state: AppState, branding: &BrandingConfig) -> Router 
         .route("/machines", get(handlers::list_machines))
         .route("/machines/:id", get(handlers::get_machine))
         .route("/machines/:id", delete(handlers::delete_machine))
+        // Cluster sub-routes
+        .route("/clusters/:id/nodes", get(handlers::get_cluster_nodes))
+        .route("/clusters/:id/machines", get(handlers::get_cluster_machines))
+        .route("/clusters/:id/config", get(handlers::list_config_patches))
+        .route("/clusters/:id/config", post(handlers::create_config_patch))
+        .route("/clusters/:id/config/:patch_id", delete(handlers::delete_config_patch))
+        .route("/clusters/:id/backups", get(handlers::list_cluster_backups))
+        .route("/clusters/:id/backups", post(handlers::create_cluster_backup))
+        .route("/clusters/:id/backups/:backup_id", get(handlers::download_cluster_backup))
+        .route("/clusters/:id/backups/:backup_id", delete(handlers::delete_cluster_backup))
+        // Machine classes
+        .route("/machine-classes", get(handlers::list_machine_classes))
+        .route("/machine-classes", post(handlers::create_machine_class))
+        .route("/machine-classes/:id", get(handlers::get_machine_class))
+        .route("/machine-classes/:id", put(handlers::update_machine_class))
+        .route("/machine-classes/:id", delete(handlers::delete_machine_class))
+        // Settings
+        .route("/settings/audit-logs", get(handlers::get_audit_logs))
+        .route("/settings/audit-logs", delete(handlers::clear_audit_logs))
+        .route("/settings/system/info", get(handlers::get_system_info))
         .layer(from_fn(middleware::rbac_middleware));
 
     let acme_routes = Router::new()
