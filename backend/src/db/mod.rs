@@ -37,6 +37,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
     let migrations = [
         ("001_initial.sql", include_str!("migrations/001_initial.sql")),
         ("002_auth_extensions.sql", include_str!("migrations/002_auth_extensions.sql")),
+        ("003_machine_classes.sql", include_str!("migrations/003_machine_classes.sql")),
     ];
 
     let mut tx = pool.begin().await?;

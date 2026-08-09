@@ -30,6 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     init_tracing();
 
     use talos_control_system::auth::jwt::set_jwt_secret;
+    talos_control_system::api::rest::handlers::record_start_time();
 
     // Install ring as the rustls CryptoProvider before any TLS operations.
     // Required because multiple crypto backends (ring, aws-lc-rs) are in the dep tree.
