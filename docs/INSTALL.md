@@ -1,244 +1,126 @@
 # Installation Guide
 
-TCS is distributed as a single statically-linked binary with the frontend embedded. No Docker, Kubernetes, or Helm required.
+TCS is a **host-local** control plane for Talos Linux. It ships as a single binary
+with the UI embedded. It is **not** installed with Helm and is **not** meant to
+run inside the managed Kubernetes cluster.
 
 ## Prerequisites
 
-- **Linux server** (Ubuntu 22.04+, Debian 12+, or similar)
-- **Talos Linux** 1.7+ on managed clusters
+- Linux host with **systemd** (Ubuntu 22.04+, Debian 12+, RHEL 9+, etc.)
+- Network reachability to Talos node APIs (**TCP 50000**) and the Kubernetes API (for import)
+- Root (or equivalent) for install
 
-## Option 1: Self-Extracting Installer (Recommended)
+## Option 1: Self-extracting installer (recommended)
 
-The installer downloads the binary, creates a systemd unit, sets up directories, and writes a default config.
+Release assets include a self-extracting shell script that installs the binary,
+writes a systemd unit, creates `/etc/tcs` + `/var/lib/tcs`, and generates a JWT secret.
 
-### 1. Download the installer
+### Download
 
 ```bash
-# x86_64
-# Replace OWNER/REPO with your fork (e.g. aedan/talos-control-system) and the tag you released
-curl -sL https://github.com/OWNER/REPO/releases/download/v0.1.0/tcs-0.1.0-linux-x86_64.sh -o tcs-install.sh
-
-# ARM64 (if published)
-curl -sL https://github.com/OWNER/REPO/releases/download/v0.1.0/tcs-0.1.0-linux-aarch64.sh -o tcs-install.sh
+# Replace OWNER/REPO and VERSION with your release
+# Example: aedan/talos-control-system / v0.1.0
+curl -fsSL -o tcs-install.sh \
+  "https://github.com/OWNER/REPO/releases/download/v0.1.0/tcs-0.1.0-linux-x86_64.sh"
+chmod +x tcs-install.sh
 ```
 
-### 2. Run the installer
+### Install
 
 ```bash
-chmod +x tcs-install.sh
 sudo ./tcs-install.sh
 ```
 
-This creates:
-- `/usr/local/bin/tcs` — The TCS binary
-- `/etc/tcs/config.toml` — Default configuration
-- `/etc/systemd/system/tcs.service` — Systemd unit
-- `/var/lib/tcs/` — Data directory (SQLite database)
-
-### 3. Configure
-
-Edit `/etc/tcs/config.toml` at minimum:
-
-```toml
-[server]
-advertised_url = "https://tcs.example.com"
-```
-
-### 4. Start
+Options:
 
 ```bash
-sudo systemctl enable --now tcs
+sudo ./tcs-install.sh --no-start   # files only
+sudo ./tcs-install.sh --upgrade    # stop, replace binary, keep config, restart
 ```
 
-TCS will be available at `http://localhost:8081`.
+Creates / updates:
 
-### 5. Get admin credentials
+| Path | Purpose |
+|------|---------|
+| `/usr/local/bin/tcs` | Binary |
+| `/etc/tcs/config.toml` | Config (created once; upgrades leave it alone) |
+| `/etc/tcs/env` | Secrets (`TCS_AUTH_JWT_SECRET`, optional lab flags) |
+| `/etc/systemd/system/tcs.service` | systemd unit |
+| `/var/lib/tcs/` | SQLite DB, certs, etcd backups |
 
-On first boot, TCS creates a default admin user and logs the password:
+### Configure
 
 ```bash
-sudo journalctl -u tcs | grep "password:"
-# Created default admin user: admin@tcs.local with password: abc123
+sudoedit /etc/tcs/config.toml
+# Set at least:
+#   [server] advertised_url = "https://tcs.example.com"
+#   [auth] jwt_secret  (or rely on /etc/tcs/env TCS_AUTH_JWT_SECRET)
 ```
 
-## Option 2: Manual Binary Install
-
-### 1. Download the binary
+### First login
 
 ```bash
-curl -sL https://github.com/siderolabs/talos-control-system/releases/download/v0.1.0/tcs-linux-amd64 -o /usr/local/bin/tcs
-chmod +x /usr/local/bin/tcs
+sudo journalctl -u tcs | grep -i 'Default admin password'
+# Login: admin@tcs.local + that password
 ```
 
-### 2. Create directories
+UI defaults to HTTP port **8081** (or 80/443 if you enable TLS in config).
+
+## Option 2: Binary + tar package
 
 ```bash
-sudo mkdir -p /etc/tcs /var/lib/tcs
+curl -fsSL -o tcs.tgz \
+  "https://github.com/OWNER/REPO/releases/download/v0.1.0/tcs-0.1.0-linux-x86_64.tar.gz"
+sudo tar xzf tcs.tgz -C /tmp
+sudo install -m 755 /tmp/tcs /usr/local/bin/tcs
+# Then copy config.example.toml and create a systemd unit
+# (or re-run the self-extracting installer for unit + dirs).
 ```
 
-### 3. Create config
+## Option 3: Build from source
 
 ```bash
-sudo tee /etc/tcs/config.toml > /dev/null << 'EOF'
-[server]
-bind_addr = "0.0.0.0"
-http_port = 8081
-grpc_port = 8080
-
-[database]
-backend = "sqlite"
-sqlite_path = "/var/lib/tcs/data.db"
-EOF
+git clone https://github.com/OWNER/REPO.git
+cd talos-control-system
+cd frontend && npm ci && npm run build && cd ..
+export GIT_HASH="$(git rev-parse --short=12 HEAD)"
+export BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+cd backend && cargo build --release
+./scripts/package-installer.sh \
+  --binary target/release/talos-control-system \
+  --version 0.1.0-dev \
+  --arch "$(uname -m)"
+sudo ./dist/tcs-0.1.0-dev-linux-*.sh
 ```
 
-### 4. Create systemd unit
+## Upgrades
 
 ```bash
-sudo tee /etc/systemd/system/tcs.service > /dev/null << 'EOF'
-[Unit]
-Description=Talos Control System
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/tcs
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-EOF
+# Prefer installer --upgrade (keeps /etc/tcs/config.toml and data.db)
+sudo ./tcs-NEW-linux-x86_64.sh --upgrade
 ```
 
-### 5. Enable and start
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now tcs
-```
-
-## Post-Installation
-
-### Import a Cluster
-
-After logging in, import your Talos cluster:
-
-```bash
-TOKEN=$(curl -s -X POST http://localhost:8081/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"admin@tcs.local","password":"YOUR_PASSWORD"}' \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
-
-curl -s -X POST http://localhost:8081/api/clusters/import \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d "$(python3 -c "
-import json, sys
-print(json.dumps({
-    'name': 'my-cluster',
-    'kubeconfig': open('/root/.kube/config').read()
-}))")"
-```
-
-### Configure TLS (Let's Encrypt)
-
-Update `/etc/tcs/config.toml`:
-
-```toml
-[tls]
-enabled = true
-mode = "letsencrypt"
-
-[tls.letsencrypt]
-domains = ["tcs.example.com"]
-email = "admin@example.com"
-challenge_type = "http-01"
-```
-
-Then restart:
-
-```bash
-sudo systemctl restart tcs
-```
-
-### Configure Siderolink
-
-TCS exposes port 8082 for siderolink tunnel connections. Configure your Talos machines with:
-
-```
---siderolink.server=tcs.example.com
---siderolink.token=<your-token>
-```
-
-### Configure Branding
-
-Use the `/settings/branding` page in the UI, or set branding in `config.toml`:
-
-```toml
-[branding]
-name = "My Platform"
-short_name = "MP"
-tagline = "Our Kubernetes Platform"
-primary_color = "#2563EB"
-```
-
-## Upgrading
-
-### Via installer
-
-```bash
-curl -sL https://github.com/siderolabs/talos-control-system/releases/download/v0.2.0/tcs-installer-linux-amd64.sh -o tcs-install.sh
-chmod +x tcs-install.sh
-sudo ./tcs-install.sh
-```
-
-### Manual
-
-```bash
-curl -sL https://github.com/siderolabs/talos-control-system/releases/download/v0.2.0/tcs-linux-amd64 -o /usr/local/bin/tcs
-chmod +x /usr/local/bin/tcs
-sudo systemctl restart tcs
-```
-
-## Troubleshooting
-
-### TCS fails to start
-
-Check logs:
-
-```bash
-sudo journalctl -u tcs --no-pager -f
-```
-
-### Check service status
-
-```bash
-sudo systemctl status tcs
-```
-
-### Verify API
-
-```bash
-curl -s http://localhost:8081/api/health
-# Expected: {"status":"ok","version":"0.1.0"}
-```
-
-### Machines can't connect via siderolink
-
-Ensure port 8082 is accessible and not blocked by a firewall:
-
-```bash
-# Test connectivity
-nc -zv tcs.example.com 8082
-```
-
-### Database migration errors
-
-TCS tracks applied migrations and only applies new ones. If you encounter persistent migration errors, the database may need to be reset (warning: this deletes all data):
+Or replace only the binary:
 
 ```bash
 sudo systemctl stop tcs
-sudo rm /var/lib/tcs/data.db
+sudo install -m 755 ./tcs /usr/local/bin/tcs
 sudo systemctl start tcs
 ```
+
+## Uninstall
+
+```bash
+sudo systemctl disable --now tcs
+sudo rm -f /usr/local/bin/tcs /etc/systemd/system/tcs.service
+sudo systemctl daemon-reload
+# Optional: remove data (destructive)
+# sudo rm -rf /etc/tcs /var/lib/tcs
+```
+
+## Not supported
+
+- **Helm / in-cluster deployment** — TCS is the out-of-band manager for Talos; it should run on a deployer / bastion / management host.
+- **Docker-only production** — use the binary + systemd path above.
+
+See also [CONFIGURATION.md](CONFIGURATION.md), [AUTH.md](AUTH.md), [TLS.md](TLS.md), [SMOKE.md](SMOKE.md).

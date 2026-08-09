@@ -22,8 +22,26 @@ connection_timeout = 30
 jwt_secret = "change-me-to-a-long-random-string"
 
 # Optional LDAP / OIDC — see docs/AUTH.md
+#
 # [auth.ldap]
+# url = "ldaps://ad.example.com:636"
+# bind_dn = "CN=tcs-svc,OU=Service Accounts,DC=example,DC=com"
+# bind_password = "redacted"
+# user_search_base = "OU=Users,DC=example,DC=com"
+# user_search_filter = "(sAMAccountName={0})"
+# default_role = "reader"
+# [[auth.ldap.group_role_mappings]]
+# group_dn_pattern = "CN=TCS-Admins*"
+# role = "admin"
+#
 # [auth.oidc]
+# enabled = true
+# issuer_url = "https://login.example.com/"
+# client_id = "tcs"
+# client_secret = "redacted"
+# redirect_url = "https://tcs.example.com/api/auth/oidc/callback"
+# scopes = ["openid", "email", "profile"]
+# default_role = "reader"
 
 [siderolink]
 # Not implemented in alpha (config reserved for future discovery).
