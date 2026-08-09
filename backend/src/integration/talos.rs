@@ -248,6 +248,63 @@ impl TalosClient {
         Ok(())
     }
 
+    /// List machined services (apid, etcd, kubelet, …) on this node.
+    pub async fn service_list(&self) -> Result<Vec<serde_json::Value>, AppError> {
+        let mut client = self.connect().await?;
+        let request =
+            tonic::Request::new(talos_rust_client::generated::google::protobuf::Empty {});
+        let response = client.service_list(request).await.map_err(|e| {
+            AppError::Grpc(format!("ServiceList failed on {}: {}", self.endpoint, e))
+        })?;
+
+        let mut out = Vec::new();
+        for msg in response.into_inner().messages {
+            for svc in msg.services {
+                let healthy = svc
+                    .health
+                    .as_ref()
+                    .map(|h| h.healthy)
+                    .unwrap_or(false);
+                let unknown = svc
+                    .health
+                    .as_ref()
+                    .map(|h| h.unknown)
+                    .unwrap_or(true);
+                out.push(serde_json::json!({
+                    "id": svc.id,
+                    "state": svc.state,
+                    "healthy": healthy,
+                    "unknown": unknown,
+                }));
+            }
+        }
+        out.sort_by(|a, b| {
+            a.get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .cmp(b.get("id").and_then(|v| v.as_str()).unwrap_or(""))
+        });
+        Ok(out)
+    }
+
+    pub async fn hostname(&self) -> Result<String, AppError> {
+        let mut client = self.connect().await?;
+        let request =
+            tonic::Request::new(talos_rust_client::generated::google::protobuf::Empty {});
+        let response = client.hostname(request).await.map_err(|e| {
+            AppError::Grpc(format!("Hostname failed on {}: {}", self.endpoint, e))
+        })?;
+        for msg in response.into_inner().messages {
+            if !msg.hostname.is_empty() {
+                return Ok(msg.hostname);
+            }
+        }
+        Err(AppError::Grpc(format!(
+            "Hostname RPC returned empty on {}",
+            self.endpoint
+        )))
+    }
+
     /// Stream an etcd snapshot from a control-plane node to `dest_path`.
     pub async fn etcd_snapshot(&self, dest_path: &Path) -> Result<u64, AppError> {
         let mut client = self.connect().await?;

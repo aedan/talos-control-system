@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+
 
 use axum::extract::{Path, Request, State};
 use axum::http::StatusCode;
@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .fetch_one(&db_pool)
         .await?;
     if count.0 == 0 {
-        let mut default_password = std::env::var("TCS_DEFAULT_ADMIN_PASSWORD")
+        let default_password = std::env::var("TCS_DEFAULT_ADMIN_PASSWORD")
             .unwrap_or_else(|_| {
                 let chars: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#";
                 let mut rng = fastrand::Rng::new();

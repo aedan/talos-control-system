@@ -21,7 +21,7 @@ Open `http://localhost:8081`, log in as `admin@tcs.local`.
 | 2 | **Import** cluster with kubeconfig + talosconfig | |
 | 3 | Cluster shows `hasTalosconfig` / `hasKubeconfig` | |
 | 4 | **Test Talos** on cluster detail returns ok results | |
-| 5 | Machine **Probe version** returns a tag | |
+| 5 | Machine **Version** returns a tag; **Services** lists apid/etcd/kubelet | |
 | 6 | **Create Backup** → status `ready`, size &gt; 0 | |
 | 7 | **Download** snapshot file | |
 | 8 | Config patch **Dry-run** then **Apply** | |

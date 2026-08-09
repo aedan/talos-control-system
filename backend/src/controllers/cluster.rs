@@ -485,6 +485,21 @@ impl ClusterController {
         Ok(version)
     }
 
+    pub async fn machine_services(
+        &self,
+        machine_id: Uuid,
+    ) -> Result<Vec<serde_json::Value>, AppError> {
+        let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
+        let client = self.client_for_machine(&cluster, &machine).await?;
+        client.service_list().await
+    }
+
+    pub async fn machine_hostname(&self, machine_id: Uuid) -> Result<String, AppError> {
+        let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
+        let client = self.client_for_machine(&cluster, &machine).await?;
+        client.hostname().await
+    }
+
     pub async fn update_machine_address(
         &self,
         machine_id: Uuid,

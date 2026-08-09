@@ -11,7 +11,7 @@ use crate::config::BrandingConfig;
 pub mod handlers;
 pub mod middleware;
 
-pub fn create_rest_router(state: AppState, branding: &BrandingConfig) -> Router {
+pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(AllowMethods::mirror_request())
@@ -64,6 +64,8 @@ pub fn create_rest_router(state: AppState, branding: &BrandingConfig) -> Router 
         .route("/machines/:id/reboot", post(handlers::reboot_machine))
         .route("/machines/:id/upgrade", post(handlers::upgrade_machine))
         .route("/machines/:id/version", get(handlers::get_machine_version))
+        .route("/machines/:id/services", get(handlers::get_machine_services))
+        .route("/machines/:id/hostname", get(handlers::get_machine_hostname))
         // Cluster sub-routes
         .route("/clusters/:id/nodes", get(handlers::get_cluster_nodes))
         .route("/clusters/:id/machines", get(handlers::get_cluster_machines))
