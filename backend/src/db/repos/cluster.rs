@@ -9,8 +9,8 @@ pub async fn create(pool: &SqlitePool, cluster: &Cluster) -> Result<Cluster, App
     }
 
     let result = sqlx::query(
-        "INSERT INTO clusters (id, name, control_plane_version, talos_version, status, control_plane_size, worker_size, talosconfig, kubeconfig, backup_retention, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO clusters (id, name, control_plane_version, talos_version, status, control_plane_size, worker_size, talosconfig, kubeconfig, backup_retention, backup_schedule_hours, last_auto_backup_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(cluster.id)
     .bind(&cluster.name)
@@ -22,6 +22,8 @@ pub async fn create(pool: &SqlitePool, cluster: &Cluster) -> Result<Cluster, App
     .bind(&cluster.talosconfig)
     .bind(&cluster.kubeconfig)
     .bind(cluster.backup_retention)
+    .bind(cluster.backup_schedule_hours)
+    .bind(cluster.last_auto_backup_at)
     .bind(cluster.created_at)
     .bind(cluster.updated_at)
     .execute(pool)
@@ -57,7 +59,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<Cluster>, AppError> {
 
 pub async fn update(pool: &SqlitePool, cluster: &Cluster) -> Result<Cluster, AppError> {
     let result = sqlx::query(
-        "UPDATE clusters SET name = ?, status = ?, control_plane_size = ?, worker_size = ?, backup_retention = ?, updated_at = ?
+        "UPDATE clusters SET name = ?, status = ?, control_plane_size = ?, worker_size = ?, backup_retention = ?, backup_schedule_hours = ?, last_auto_backup_at = ?, updated_at = ?
          WHERE id = ?"
     )
     .bind(&cluster.name)
@@ -65,6 +67,8 @@ pub async fn update(pool: &SqlitePool, cluster: &Cluster) -> Result<Cluster, App
     .bind(cluster.control_plane_size)
     .bind(cluster.worker_size)
     .bind(cluster.backup_retention)
+    .bind(cluster.backup_schedule_hours)
+    .bind(cluster.last_auto_backup_at)
     .bind(cluster.updated_at)
     .bind(cluster.id)
     .execute(pool)
@@ -146,4 +150,50 @@ pub async fn set_kubeconfig(
         return Err(AppError::NotFound(format!("Cluster {} not found", id)));
     }
     Ok(())
+}
+
+pub async fn set_backup_schedule(
+    pool: &SqlitePool,
+    id: uuid::Uuid,
+    schedule_hours: Option<i32>,
+    retention: Option<i32>,
+) -> Result<(), AppError> {
+    let now = chrono::Utc::now();
+    let result = sqlx::query(
+        "UPDATE clusters SET backup_schedule_hours = ?, backup_retention = COALESCE(?, backup_retention), updated_at = ?
+         WHERE id = ?"
+    )
+    .bind(schedule_hours)
+    .bind(retention)
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("Cluster {} not found", id)));
+    }
+    Ok(())
+}
+
+pub async fn mark_auto_backup(pool: &SqlitePool, id: uuid::Uuid) -> Result<(), AppError> {
+    let now = chrono::Utc::now();
+    sqlx::query("UPDATE clusters SET last_auto_backup_at = ?, updated_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn list_with_backup_schedule(pool: &SqlitePool) -> Result<Vec<Cluster>, AppError> {
+    let clusters = sqlx::query_as::<_, Cluster>(
+        "SELECT * FROM clusters
+         WHERE backup_schedule_hours IS NOT NULL AND backup_schedule_hours > 0
+         ORDER BY name"
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(clusters)
 }
