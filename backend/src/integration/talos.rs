@@ -70,6 +70,22 @@ fn decode_b64(data: &str) -> Result<Vec<u8>, AppError> {
         .map_err(|e| AppError::InvalidInput(format!("Invalid base64 in talosconfig: {}", e)))
 }
 
+/// Convert OpenSSL-style Ed25519 PEM keys to PKCS#8 for rustls.
+fn ensure_pkcs8_pem(key_pem: &[u8]) -> Result<Vec<u8>, AppError> {
+    let s = String::from_utf8_lossy(key_pem);
+    if s.contains("BEGIN ED25519 PRIVATE KEY") || s.contains("BEGIN PRIVATE KEY") {
+        use openssl::pkey::PKey;
+        let pkey = PKey::private_key_from_pem(key_pem).map_err(|e| {
+            AppError::Internal(format!("Failed to parse Talos client key PEM: {}", e))
+        })?;
+        // Prefer PKCS#8 PEM which rustls accepts for Ed25519
+        if let Ok(pkcs8) = pkey.private_key_to_pem_pkcs8() {
+            return Ok(pkcs8);
+        }
+    }
+    Ok(key_pem.to_vec())
+}
+
 /// Normalize a host/IP (or host:port / URL) into a Talos gRPC endpoint URL.
 pub fn normalize_endpoint(host_or_url: &str) -> String {
     let s = host_or_url.trim();
@@ -125,18 +141,35 @@ impl TalosClient {
     }
 
     async fn connect(&self) -> Result<MachineServiceClient<talos_rust_client::Channel>, AppError> {
-        let channel = TalosConnector::new(&self.endpoint)
+        // rustls Identity::from_pem often rejects OpenSSL "BEGIN ED25519 PRIVATE KEY"
+        // (common in talosconfig). Convert to PKCS#8 first.
+        let key = ensure_pkcs8_pem(&self.key)?;
+
+        let mut connector = TalosConnector::new(&self.endpoint)
             .ca_pem(self.ca.clone())
             .cert_pem(self.crt.clone())
-            .key_pem(self.key.clone())
-            .connect()
-            .await
-            .map_err(|e| {
-                AppError::Network(format!(
-                    "Failed to connect to Talos API at {}: {}",
-                    self.endpoint, e
-                ))
-            })?;
+            .key_pem(key);
+
+        // When targeting a bare IP, avoid using the IP as rustls domain_name.
+        // Talos node certs often aren't issued for the IP string.
+        if let Some(host) = self
+            .endpoint
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .split(['/', ':'])
+            .next()
+        {
+            if host.parse::<std::net::IpAddr>().is_ok() {
+                connector = connector.server_name("localhost");
+            }
+        }
+
+        let channel = connector.connect().await.map_err(|e| {
+            AppError::Network(format!(
+                "Failed to connect to Talos API at {}: {}",
+                self.endpoint, e
+            ))
+        })?;
 
         Ok(MachineServiceClient::new(channel)
             .max_decoding_message_size(64 * 1024 * 1024))
