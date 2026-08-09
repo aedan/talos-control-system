@@ -167,11 +167,19 @@ impl TalosClient {
 
     /// Apply machine configuration or a strategic-merge config patch.
     pub async fn apply_config(&self, config: &str) -> Result<(), AppError> {
+        self.apply_config_with_options(config, false).await
+    }
+
+    pub async fn apply_config_with_options(
+        &self,
+        config: &str,
+        dry_run: bool,
+    ) -> Result<(), AppError> {
         let mut client = self.connect().await?;
         let request = ApplyConfigurationRequest {
             data: config.as_bytes().to_vec(),
             mode: ApplyMode::NoReboot as i32,
-            dry_run: false,
+            dry_run,
             try_mode_timeout: None,
         };
 

@@ -38,6 +38,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let config = Config::load()?;
 
+    let default_secret = "talos-control-system-default-secret-change-in-production";
+    if config.auth.jwt_secret == default_secret {
+        let allow = std::env::var("TCS_ALLOW_INSECURE").ok().as_deref() == Some("1");
+        if !allow {
+            error!(
+                "Refusing to start with default JWT secret. Set TCS_AUTH_JWT_SECRET (or auth.jwt_secret)                  or TCS_ALLOW_INSECURE=1 for local lab use only."
+            );
+            return Err("Insecure default JWT secret".into());
+        }
+        warn!("TCS_ALLOW_INSECURE=1: running with default JWT secret (lab only)");
+    }
+
     set_jwt_secret(&config.auth.jwt_secret);
 
     info!(

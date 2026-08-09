@@ -26,7 +26,7 @@ impl ConfigController {
 
         let config = self.build_talos_config(cluster, machine)?;
 
-        self.cache.set_config(cache_key, config.as_bytes().to_vec());
+        self.cache.set_config(cache_key, config.as_bytes().to_vec()).await;
         info!(machine_id = %machine.id, "Generated Talos config");
 
         Ok(config)

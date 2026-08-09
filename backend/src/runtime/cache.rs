@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 use moka::future::Cache;
 use uuid::Uuid;
@@ -44,44 +43,44 @@ impl AppCache {
         self.clusters.get(id).await
     }
 
-    pub fn set_cluster(&self, cluster: Cluster) {
-        self.clusters.insert(cluster.id, cluster);
+    pub async fn set_cluster(&self, cluster: Cluster) {
+        self.clusters.insert(cluster.id, cluster).await;
     }
 
-    pub fn remove_cluster(&self, id: Uuid) {
-        self.clusters.invalidate(&id);
+    pub async fn remove_cluster(&self, id: Uuid) {
+        self.clusters.invalidate(&id).await;
     }
 
     pub async fn get_machine(&self, id: &Uuid) -> Option<Machine> {
         self.machines.get(id).await
     }
 
-    pub fn set_machine(&self, machine: Machine) {
-        self.machines.insert(machine.id, machine);
+    pub async fn set_machine(&self, machine: Machine) {
+        self.machines.insert(machine.id, machine).await;
     }
 
-    pub fn remove_machine(&self, id: Uuid) {
-        self.machines.invalidate(&id);
+    pub async fn remove_machine(&self, id: Uuid) {
+        self.machines.invalidate(&id).await;
     }
 
     pub async fn get_config(&self, key: &str) -> Option<Vec<u8>> {
         self.configs.get(key).await
     }
 
-    pub fn set_config(&self, key: String, data: Vec<u8>) {
-        self.configs.insert(key, data);
+    pub async fn set_config(&self, key: String, data: Vec<u8>) {
+        self.configs.insert(key, data).await;
     }
 
     pub async fn get_branding(&self, tenant_id: &str) -> Option<serde_json::Value> {
         self.branding.get(tenant_id).await
     }
 
-    pub fn set_branding(&self, tenant_id: String, branding: serde_json::Value) {
-        self.branding.insert(tenant_id, branding);
+    pub async fn set_branding(&self, tenant_id: String, branding: serde_json::Value) {
+        self.branding.insert(tenant_id, branding).await;
     }
 
-    pub fn invalidate_branding(&self, tenant_id: &str) {
-        self.branding.invalidate(tenant_id);
+    pub async fn invalidate_branding(&self, tenant_id: &str) {
+        self.branding.invalidate(tenant_id).await;
     }
 
     pub fn clear(&self) {

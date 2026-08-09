@@ -71,14 +71,21 @@
   }
 
   let applying = $state(false);
-  async function applyAll() {
+  async function applyAll(dryRun = false) {
     applying = true;
     try {
-      const res = (await client.post(`/clusters/${$page.params.id}/config/apply`, {})) as {
+      const res = (await client.post(`/clusters/${$page.params.id}/config/apply`, {
+        dry_run: dryRun,
+      })) as {
         count: number;
-        applied_to: string[];
+        appliedTo?: string[];
+        dryRun?: boolean;
       };
-      success(`Applied patches to ${res.count} machine(s)`);
+      success(
+        dryRun
+          ? `Dry-run OK for ${res.count} machine(s)`
+          : `Applied patches to ${res.count} machine(s)`
+      );
     } catch (e: unknown) {
       notifyError(e instanceof Error ? e.message : 'Failed to apply patches via Talos API');
     } finally {
@@ -91,7 +98,10 @@
   <div class="page-header">
     <h1>Config Patches</h1>
     <div class="header-actions" style="display:flex;gap:0.5rem;">
-      <Button variant="secondary" onclick={applyAll} disabled={applying || patches.length === 0}>
+      <Button variant="ghost" onclick={() => applyAll(true)} disabled={applying || patches.length === 0}>
+        Dry-run
+      </Button>
+      <Button variant="secondary" onclick={() => applyAll(false)} disabled={applying || patches.length === 0}>
         {applying ? 'Applying…' : 'Apply to cluster'}
       </Button>
       <Button variant="primary" onclick={() => showEditor = !showEditor}>

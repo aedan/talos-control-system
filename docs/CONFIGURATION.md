@@ -1,3 +1,5 @@
+<!-- Alpha: see docs/STATUS.md and docs/TALOS.md for real capabilities -->
+
 # Configuration Reference
 
 TCS is configured via a TOML file and environment variables. Environment variables take precedence over the config file.
@@ -48,7 +50,7 @@ metrics_port = 9090            # Prometheus metrics endpoint port
 
 ```toml
 [database]
-backend = "sqlite"              # "sqlite" or "postgres"
+backend = "sqlite"              # alpha: sqlite only (postgres refuses to start)
 sqlite_path = "/var/lib/tcs/data.db"
 postgres_url = ""               # e.g., "postgresql://user:pass@host:5432/tcs"
 max_connections = 10

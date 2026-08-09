@@ -1,110 +1,54 @@
 # Talos Control System - Example Configuration
-# 
-# Copy this file to config.toml and modify as needed.
-# All settings have sensible defaults. Environment variables
-# with prefix TCS_ override config file values.
-#
-# Example:
-#   Config:   [server]
-#             http_port = 9090
-#   Env var:  TCS_SERVER_HTTP_PORT=9090
-
-# =============================================================================
-# Server
-# =============================================================================
+# Copy to config.toml. Env vars with prefix TCS_ override (e.g. TCS_SERVER_HTTP_PORT).
 
 [server]
-# Network interface to bind on. Use "0.0.0.0" for all interfaces.
 bind_addr = "0.0.0.0"
-
-# Public-facing URL. Used for redirects and links sent to machines.
-# If empty, defaults to http://<bind_addr>:<http_port>.
 advertised_url = ""
-
-# Port for the gRPC server (Talos API, machine connections).
-grpc_port = 8080
-
-# Port for the REST API and web UI.
+grpc_port = 8080          # reserved; outbound Talos uses node :50000
 http_port = 8081
-
-# Port for Prometheus metrics endpoint.
 metrics_port = 9090
 
-# =============================================================================
-# Database
-# =============================================================================
-
 [database]
-# Database backend: "sqlite" or "postgres".
+# Alpha: only "sqlite" is supported. "postgres" will refuse to start.
 backend = "sqlite"
-
-# Path to the SQLite database file.
 sqlite_path = "/var/lib/tcs/data.db"
-
-# PostgreSQL connection URL (required when backend = "postgres").
-# Format: postgresql://user:password@host:port/database?sslmode=require
 postgres_url = ""
-
-# Maximum number of connections in the pool.
 max_connections = 10
-
-# Connection timeout in seconds.
 connection_timeout = 30
 
-# =============================================================================
-# Siderolink
-# =============================================================================
+[auth]
+# REQUIRED in production. Generate with: openssl rand -hex 32
+# Lab only: TCS_ALLOW_INSECURE=1 allows the built-in default.
+jwt_secret = "change-me-to-a-long-random-string"
+
+# Optional LDAP / OIDC — see docs/AUTH.md
+# [auth.ldap]
+# [auth.oidc]
 
 [siderolink]
-# Internal port for the siderolink listener.
+# Not implemented in alpha (config reserved for future discovery).
 bind_port = 8082
-
-# Port advertised to Talos machines for siderolink connections.
 listen_port = 443
-
-# Maximum transmission unit for tunnel packets.
 mtu = 1420
-
-# Carrier-grade NAT subnet for assigning machine tunnel IPs.
 subnet = "100.64.0.0/10"
-
-# Rate limit in bytes per second (0 = unlimited).
 rate_limit_bytes = 0
 
-# =============================================================================
-# Branding
-# =============================================================================
-
 [branding]
-# Full platform name (shown in page titles, about pages).
 name = "Talos Control System"
-
-# Short name (shown in the top navigation bar).
 short_name = "TCS"
-
-# Tagline (shown on the login page).
 tagline = "Kubernetes Management Simplified"
-
-# Color scheme. Use hex color values (e.g., "#2563EB").
 primary_color = "#150D6A"
 secondary_color = "#4F8BFF"
 background_color = "#0A0A0A"
 surface_color = "#1A1A1A"
 text_color = "#FFFFFF"
 text_muted_color = "#A0A0A0"
-
-# CSS font-family value.
 font_family = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-
-# Path to custom logo file (relative to container root).
-# Leave empty to use the built-in logo.
 logo_path = ""
-
-# Path to custom favicon file.
 favicon_path = ""
-
-# External documentation URL (leave empty to hide the link).
 docs_url = ""
-
-# External support URL (leave empty to hide the link).
 support_url = ""
+
+# [tls]
+# enabled = false
+# mode = "disabled"  # disabled | self_signed | provided | letsencrypt

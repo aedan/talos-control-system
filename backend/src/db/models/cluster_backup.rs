@@ -4,6 +4,7 @@ use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[serde(rename_all = "camelCase")]
 pub struct ClusterBackup {
     #[sqlx(rename = "id")]
     pub id: Uuid,

@@ -4,6 +4,7 @@ use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[serde(rename_all = "camelCase")]
 pub struct Cluster {
     #[sqlx(rename = "id")]
     pub id: Uuid,
@@ -19,9 +20,16 @@ pub struct Cluster {
     pub control_plane_size: i32,
     #[sqlx(rename = "worker_size")]
     pub worker_size: i32,
-    /// Full talosconfig YAML (mTLS certs + endpoints). Sensitive — omit from list APIs.
+    /// Encrypted talosconfig YAML. Never serialize to API as-is.
+    #[serde(skip_serializing)]
     #[sqlx(rename = "talosconfig")]
     pub talosconfig: Option<String>,
+    /// Encrypted kubeconfig YAML.
+    #[serde(skip_serializing)]
+    #[sqlx(rename = "kubeconfig")]
+    pub kubeconfig: Option<String>,
+    #[sqlx(rename = "backup_retention")]
+    pub backup_retention: Option<i32>,
     #[sqlx(rename = "created_at")]
     pub created_at: DateTime<Utc>,
     #[sqlx(rename = "updated_at")]
@@ -39,6 +47,8 @@ impl Cluster {
             control_plane_size: 1,
             worker_size: 1,
             talosconfig: None,
+            kubeconfig: None,
+            backup_retention: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -46,6 +56,13 @@ impl Cluster {
 
     pub fn has_talos_credentials(&self) -> bool {
         self.talosconfig
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    }
+
+    pub fn has_kubeconfig(&self) -> bool {
+        self.kubeconfig
             .as_ref()
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false)

@@ -25,13 +25,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 crc32fast = "1"
 flate2 = "1"
 fastrand = "2"
+aes-gcm = "0.10"
+sha2 = "0.10"
 prometheus = "0.13"
 jsonwebtoken = "9"
 oauth2 = "4"
 openidconnect = "3"
 rsa = "0.9"
 ecdsa = "0.16"
-sha2 = "0.10"
 utoipa = { version = "4", features = ["axum_extras"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1"

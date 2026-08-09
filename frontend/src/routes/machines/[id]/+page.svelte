@@ -35,6 +35,7 @@
   onMount(async () => {
     try {
       machine = await client.get(`/machines/${$page.params.id}`) as Machine;
+      editAddress = (machine as { address?: string }).address || '';
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Failed to load machine';
     } finally {
@@ -84,6 +85,40 @@
       actionBusy = false;
     }
   }
+
+  let upgradeImage = $state('');
+  async function upgrade() {
+    if (!upgradeImage.trim()) {
+      notifyError('Enter an installer image (e.g. ghcr.io/siderolabs/installer:v1.8.0)');
+      return;
+    }
+    if (!confirm(`Upgrade machine with image ${upgradeImage}?`)) return;
+    actionBusy = true;
+    try {
+      await client.post(`/machines/${$page.params.id}/upgrade`, { image: upgradeImage.trim() });
+      success('Upgrade initiated');
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Upgrade failed');
+    } finally {
+      actionBusy = false;
+    }
+  }
+
+  let editAddress = $state('');
+  async function saveAddress() {
+    actionBusy = true;
+    try {
+      const m = (await client.put(`/machines/${$page.params.id}`, {
+        address: editAddress.trim(),
+      })) as Machine & { address?: string };
+      machine = m;
+      success('Address updated');
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Failed to update address');
+    } finally {
+      actionBusy = false;
+    }
+  }
 </script>
 
 <div class="machine-detail">
@@ -99,6 +134,34 @@
         <span class="type-badge">{machine.machineType || (machine as { machine_type?: string }).machine_type}</span>
         <Button variant="secondary" size="sm" onclick={probeVersion} disabled={actionBusy}>Probe version</Button>
         <Button variant="danger" size="sm" onclick={reboot} disabled={actionBusy}>Reboot</Button>
+      </div>
+    </div>
+
+    <div class="info-section" style="margin-bottom:1rem;">
+      <h2>Talos connectivity</h2>
+      <div class="form-row" style="display:flex;gap:0.5rem;align-items:end;flex-wrap:wrap;">
+        <label style="display:flex;flex-direction:column;gap:0.25rem;">
+          Address (host or host:50000)
+          <input
+            type="text"
+            bind:value={editAddress}
+            placeholder={(machine as { address?: string }).address || '10.0.0.2'}
+            style="min-width:16rem;padding:0.4rem;"
+          />
+        </label>
+        <Button variant="secondary" size="sm" onclick={saveAddress} disabled={actionBusy}>Save address</Button>
+      </div>
+      <div class="form-row" style="display:flex;gap:0.5rem;align-items:end;flex-wrap:wrap;margin-top:0.75rem;">
+        <label style="display:flex;flex-direction:column;gap:0.25rem;">
+          Upgrade image
+          <input
+            type="text"
+            bind:value={upgradeImage}
+            placeholder="ghcr.io/siderolabs/installer:v1.8.0"
+            style="min-width:20rem;padding:0.4rem;"
+          />
+        </label>
+        <Button variant="secondary" size="sm" onclick={upgrade} disabled={actionBusy}>Upgrade</Button>
       </div>
     </div>
     
