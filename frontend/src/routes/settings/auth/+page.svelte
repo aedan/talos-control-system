@@ -274,7 +274,7 @@
                 bind:value={config.ldap.userSearchFilter}
                 placeholder="(mail=USERNAME)"
               />
-              <span class="hint">Use {user} or USERNAME in the filter for the username placeholder</span>
+              <span class="hint">Use {`{user}`} or USERNAME in the filter for the username placeholder</span>
             </div>
 
             <div class="form-group">

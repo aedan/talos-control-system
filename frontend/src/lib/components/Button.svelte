@@ -7,7 +7,8 @@
     disabled = false,
     type = 'button',
     onclick,
-    children
+    children,
+    class: extraClass = ''
   }: {
     variant?: 'primary' | 'secondary' | 'ghost' | 'danger';
     size?: 'sm' | 'md' | 'lg';
@@ -15,6 +16,7 @@
     type?: 'button' | 'submit' | 'reset';
     onclick?: (e: MouseEvent) => void;
     children?: Snippet;
+    class?: string;
   } = $props();
 
   const variantClasses = {
@@ -27,7 +29,7 @@
   const sizeClasses = { sm: 'px-3 py-1.5 text-sm', md: 'px-4 py-2', lg: 'px-6 py-3 text-lg' };
 </script>
 
-<button class="btn {variantClasses[variant]} {sizeClasses[size]}"
+<button class="btn {variantClasses[variant]} {sizeClasses[size]} {extraClass}"
         {type}
         {disabled}
         {onclick}

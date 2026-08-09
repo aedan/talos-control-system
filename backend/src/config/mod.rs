@@ -34,6 +34,10 @@ pub struct AuthConfig {
 }
 
 fn default_jwt_secret() -> String {
+    if let Ok(secret) = std::env::var("TCS_AUTH_JWT_SECRET") {
+        return secret;
+    }
+    tracing::warn!("Using default JWT secret — set TCS_AUTH_JWT_SECRET in production!");
     "talos-control-system-default-secret-change-in-production".to_string()
 }
 

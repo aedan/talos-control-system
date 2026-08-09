@@ -126,7 +126,7 @@ clusters:
         <a href="/clusters">
           <Button variant="ghost">Cancel</Button>
         </a>
-        <Button variant="primary" disabled={storeLoading} onclick={handlePreview}>
+        <Button variant="primary" disabled={$storeLoading} onclick={handlePreview}>
           {$storeLoading ? 'Validating...' : 'Validate & Preview'}
         </Button>
       </div>
@@ -231,7 +231,7 @@ clusters:
           </a>
           <Button
             variant="primary"
-            disabled={storeLoading}
+            disabled={$storeLoading}
             onclick={handleImport}
           >
             {$storeLoading ? 'Importing...' : `Import "${name}" (${nodeCount()} nodes)`}

@@ -26,7 +26,7 @@
     try {
       // Placeholder - API not yet implemented
       machineClass = {
-        id: $page.params.id,
+        id: $page.params.id ?? '',
         name: 'Standard Worker',
         description: 'Default worker node profile',
         minCpu: 4,

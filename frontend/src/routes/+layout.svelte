@@ -1,6 +1,7 @@
 <script lang="ts">
   import { branding, applyBranding } from '$lib/stores/branding';
   import Logo from '$lib/branding/components/Logo.svelte';
+  import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
   import type { Snippet } from 'svelte';
 
@@ -24,7 +25,7 @@
 
     const token = localStorage.getItem('tcs_token');
     if (!token) {
-      window.location.href = '/login';
+      goto('/login');
       return;
     }
 
@@ -34,14 +35,14 @@
       });
       if (!res.ok) {
         localStorage.removeItem('tcs_token');
-        window.location.href = '/login';
+        goto('/login');
         return;
       }
       user = await res.json();
       authenticated = true;
     } catch {
       localStorage.removeItem('tcs_token');
-      window.location.href = '/login';
+      goto('/login');
     } finally {
       checking = false;
     }
@@ -59,7 +60,7 @@
 
   async function handleLogout() {
     localStorage.removeItem('tcs_token');
-    window.location.href = '/login';
+    goto('/login');
   }
 </script>
 
@@ -85,7 +86,7 @@
       <li class="sub"><a href="/settings/auth">Auth</a></li>
       <li class="sub"><a href="/settings/branding">Branding</a></li>
       <li class="sub"><a href="/settings/users">Users</a></li>
-      <li><a href="#" onclick={(e) => { e.preventDefault(); handleLogout(); }}>Logout</a></li>
+      <li><button type="button" class="logout-btn" onclick={handleLogout}>Logout</button></li>
     </ul>
   </nav>
 
@@ -172,6 +173,23 @@
   .sidebar-nav li.sub a {
     padding-left: 2rem;
     font-size: 0.9em;
+  }
+
+  .logout-btn {
+    background: none;
+    border: none;
+    padding: 0.6rem 1.2rem;
+    color: var(--tcs-text-muted);
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+    width: 100%;
+    transition: all 0.15s ease;
+  }
+
+  .logout-btn:hover {
+    background: var(--tcs-surface-hover);
+    color: var(--tcs-text);
   }
 
   .sidebar-nav-bottom {

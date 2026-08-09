@@ -57,9 +57,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .fetch_one(&db_pool)
         .await?;
     if count.0 == 0 {
-        let default_password = "admin";
+        let mut default_password = std::env::var("TCS_DEFAULT_ADMIN_PASSWORD")
+            .unwrap_or_else(|_| {
+                let chars: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#";
+                let mut rng = fastrand::Rng::new();
+                let pw: String = (0..24).map(|_| chars[rng.u32(0..chars.len() as u32) as usize] as char).collect();
+                warn!("No TCS_DEFAULT_ADMIN_PASSWORD set. Generated random admin password: {}", pw);
+                pw
+            });
 
-        let password_hash = talos_control_system::auth::local::hash_password(default_password)
+        let password_hash = talos_control_system::auth::local::hash_password(&default_password)
             .expect("Failed to hash default admin password");
 
         let now = chrono::Utc::now();
@@ -87,6 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!(
             "Created default admin user: admin@tcs.local"
         );
+        info!("Default admin password: {}", default_password);
         info!("IMPORTANT: Change the default admin password on first login");
     }
 
