@@ -39,9 +39,9 @@ pub struct KubeconfigUser {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct KubeconfigUserSpec {
-    #[serde(default)]
+    #[serde(default, rename = "client-certificate-data")]
     pub client_certificate_data: Option<String>,
-    #[serde(default)]
+    #[serde(default, rename = "client-key-data")]
     pub client_key_data: Option<String>,
     #[serde(default)]
     pub token: Option<String>,
@@ -127,7 +127,8 @@ pub fn extract_ca_data(config: &Kubeconfig) -> Vec<u8> {
     Vec::new()
 }
 
-/// Extract auth token or credentials from kubeconfig for the active context
+/// Extract auth credentials from kubeconfig for the active context.
+/// Returns (client_key_pem, client_cert_pem, token).
 pub fn extract_auth(config: &Kubeconfig) -> (Vec<u8>, Vec<u8>, String) {
     let context = config.contexts.iter()
         .find(|c| c.name == config.current_context)
@@ -141,6 +142,7 @@ pub fn extract_auth(config: &Kubeconfig) -> (Vec<u8>, Vec<u8>, String) {
     };
 
     let mut cert = Vec::new();
+    let mut key = Vec::new();
     let mut token = String::new();
 
     if let Some(user) = user {
@@ -149,65 +151,34 @@ pub fn extract_auth(config: &Kubeconfig) -> (Vec<u8>, Vec<u8>, String) {
                 cert = data;
             }
         }
+        if let Some(b64) = &user.user.client_key_data {
+            if let Ok(data) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64) {
+                key = data;
+            }
+        }
         if let Some(t) = &user.user.token {
             token = t.clone();
         }
     }
 
-    (Vec::new(), cert, token)
+    (key, cert, token)
 }
 
-/// Build a kube::Client from parsed kubeconfig
-async fn build_client_from_kubeconfig(config: &Kubeconfig) -> Result<kube::Client, AppError> {
-    let context_name = if config.current_context.is_empty() {
-        config.contexts.first().map(|c| c.name.clone()).ok_or_else(|| {
-            AppError::InvalidInput("No context available in kubeconfig".to_string())
-        })?
-    } else {
-        config.current_context.clone()
-    };
+/// Build a kube::Client from raw kubeconfig YAML (preserves mTLS certs/keys).
+async fn build_client_from_kubeconfig_yaml(yaml: &str) -> Result<kube::Client, AppError> {
+    let kc = kube::config::Kubeconfig::from_yaml(yaml).map_err(|e| {
+        AppError::InvalidInput(format!("Invalid kubeconfig: {}", e))
+    })?;
 
-    let context = config.contexts.iter()
-        .find(|c| c.name == context_name)
-        .ok_or_else(|| {
-            AppError::InvalidInput(format!("Context '{}' not found", context_name))
+    let options = kube::config::KubeConfigOptions::default();
+    let config = kube::Config::from_custom_kubeconfig(kc, &options)
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!("Failed to build kube client from kubeconfig: {}", e))
         })?;
 
-    let cluster_name = context.context.cluster.clone();
-    let user_name = context.context.user.clone();
-
-    let cluster = config.clusters.iter()
-        .find(|c| c.name == cluster_name)
-        .ok_or_else(|| {
-            AppError::InvalidInput(format!("Cluster '{}' not found", cluster_name))
-        })?;
-
-    let server = cluster.cluster.server.clone();
-
-    // Build kube::config from the parsed data
-    let ca_data = extract_ca_data(config);
-    let (_client_ca, client_cert, token) = extract_auth(config);
-
-    let mut kube_config = kube::config::Config::new(
-        cluster.cluster.server.parse().map_err(|e| {
-            AppError::InvalidInput(format!("Invalid server URL: {}", e))
-        })?
-    );
-
-    if !ca_data.is_empty() {
-        kube_config.root_cert = Some(vec![ca_data]);
-    }
-
-    if !client_cert.is_empty() {
-        kube_config.auth_info.client_certificate_data = Some(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &client_cert));
-    }
-
-    if !token.is_empty() {
-        kube_config.auth_info.token = Some(token.into());
-    }
-
-    kube::Client::try_from(kube_config).map_err(|e| {
-        AppError::Internal(format!("Failed to build kube client: {}", e))
+    kube::Client::try_from(config).map_err(|e| {
+        AppError::Internal(format!("Failed to create kube client: {}", e))
     })
 }
 
@@ -392,11 +363,10 @@ impl KubernetesClientPool {
 
 /// Discover an existing cluster by parsing kubeconfig and querying nodes
 pub async fn discover_cluster_from_kubeconfig(kubeconfig_yaml: &str) -> Result<DiscoveredCluster, AppError> {
-    // Parse kubeconfig
+    // Parse for metadata (name/server); use kube crate loader for the live client.
     let config = parse_kubeconfig(kubeconfig_yaml)?;
 
-    // Build kube client
-    let client = build_client_from_kubeconfig(&config).await?;
+    let client = build_client_from_kubeconfig_yaml(kubeconfig_yaml).await?;
 
     // Get active context to extract cluster name
     let context_name = if config.current_context.is_empty() {
