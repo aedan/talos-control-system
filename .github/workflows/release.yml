@@ -51,10 +51,6 @@ jobs:
           key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-target-
 
-      - name: Build backend
-        working-directory: backend
-        run: cargo build --release --target x86_64-unknown-linux-gnu
-
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
@@ -66,7 +62,11 @@ jobs:
         working-directory: frontend
         run: npm ci
 
-      - name: Build frontend
+      - name: Build backend (includes frontend build via build.rs)
+        working-directory: backend
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Build frontend (rebuild to ensure clean output in frontend/build)
         working-directory: frontend
         run: npm run build
 
