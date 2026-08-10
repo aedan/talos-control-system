@@ -1027,6 +1027,85 @@ pub async fn get_machine_hostname(
     }
 }
 
+/// List disks on a machine via Talos StorageService.
+pub async fn list_machine_disks(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller.list_disks(id).await {
+        Ok(disks) => Ok(Json(serde_json::json!({ "disks": disks }))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetInstallDiskRequest {
+    pub install_disk: String,
+}
+
+/// Set the install disk for a machine.
+pub async fn set_install_disk(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(payload): Json<SetInstallDiskRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller.set_install_disk(id, &payload.install_disk).await {
+        Ok(m) => {
+            crate::utils::audit::log_action(
+                &state.db_pool,
+                "system",
+                "set_install_disk",
+                &id.to_string(),
+                &payload.install_disk,
+            ).await;
+            Ok(Json(serde_json::json!({
+                "ok": true,
+                "installDisk": m.install_disk,
+            })))
+        }
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallMachineRequest {
+    pub config_yaml: String,
+}
+
+/// Apply config with reboot to install Talos on a machine.
+pub async fn install_machine(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+    Json(payload): Json<InstallMachineRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    if payload.config_yaml.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "configYaml required".into()));
+    }
+    let controller = controller_for(&state);
+    controller
+        .install_machine(id, &payload.config_yaml)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "install_machine",
+        &id.to_string(),
+        "",
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 #[derive(Deserialize)]
 pub struct UpdateMachineRequest {
     pub address: Option<String>,
