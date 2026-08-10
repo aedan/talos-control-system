@@ -348,7 +348,7 @@
               </div>
 
               <div class="machine-actions">
-                {!m.disks.length && m.status === 'pending' && (
+                {#if !m.disks.length && m.status === 'pending'}
                   <Button
                     variant="secondary"
                     size="sm"
@@ -357,7 +357,7 @@
                   >
                     {m.loadingDisks ? 'Discovering...' : 'Discover disks'}
                   </Button>
-                )}
+                {/if}
 
                 {#if m.disks.length > 0 && !m.installDisk}
                   <select
