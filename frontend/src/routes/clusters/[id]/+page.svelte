@@ -13,10 +13,13 @@
   let upgradeImage = $state('ghcr.io/siderolabs/installer:v1.9.0');
   let upgradeMaxUnavail = $state(1);
   let upgradeCpLast = $state(true);
+  let desiredWorkers = $state(0);
 
   onMount(async () => {
     try {
       cluster = await client.get(`/clusters/${$page.params.id}`);
+      desiredWorkers =
+        cluster.workerSize ?? cluster.worker_size ?? cluster.workerSize ?? 0;
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Failed to load cluster';
     } finally {
@@ -113,6 +116,22 @@
       busy = false;
     }
   }
+
+  async function scaleWorkers() {
+    if (!confirm(`Set desired worker size to ${desiredWorkers}? (inventory only)`)) return;
+    busy = true;
+    try {
+      await client.post(`/clusters/${$page.params.id}/scale`, {
+        desiredWorkers: Number(desiredWorkers),
+      });
+      cluster = await client.get(`/clusters/${$page.params.id}`);
+      success(`Desired workers set to ${desiredWorkers}`);
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Scale failed');
+    } finally {
+      busy = false;
+    }
+  }
 </script>
 
 <div class="cluster-detail">
@@ -167,6 +186,20 @@
       <Button variant="primary" size="sm" onclick={saveTalosconfig} disabled={busy || !talosconfigText.trim()}>
         Save talosconfig
       </Button>
+    </details>
+
+    <details class="talos-attach">
+      <summary>Scale workers (inventory target)</summary>
+      <div class="upgrade-form">
+        <label class="num">
+          Desired workers
+          <input type="number" min="0" max="500" bind:value={desiredWorkers} />
+        </label>
+        <Button variant="primary" size="sm" onclick={scaleWorkers} disabled={busy}>
+          Update desired size
+        </Button>
+        <span class="jobs-link">Does not provision metal — update inventory only</span>
+      </div>
     </details>
 
     <details class="talos-attach">

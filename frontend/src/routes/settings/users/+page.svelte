@@ -118,6 +118,23 @@
     }
   }
 
+  async function resetPassword(user: User) {
+    if (!confirm(`Reset password for ${user.email}? A new password will be shown once.`)) return;
+    try {
+      const res = (await client.post(`/users/${user.id}/reset-password`, {
+        forceChange: true,
+      })) as { password?: string; email?: string };
+      if (res.password) {
+        alert(`New password for ${res.email || user.email}:\n\n${res.password}\n\nCopy it now.`);
+        success('Password reset');
+      } else {
+        success('Password reset');
+      }
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Password reset failed');
+    }
+  }
+
   function formatDate(ts: string | null): string {
     if (!ts) return 'Never';
     return new Date(ts).toLocaleDateString();
@@ -235,6 +252,7 @@
               <td>
                 <div class="actions">
                   <Button variant="ghost" size="sm" onclick={() => startEdit(user)}>Edit</Button>
+                  <Button variant="ghost" size="sm" onclick={() => resetPassword(user)}>Reset PW</Button>
                   <Button variant="danger" size="sm" onclick={() => deleteUser(user)}>Delete</Button>
                 </div>
               </td>
