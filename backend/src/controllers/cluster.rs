@@ -23,14 +23,6 @@ pub struct ClusterController {
 }
 
 impl ClusterController {
-    pub fn new(pool: DbPool) -> Self {
-        Self {
-            pool,
-            sqlite_path: "/var/lib/tcs/data.db".to_string(),
-            jwt_secret: String::new(),
-        }
-    }
-
     pub fn with_context(pool: DbPool, sqlite_path: String, jwt_secret: String) -> Self {
         Self {
             pool,
