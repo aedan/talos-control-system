@@ -1,45 +1,42 @@
 # TCS Status (Alpha)
 
-**Last updated:** 2026-08-09
+**Last updated:** 2026-08-10
 
 Talos Control System is an **alpha** management UI for Talos Linux clusters.
 It runs as a **host systemd service** (or bare binary), **outside** the managed
-cluster. Prefer **import + observe + day-2 Talos actions** over greenfield claims.
+cluster.
 
 ## Feature matrix
 
 | Feature | Status | Notes |
 |---------|--------|--------|
-| Local auth (Argon2) + JWT | **Supported** | Set `TCS_AUTH_JWT_SECRET` in production |
-| OIDC | **Supported (alpha)** | Code flow + discovery + CSRF + JWKS; browser callback stores JWT |
+| Local auth + JWT | **Supported** | `TCS_AUTH_JWT_SECRET` required in production |
+| OIDC | **Supported (alpha)** | Code flow + JWKS; **DB-backed CSRF state** for multi-replica |
 | LDAP / AD | **Supported (alpha)** | Service bind + search + user bind |
-| SAML 2.0 SP | **Supported (alpha)** | AuthnRequest + ACS parse; metadata URL; full XML-DSig best-effort |
-| RBAC (admin / operator / reader) | **Supported** | Global + optional per-cluster memberships |
-| White-label branding | **Supported** | Config + Settings UI |
-| Per-tenant branding | **Supported (alpha)** | `X-Tenant-ID` or subdomain → `tenant_branding` |
-| Cluster import (kubeconfig) | **Supported** | Encrypted kubeconfig when provided |
-| Talosconfig attach | **Supported** | Required for machine API; encrypted at rest |
-| Cluster / machine inventory CRUD | **Supported** | |
-| Config patches (store + apply) | **Supported** | Pure-Rust COSI get + multi-doc merge |
-| Etcd snapshot backup / restore | **Supported** | Scheduled backups supported |
-| Machine version / reboot / upgrade | **Supported** | Parallel cluster probe |
-| Cluster / fleet rolling upgrade jobs | **Supported (alpha)** | Scheduler + max-unavailable + CP-last |
-| Greenfield config factory | **Supported (alpha)** | `talosctl gen config` or template stub; no metal provision |
-| Siderolink inventory | **Supported (alpha)** | Register + join tokens; **no WireGuard data path** |
-| Postgres | **Schema bootstrap only** | Runtime is SQLite; see [POSTGRES](POSTGRES.md) |
-| Host installer (self-extracting) | **Supported** | `scripts/package-installer.sh` |
-| Helm / in-cluster deploy | **Not provided** | Intentionally out of scope |
-
-## Network requirements
-
-TCS host must reach machine addresses on **TCP 50000** with talosconfig mTLS for
-Talos actions, and the Kubernetes API for import/refresh.
+| SAML 2.0 SP | **Supported (alpha)** | AuthnRequest + ACS; XML-DSig best-effort |
+| RBAC + per-cluster memberships | **Supported** | |
+| White-label + multi-tenant branding | **Supported (alpha)** | `X-Tenant-ID` / subdomain |
+| Cluster import | **Supported** | kubeconfig + talosconfig |
+| Config apply (pure-Rust COSI) | **Supported** | |
+| Etcd backup / restore / schedule | **Supported** | Leader-only when multi-replica |
+| Rolling upgrade jobs (cluster/fleet) | **Supported (alpha)** | Leader-elected scheduler |
+| Greenfield config factory | **Supported (alpha)** | talosctl or template stub |
+| Apply provision config to machine | **Supported (alpha)** | `POST /api/provision/apply-config` |
+| Bootstrap control-plane machine | **Supported (alpha)** | Talos Bootstrap RPC |
+| Scale workers (desired size) | **Supported (alpha)** | Inventory target; metal still external |
+| Machine reset / wipe | **Supported (alpha)** | Talos Reset RPC; requires confirm |
+| Siderolink inventory | **Supported** | Join tokens + register |
+| Siderolink WireGuard | **Supported (alpha)** | Host `wg`/`ip` when available; graceful degrade |
+| **Postgres runtime** | **Supported (alpha)** | Dual `DbPool`; SQLite default |
+| Multi-replica HA foundation | **Supported (alpha)** | DB locks for schedulers; OIDC state in DB |
+| Host installer | **Supported** | Self-extracting |
+| Helm / in-cluster | **Not provided** | By design |
+| Full bare-metal PXE/redfish provision | **Not provided** | Out of band; TCS assists configs + apply |
 
 ## Explicitly still later
 
-- Siderolink WireGuard tunnels / full discovery plane  
-- Bare-metal provision / scale / destroy  
-- Full dual-backend Postgres runtime + multi-replica HA  
-- Production-grade SAML XML-DSig (validate with your IdP)  
+- Production-grade SAML XML-DSig  
+- Automatic metal discovery / IPMI / PXE orchestration  
+- Full multi-region HA story (sticky sessions, shared object store for backups)  
 
-See [INSTALL](INSTALL.md), [CONFIGURATION](CONFIGURATION.md), [AUTH](AUTH.md), [TALOS](TALOS.md), [POSTGRES](POSTGRES.md).
+See [INSTALL](INSTALL.md), [CONFIGURATION](CONFIGURATION.md), [AUTH](AUTH.md), [POSTGRES](POSTGRES.md), [TALOS](TALOS.md).

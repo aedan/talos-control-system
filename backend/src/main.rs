@@ -66,10 +66,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Database migrations applied successfully");
 
     // Create default admin user if users table is empty
-    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
-        .fetch_one(&db_pool)
+    use talos_control_system::db::SqlVal;
+    let count = db_pool
+        .fetch_scalar_i64("SELECT COUNT(*) FROM users", &[])
         .await?;
-    if count.0 == 0 {
+    if count == 0 {
         let default_password = std::env::var("TCS_DEFAULT_ADMIN_PASSWORD")
             .unwrap_or_else(|_| {
                 let chars: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#";
@@ -85,24 +86,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let now = chrono::Utc::now();
         let admin_id = uuid::Uuid::new_v4();
 
-        sqlx::query(
-            "INSERT INTO users (id, email, display_name, role, is_active, password_hash, auth_provider, ldap_dn, password_needs_change, last_login, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(admin_id)
-        .bind("admin@tcs.local")
-        .bind("TCS Administrator")
-        .bind("admin")
-        .bind(true)
-        .bind(&password_hash)
-        .bind("local")
-        .bind::<Option<String>>(None)
-        .bind(true)
-        .bind::<Option<chrono::DateTime<chrono::Utc>>>(None)
-        .bind(&now)
-        .bind(&now)
-        .execute(&db_pool)
-        .await?;
+        db_pool
+            .execute(
+                "INSERT INTO users (id, email, display_name, role, is_active, password_hash, auth_provider, ldap_dn, password_needs_change, last_login, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                &[
+                    SqlVal::Uuid(admin_id),
+                    SqlVal::text("admin@tcs.local"),
+                    SqlVal::text("TCS Administrator"),
+                    SqlVal::text("admin"),
+                    SqlVal::Bool(true),
+                    SqlVal::text(password_hash),
+                    SqlVal::text("local"),
+                    SqlVal::OptText(None),
+                    SqlVal::Bool(true),
+                    SqlVal::OptDateTime(None),
+                    SqlVal::DateTime(now),
+                    SqlVal::DateTime(now),
+                ],
+            )
+            .await?;
 
         info!(
             "Created default admin user: admin@tcs.local"
@@ -113,6 +116,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let branding_manager = Arc::new(BrandingManager::new(&config.branding, &db_pool).await?);
 
+    let data_dir = std::path::Path::new(&config.database.sqlite_path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/var/lib/tcs".to_string());
+    let siderolink_wg = talos_control_system::network::SiderolinkWg::init(
+        &config.siderolink,
+        &data_dir,
+    );
+    info!(
+        instance_id = %talos_control_system::runtime::ha::instance_id(),
+        wg_enabled = siderolink_wg.enabled(),
+        "HA instance identity"
+    );
+
     let event_bus = Arc::new(EventBus::new());
     let app_cache = AppCache::new();
 
@@ -122,6 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         branding: branding_manager,
         event_bus,
         cache: app_cache,
+        siderolink_wg,
     };
 
     let _backup_sched = talos_control_system::runtime::spawn_backup_scheduler(

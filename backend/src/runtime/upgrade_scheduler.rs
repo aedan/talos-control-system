@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use sqlx::SqlitePool;
+use crate::db::pool::DbPool;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -9,15 +9,21 @@ use crate::db::repos::upgrade_job::{self, UpgradeJobTarget};
 use crate::db::repos::{self};
 
 pub fn spawn_upgrade_scheduler(
-    pool: SqlitePool,
+    pool: DbPool,
     sqlite_path: String,
     jwt_secret: String,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         info!("Upgrade job scheduler started");
         loop {
-            if let Err(e) = tick(&pool, &sqlite_path, &jwt_secret).await {
-                warn!(error = %e, "Upgrade scheduler tick failed");
+            match crate::runtime::ha::try_acquire(&pool, "upgrade_scheduler", 15).await {
+                Ok(true) => {
+                    if let Err(e) = tick(&pool, &sqlite_path, &jwt_secret).await {
+                        warn!(error = %e, "Upgrade scheduler tick failed");
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => warn!(error = %e, "HA lock acquire failed (upgrade)"),
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
@@ -25,7 +31,7 @@ pub fn spawn_upgrade_scheduler(
 }
 
 async fn tick(
-    pool: &SqlitePool,
+    pool: &DbPool,
     sqlite_path: &str,
     jwt_secret: &str,
 ) -> Result<(), crate::AppError> {
@@ -40,7 +46,7 @@ async fn tick(
 }
 
 async fn run_job(
-    pool: &SqlitePool,
+    pool: &DbPool,
     sqlite_path: &str,
     jwt_secret: &str,
     job_id: Uuid,
@@ -113,7 +119,7 @@ async fn run_job(
 }
 
 async fn poll_target(
-    pool: &SqlitePool,
+    pool: &DbPool,
     sqlite_path: &str,
     jwt_secret: &str,
     image: &str,

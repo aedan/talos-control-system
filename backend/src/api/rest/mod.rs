@@ -103,6 +103,14 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
             post(handlers::start_cluster_upgrade),
         )
         .route(
+            "/clusters/:id/scale",
+            post(handlers::scale_cluster_workers),
+        )
+        .route(
+            "/provision/apply-config",
+            post(handlers::apply_provision_config),
+        )
+        .route(
             "/clusters/:id/access",
             get(handlers::list_cluster_access).put(handlers::upsert_cluster_access),
         )
@@ -116,6 +124,8 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route("/machines/:id", delete(handlers::delete_machine))
         .route("/machines/:id/reboot", post(handlers::reboot_machine))
         .route("/machines/:id/upgrade", post(handlers::upgrade_machine))
+        .route("/machines/:id/reset", post(handlers::reset_machine))
+        .route("/machines/:id/bootstrap", post(handlers::bootstrap_machine))
         .route("/machines/:id/version", get(handlers::get_machine_version))
         .route("/machines/:id/services", get(handlers::get_machine_services))
         .route("/machines/:id/hostname", get(handlers::get_machine_hostname))

@@ -1,5 +1,5 @@
 use chrono::Utc;
-use sqlx::SqlitePool;
+use crate::db::pool::DbPool;
 use uuid::Uuid;
 
 use crate::db::repos::upgrade_job::{self, UpgradeJob, UpgradeJobTarget};
@@ -7,11 +7,11 @@ use crate::db::repos::{self};
 use crate::AppError;
 
 pub struct UpgradeController {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl UpgradeController {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }
 
@@ -124,7 +124,7 @@ impl UpgradeController {
 }
 
 async fn insert_ordered_targets(
-    pool: &SqlitePool,
+    pool: &DbPool,
     job_id: Uuid,
     cluster_id: Uuid,
     machines: Vec<crate::db::models::machine::Machine>,

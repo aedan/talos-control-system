@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use chrono::Utc;
-use sqlx::SqlitePool;
+use crate::db::pool::DbPool;
 use uuid::Uuid;
 
 use crate::db::repos::provision::{self, ProvisionArtifact};
@@ -12,12 +12,12 @@ use crate::utils::secrets;
 use crate::AppError;
 
 pub struct ProvisionController {
-    pool: SqlitePool,
+    pool: DbPool,
     jwt_secret: String,
 }
 
 impl ProvisionController {
-    pub fn new(pool: SqlitePool, jwt_secret: String) -> Self {
+    pub fn new(pool: DbPool, jwt_secret: String) -> Self {
         Self { pool, jwt_secret }
     }
 

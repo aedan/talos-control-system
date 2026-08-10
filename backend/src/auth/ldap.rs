@@ -1,5 +1,5 @@
 use ldap3::{LdapConnAsync, Scope, SearchEntry};
-use sqlx::SqlitePool;
+use crate::db::pool::DbPool;
 use tracing::info;
 use uuid::Uuid;
 
@@ -23,7 +23,7 @@ impl LdapClient {
     /// is replaced with the username form (local-part when email-shaped).
     pub async fn authenticate(
         &self,
-        pool: &SqlitePool,
+        pool: &DbPool,
         login: &str,
         password: &str,
     ) -> Result<User, AppError> {
@@ -140,7 +140,7 @@ impl LdapClient {
 
     async fn upsert_user(
         &self,
-        pool: &SqlitePool,
+        pool: &DbPool,
         email: &str,
         entry: &SearchEntry,
         dn: &str,

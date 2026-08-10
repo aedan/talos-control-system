@@ -9,3 +9,4 @@ pub mod cluster_access;
 pub mod upgrade_job;
 pub mod siderolink;
 pub mod provision;
+pub mod oidc_state;

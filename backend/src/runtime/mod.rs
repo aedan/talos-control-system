@@ -4,6 +4,7 @@ pub mod cache;
 pub mod scheduler;
 pub mod backup_scheduler;
 pub mod upgrade_scheduler;
+pub mod ha;
 
 pub use event::{EventBus, EventType, Event};
 pub use dag::{ControllerDAG, ControllerId, ControllerNode};

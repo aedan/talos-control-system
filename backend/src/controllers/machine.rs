@@ -1,4 +1,4 @@
-use sqlx::SqlitePool;
+use crate::db::pool::DbPool;
 use tracing::{info, warn};
 
 use crate::db::models::machine::Machine;
@@ -6,11 +6,11 @@ use crate::db::repos;
 use crate::AppError;
 
 pub struct MachineController {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl MachineController {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }
 

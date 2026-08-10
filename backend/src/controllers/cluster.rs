@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use sqlx::SqlitePool;
+use crate::db::pool::DbPool;
 use uuid::Uuid;
 
 use crate::db::models::cluster::Cluster;
@@ -17,13 +17,13 @@ use crate::AppError;
 const DEFAULT_BACKUP_RETENTION: i32 = 10;
 
 pub struct ClusterController {
-    pool: SqlitePool,
+    pool: DbPool,
     sqlite_path: String,
     jwt_secret: String,
 }
 
 impl ClusterController {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: DbPool) -> Self {
         Self {
             pool,
             sqlite_path: "/var/lib/tcs/data.db".to_string(),
@@ -31,7 +31,7 @@ impl ClusterController {
         }
     }
 
-    pub fn with_context(pool: SqlitePool, sqlite_path: String, jwt_secret: String) -> Self {
+    pub fn with_context(pool: DbPool, sqlite_path: String, jwt_secret: String) -> Self {
         Self {
             pool,
             sqlite_path,
@@ -523,6 +523,61 @@ impl ClusterController {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
         let client = self.client_for_machine(&cluster, &machine).await?;
         client.upgrade(image.trim()).await
+    }
+
+    pub async fn reset_machine(
+        &self,
+        machine_id: Uuid,
+        graceful: bool,
+        reboot: bool,
+    ) -> Result<(), AppError> {
+        let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
+        let client = self.client_for_machine(&cluster, &machine).await?;
+        client.reset(graceful, reboot).await?;
+        let mut m = machine;
+        m.status = "resetting".to_string();
+        m.updated_at = chrono::Utc::now();
+        let _ = crate::db::repos::machine::update(&self.pool, &m).await;
+        Ok(())
+    }
+
+    pub async fn bootstrap_machine(&self, machine_id: Uuid) -> Result<(), AppError> {
+        let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
+        if !machine.machine_type.to_ascii_lowercase().contains("control") {
+            return Err(AppError::InvalidInput(
+                "Bootstrap is only for control-plane machines".into(),
+            ));
+        }
+        let client = self.client_for_machine(&cluster, &machine).await?;
+        client.bootstrap().await
+    }
+
+    /// Apply full machine config YAML (from provision artifact) to a node.
+    pub async fn apply_machine_config(
+        &self,
+        machine_id: Uuid,
+        config_yaml: &str,
+    ) -> Result<(), AppError> {
+        let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
+        let client = self.client_for_machine(&cluster, &machine).await?;
+        client.apply_config(config_yaml).await
+    }
+
+    /// Scale worker inventory desired size and emit worker config for additional nodes.
+    pub async fn scale_workers(
+        &self,
+        cluster_id: Uuid,
+        desired_workers: i32,
+    ) -> Result<Cluster, AppError> {
+        if desired_workers < 0 {
+            return Err(AppError::InvalidInput("desired_workers must be >= 0".into()));
+        }
+        let mut cluster = crate::db::repos::cluster::get(&self.pool, cluster_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Cluster {} not found", cluster_id)))?;
+        cluster.worker_size = desired_workers;
+        cluster.updated_at = chrono::Utc::now();
+        crate::db::repos::cluster::update(&self.pool, &cluster).await
     }
 
     pub async fn machine_version(&self, machine_id: Uuid) -> Result<String, AppError> {
