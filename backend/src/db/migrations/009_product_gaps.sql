@@ -1,5 +1,3 @@
--- HA leadership, shared OIDC state, provision jobs
-
 CREATE TABLE IF NOT EXISTS ha_locks (
     lock_name TEXT PRIMARY KEY NOT NULL,
     owner_id TEXT NOT NULL,
