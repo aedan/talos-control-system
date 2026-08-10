@@ -1716,6 +1716,7 @@ pub struct CreateUserRequest {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateUserResponse {
     pub id: Uuid,
     pub email: String,
