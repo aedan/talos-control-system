@@ -148,7 +148,7 @@ impl DbPool {
                 continue;
             }
             // DDL rarely uses placeholders; still adapt for safety.
-            self.execute(stmt, &[]).await?;
+            self.execute(&stmt, &[]).await?;
         }
         Ok(())
     }
@@ -342,12 +342,24 @@ fn rewrite_placeholders(sql: &str) -> String {
         .replace("AUTOINCREMENT", "")
 }
 
-fn split_sql_statements(script: &str) -> Vec<&str> {
+fn split_sql_statements(script: &str) -> Vec<String> {
     // Our migrations don't embed `;` inside strings in complex ways.
+    // Strip full-line `--` comments so a header comment cannot swallow the
+    // following CREATE TABLE in the same `;`-separated chunk.
     script
         .split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && !s.starts_with("--"))
+        .map(|chunk| {
+            chunk
+                .lines()
+                .filter(|l| {
+                    let t = l.trim();
+                    !t.is_empty() && !t.starts_with("--")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
         .collect()
 }
 

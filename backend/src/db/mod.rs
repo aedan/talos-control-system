@@ -65,6 +65,10 @@ pub async fn run_migrations(pool: &DbPool) -> Result<(), AppError> {
             "009_product_gaps.sql",
             include_str!("migrations/009_product_gaps.sql"),
         ),
+        (
+            "010_ha_locks_fix.sql",
+            include_str!("migrations/010_ha_locks_fix.sql"),
+        ),
     ];
 
     for (name, sql) in migrations {
