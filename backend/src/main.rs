@@ -29,6 +29,34 @@ type CertStore = Arc<tokio::sync::RwLock<(String, String)>>;
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     init_tracing();
 
+    // One-shot tools before server boot
+    let mut args = std::env::args().skip(1);
+    if let Some(cmd) = args.next() {
+        if cmd == "migrate-sqlite-to-postgres" {
+            let sqlite = std::env::var("TCS_SQLITE_PATH")
+                .or_else(|_| std::env::var("TCS_DATABASE_SQLITE_PATH"))
+                .unwrap_or_else(|_| "/var/lib/tcs/data.db".into());
+            let pg = std::env::var("TCS_POSTGRES_URL")
+                .or_else(|_| std::env::var("TCS_DATABASE_POSTGRES_URL"))
+                .map_err(|_| "TCS_POSTGRES_URL is required for migrate-sqlite-to-postgres")?;
+            info!(%sqlite, "Starting SQLite → Postgres migration");
+            talos_control_system::db::migrate_sqlite_to_postgres::run(&sqlite, &pg).await?;
+            info!("Migration complete");
+            return Ok(());
+        }
+        if cmd == "--help" || cmd == "-h" || cmd == "help" {
+            eprintln!(
+                "tcs — Talos Control System\n\n\
+                 Commands:\n\
+                   (default)                   Start the control plane\n\
+                   migrate-sqlite-to-postgres  Copy SQLite data into Postgres\n\
+                                               env: TCS_SQLITE_PATH, TCS_POSTGRES_URL\n\
+                   help                        Show this message\n"
+            );
+            return Ok(());
+        }
+    }
+
     use talos_control_system::auth::jwt::set_jwt_secret;
     talos_control_system::api::rest::handlers::record_start_time();
 

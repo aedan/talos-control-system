@@ -100,6 +100,18 @@ sudo ./dist/tcs-0.1.0-dev-linux-*.sh
 sudo ./tcs-NEW-linux-x86_64.sh --upgrade
 ```
 
+## WireGuard (optional Siderolink data path)
+
+```bash
+# Debian/Ubuntu example
+sudo apt-get install -y wireguard-tools
+# Ensure TCS can run `ip` and `wg` (typically root via systemd)
+sudo systemctl restart tcs
+# journalctl -u tcs | grep -i siderolink
+```
+
+Set `TCS_SIDEROLINK_ENDPOINT` / `TCS_PUBLIC_HOST` if the advertised endpoint is not auto-correct.
+
 Or replace only the binary:
 
 ```bash

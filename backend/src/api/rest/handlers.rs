@@ -2194,6 +2194,72 @@ pub async fn update_user(
     }))
 }
 
+/// Admin: set a new password for a local user (lab recovery / force rotate).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminResetPasswordRequest {
+    /// If omitted, a random 20-char password is generated and returned once.
+    pub password: Option<String>,
+    #[serde(default = "default_true_reset")]
+    pub force_change: bool,
+}
+
+pub async fn admin_reset_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<AdminResetPasswordRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" {
+        return Err((StatusCode::FORBIDDEN, "Admin role required".into()));
+    }
+    let mut user = repos::user::get_by_id(&state.db_pool, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".into()))?;
+    if user.auth_provider != "local" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Only local users have passwords".into(),
+        ));
+    }
+    let plain = payload.password.filter(|p| !p.is_empty()).unwrap_or_else(|| {
+        let chars: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        let mut rng = fastrand::Rng::new();
+        (0..20)
+            .map(|_| chars[rng.u32(0..chars.len() as u32) as usize] as char)
+            .collect()
+    });
+    let hash = crate::auth::local::hash_password(&plain)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    user.password_hash = Some(hash);
+    user.password_needs_change = payload.force_change;
+    user.updated_at = chrono::Utc::now();
+    repos::user::upsert(&state.db_pool, &user)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "admin_reset_password",
+        &user.email,
+        if payload.force_change {
+            "force_change=true"
+        } else {
+            "force_change=false"
+        },
+    )
+    .await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "email": user.email,
+        "password": plain,
+        "passwordNeedsChange": user.password_needs_change,
+        "note": "Copy the password now; it is not stored in plain text.",
+    })))
+}
+
 pub async fn delete_user(
     State(state): State<AppState>,
     headers: HeaderMap,

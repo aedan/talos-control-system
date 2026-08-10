@@ -1,3 +1,4 @@
+pub mod migrate_sqlite_to_postgres;
 pub mod models;
 pub mod pool;
 pub mod postgres;

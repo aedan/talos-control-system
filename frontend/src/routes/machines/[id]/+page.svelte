@@ -117,6 +117,44 @@
       actionBusy = false;
     }
   }
+
+  async function bootstrap() {
+    if (!confirm('Bootstrap this control-plane node (initial etcd formation)?')) return;
+    actionBusy = true;
+    try {
+      await client.post(`/machines/${$page.params.id}/bootstrap`, {});
+      success('Bootstrap initiated');
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Bootstrap failed');
+    } finally {
+      actionBusy = false;
+    }
+  }
+
+  async function resetMachine() {
+    if (
+      !confirm(
+        'DESTRUCTIVE: Reset/wipe this machine via Talos API? This is not recoverable from TCS alone.'
+      )
+    ) {
+      return;
+    }
+    if (!confirm('Type intent confirmed: proceed with machine reset?')) return;
+    actionBusy = true;
+    try {
+      await client.post(`/machines/${$page.params.id}/reset`, {
+        confirm: true,
+        graceful: true,
+        reboot: true,
+      });
+      success('Machine reset initiated');
+      machine = (await client.get(`/machines/${$page.params.id}`)) as Machine;
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Reset failed');
+    } finally {
+      actionBusy = false;
+    }
+  }
 </script>
 
 <div class="machine-detail">
@@ -133,7 +171,9 @@
         <Button variant="secondary" size="sm" onclick={probeVersion} disabled={actionBusy}>Version</Button>
         <Button variant="secondary" size="sm" onclick={loadHostname} disabled={actionBusy}>Hostname</Button>
         <Button variant="secondary" size="sm" onclick={loadServices} disabled={actionBusy}>Services</Button>
+        <Button variant="secondary" size="sm" onclick={bootstrap} disabled={actionBusy}>Bootstrap</Button>
         <Button variant="danger" size="sm" onclick={reboot} disabled={actionBusy}>Reboot</Button>
+        <Button variant="danger" size="sm" onclick={resetMachine} disabled={actionBusy}>Reset</Button>
       </div>
     </div>
 

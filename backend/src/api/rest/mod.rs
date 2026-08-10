@@ -50,6 +50,10 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route("/users/:id", get(handlers::get_user))
         .route("/users/:id", put(handlers::update_user))
         .route("/users/:id", delete(handlers::delete_user))
+        .route(
+            "/users/:id/reset-password",
+            post(handlers::admin_reset_password),
+        )
         .route("/settings/certificates/status", get(handlers::get_cert_status))
         .route("/settings/certificates/config", put(handlers::update_cert_config))
         .route("/settings/certificates/renew", post(handlers::renew_certificate))
