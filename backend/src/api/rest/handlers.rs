@@ -171,13 +171,48 @@ pub async fn create_cluster(
 
 pub async fn list_clusters(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    match repos::cluster::list(&state.db_pool).await {
-        Ok(clusters) => Ok(Json(
+    let claims = extract_claims(&headers)?;
+    let clusters = repos::cluster::list(&state.db_pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if claims.role == "admin" {
+        return Ok(Json(
             clusters.into_iter().map(cluster_public_json).collect(),
-        )),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        ));
     }
+
+    let user = repos::user::get_by_email(&state.db_pool, &claims.sub)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "User not found".to_string()))?;
+
+    let n = repos::cluster_access::count_for_user(&state.db_pool, user.id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if n == 0 {
+        // Legacy: no membership rows → all clusters at global role.
+        return Ok(Json(
+            clusters.into_iter().map(cluster_public_json).collect(),
+        ));
+    }
+
+    let memberships = repos::cluster_access::list_for_user(&state.db_pool, user.id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let allowed: std::collections::HashSet<_> =
+        memberships.into_iter().map(|m| m.cluster_id).collect();
+
+    Ok(Json(
+        clusters
+            .into_iter()
+            .filter(|c| allowed.contains(&c.id))
+            .map(cluster_public_json)
+            .collect(),
+    ))
 }
 
 pub async fn get_cluster(
@@ -215,6 +250,7 @@ pub async fn delete_cluster(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let _ = repos::cluster_access::delete_for_cluster(&state.db_pool, id).await;
     match repos::cluster::delete(&state.db_pool, id).await {
         Ok(()) => Ok(StatusCode::NO_CONTENT),
         Err(e) => Err((StatusCode::NOT_FOUND, e.to_string())),
@@ -223,17 +259,154 @@ pub async fn delete_cluster(
 
 pub async fn list_machines(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    match repos::machine::list(&state.db_pool).await {
-        Ok(machines) => {
-            let vals: Result<Vec<_>, _> = machines.into_iter().map(serde_json::to_value).collect();
-            match vals {
-                Ok(v) => Ok(Json(v)),
-                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-            }
+    let claims = extract_claims(&headers)?;
+    let machines = repos::machine::list(&state.db_pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let machines = if claims.role == "admin" {
+        machines
+    } else {
+        let user = repos::user::get_by_email(&state.db_pool, &claims.sub)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or_else(|| (StatusCode::UNAUTHORIZED, "User not found".to_string()))?;
+        let n = repos::cluster_access::count_for_user(&state.db_pool, user.id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if n == 0 {
+            machines
+        } else {
+            let memberships = repos::cluster_access::list_for_user(&state.db_pool, user.id)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let allowed: std::collections::HashSet<_> =
+                memberships.into_iter().map(|m| m.cluster_id).collect();
+            machines
+                .into_iter()
+                .filter(|m| m.cluster_id.map(|c| allowed.contains(&c)).unwrap_or(false))
+                .collect()
         }
+    };
+
+    let vals: Result<Vec<_>, _> = machines.into_iter().map(serde_json::to_value).collect();
+    match vals {
+        Ok(v) => Ok(Json(v)),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
+}
+
+// ─── Cluster access (per-cluster RBAC) ─────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertClusterAccessRequest {
+    pub user_id: Uuid,
+    pub role: String,
+}
+
+pub async fn list_cluster_access(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(cluster_id): Path<Uuid>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" {
+        return Err((StatusCode::FORBIDDEN, "Admin role required".to_string()));
+    }
+    let rows = repos::cluster_access::list_for_cluster(&state.db_pool, cluster_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let email = repos::user::get_by_id(&state.db_pool, row.user_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|u| u.email)
+            .unwrap_or_default();
+        out.push(serde_json::json!({
+            "userId": row.user_id,
+            "clusterId": row.cluster_id,
+            "role": row.role,
+            "email": email,
+            "createdAt": row.created_at,
+        }));
+    }
+    Ok(Json(out))
+}
+
+pub async fn upsert_cluster_access(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(cluster_id): Path<Uuid>,
+    Json(payload): Json<UpsertClusterAccessRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" {
+        return Err((StatusCode::FORBIDDEN, "Admin role required".to_string()));
+    }
+    if repos::cluster::get(&state.db_pool, cluster_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .is_none()
+    {
+        return Err((StatusCode::NOT_FOUND, "Cluster not found".to_string()));
+    }
+    if repos::user::get_by_id(&state.db_pool, payload.user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .is_none()
+    {
+        return Err((StatusCode::NOT_FOUND, "User not found".to_string()));
+    }
+    let row = repos::cluster_access::upsert(
+        &state.db_pool,
+        payload.user_id,
+        cluster_id,
+        &payload.role,
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "cluster_access_upsert",
+        &cluster_id.to_string(),
+        &format!("user={} role={}", payload.user_id, row.role),
+    )
+    .await;
+    Ok(Json(serde_json::json!({
+        "userId": row.user_id,
+        "clusterId": row.cluster_id,
+        "role": row.role,
+        "createdAt": row.created_at,
+    })))
+}
+
+pub async fn delete_cluster_access(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((cluster_id, user_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" {
+        return Err((StatusCode::FORBIDDEN, "Admin role required".to_string()));
+    }
+    repos::cluster_access::delete(&state.db_pool, user_id, cluster_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "cluster_access_delete",
+        &cluster_id.to_string(),
+        &format!("user={}", user_id),
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn get_machine(

@@ -1,5 +1,5 @@
 use axum::Router;
-use axum::middleware::from_fn;
+use axum::middleware::from_fn_with_state;
 use axum::routing::{delete, get, post, put};
 use tower_http::cors::{AllowHeaders, AllowMethods, Any, CorsLayer};
 use tower_http::trace::TraceLayer;
@@ -61,6 +61,14 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
             "/clusters/:id/talos/versions",
             post(handlers::probe_cluster_versions),
         )
+        .route(
+            "/clusters/:id/access",
+            get(handlers::list_cluster_access).put(handlers::upsert_cluster_access),
+        )
+        .route(
+            "/clusters/:id/access/:user_id",
+            delete(handlers::delete_cluster_access),
+        )
         .route("/machines", get(handlers::list_machines))
         .route("/machines/:id", get(handlers::get_machine))
         .route("/machines/:id", put(handlers::update_machine))
@@ -103,7 +111,10 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route("/settings/audit-logs", get(handlers::get_audit_logs))
         .route("/settings/audit-logs", delete(handlers::clear_audit_logs))
         .route("/settings/system/info", get(handlers::get_system_info))
-        .layer(from_fn(middleware::rbac_middleware));
+        .layer(from_fn_with_state(
+            state.clone(),
+            middleware::rbac_middleware,
+        ));
 
     let api_routes = Router::new()
         .merge(public_routes)

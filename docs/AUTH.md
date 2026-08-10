@@ -99,20 +99,36 @@ default_role = "reader"
 3. Callback returns JWT + user; subsequent `/api/auth/me` works
 4. Replay of `state` fails (CSRF)
 
+**ID token verification:** When the IdP publishes `jwks_uri`, TCS verifies the
+`id_token` signature (RS256) and checks issuer + audience before accepting claims.
+If JWKS verification fails, TCS falls back to userinfo / unverified claims (logged).
+
 **Known alpha limits:**
 
-- ID tokens are not fully JWKS-signature-validated (userinfo / claims used after code exchange)
 - OIDC `state` is in-memory (lost on restart; not multi-replica)
+- Only RSA JWKs (`n`/`e`) are supported for ID token verify
 
 ## Roles (RBAC)
 
 | Role | Permissions |
 |------|-------------|
-| `admin` | Full access: users, clusters, settings |
-| `operator` | Manage clusters and nodes |
+| `admin` | Full access: users, clusters, settings, memberships |
+| `operator` | Manage clusters and nodes (no user admin) |
 | `reader` | Read-only |
 
-Route-level only; **no per-cluster scopes** yet.
+### Per-cluster memberships
+
+Optional table `cluster_access` scopes non-admin users to specific clusters.
+
+| Condition | Behaviour |
+|-----------|-----------|
+| Global `admin` | All clusters |
+| No membership rows | Global role applies to **all** clusters (legacy) |
+| ≥1 membership row | Only listed clusters; role = membership role |
+
+API (admin only): `GET/PUT /api/clusters/:id/access`, `DELETE /api/clusters/:id/access/:userId`.
+
+See [OPS.md](OPS.md).
 
 ## API endpoints
 

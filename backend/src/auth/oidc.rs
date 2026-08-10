@@ -135,12 +135,38 @@ impl TcsOidcProvider {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        // Fetch user info from userinfo endpoint
-        let user_info = if !self.userinfo_url.is_empty() {
+        // Prefer verified ID token claims (JWKS) when available.
+        let from_id_token = if !id_token_str.is_empty() {
+            match self.verify_id_token(id_token_str).await {
+                Ok(info) => Some(info),
+                Err(e) => {
+                    warn!(error = %e, "ID token JWKS verification failed; trying userinfo/fallback");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let user_info = if let Some(info) = from_id_token {
+            // Optionally enrich display name from userinfo if missing.
+            if info.display_name.is_empty() && !self.userinfo_url.is_empty() {
+                if let Ok(ui) = self.fetch_user_info(access_token).await {
+                    OidcUserInfo {
+                        display_name: ui.display_name,
+                        ..info
+                    }
+                } else {
+                    info
+                }
+            } else {
+                info
+            }
+        } else if !self.userinfo_url.is_empty() {
             match self.fetch_user_info(access_token).await {
                 Ok(info) => info,
                 Err(e) => {
-                    warn!(error = %e, "Userinfo endpoint failed, falling back to ID token");
+                    warn!(error = %e, "Userinfo endpoint failed, falling back to unverified ID token");
                     self.parse_id_token_claims(id_token_str)
                 }
             }
@@ -148,7 +174,103 @@ impl TcsOidcProvider {
             self.parse_id_token_claims(id_token_str)
         };
 
+        if user_info.email.is_empty() {
+            return Err(AppError::Auth(
+                "OIDC did not provide an email claim".to_string(),
+            ));
+        }
+
         Ok(user_info)
+    }
+
+    /// Verify `id_token` signature against the provider JWKS and extract claims.
+    pub async fn verify_id_token(&self, id_token: &str) -> Result<OidcUserInfo, AppError> {
+        use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+
+        if self.jwks_uri.is_empty() {
+            return Err(AppError::Auth("OIDC provider has no jwks_uri".to_string()));
+        }
+
+        let header = decode_header(id_token)
+            .map_err(|e| AppError::Auth(format!("Invalid ID token header: {}", e)))?;
+        let kid = header
+            .kid
+            .ok_or_else(|| AppError::Auth("ID token missing kid".to_string()))?;
+
+        let jwks: serde_json::Value = self
+            .http
+            .get(&self.jwks_uri)
+            .send()
+            .await
+            .map_err(|e| AppError::Auth(format!("JWKS fetch failed: {}", e)))?
+            .json()
+            .await
+            .map_err(|e| AppError::Auth(format!("JWKS parse failed: {}", e)))?;
+
+        let keys = jwks
+            .get("keys")
+            .and_then(|k| k.as_array())
+            .ok_or_else(|| AppError::Auth("JWKS has no keys".to_string()))?;
+
+        let jwk = keys
+            .iter()
+            .find(|k| k.get("kid").and_then(|v| v.as_str()) == Some(kid.as_str()))
+            .ok_or_else(|| AppError::Auth(format!("No JWK for kid {}", kid)))?;
+
+        let n = jwk
+            .get("n")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AppError::Auth("JWK missing n".to_string()))?;
+        let e = jwk
+            .get("e")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AppError::Auth("JWK missing e".to_string()))?;
+
+        let key = DecodingKey::from_rsa_components(n, e)
+            .map_err(|err| AppError::Auth(format!("Invalid RSA JWK: {}", err)))?;
+
+        let mut validation = Validation::new(Algorithm::RS256);
+        let issuer = self.config.issuer_url.trim_end_matches('/');
+        validation.set_issuer(&[issuer, &format!("{}/", issuer)]);
+        validation.set_audience(&[&self.config.client_id]);
+        validation.validate_aud = true;
+
+        #[derive(Debug, Deserialize)]
+        struct IdClaims {
+            sub: String,
+            #[serde(default)]
+            email: String,
+            #[serde(default)]
+            name: String,
+            #[serde(default)]
+            preferred_username: String,
+        }
+
+        let token_data = match decode::<IdClaims>(id_token, &key, &validation) {
+            Ok(t) => t,
+            Err(e) => {
+                // Retry without audience if provider uses azp-only.
+                validation.validate_aud = false;
+                decode::<IdClaims>(id_token, &key, &validation).map_err(|e2| {
+                    AppError::Auth(format!(
+                        "ID token verification failed: {} (retry: {})",
+                        e, e2
+                    ))
+                })?
+            }
+        };
+
+        let email = if token_data.claims.email.is_empty() {
+            token_data.claims.preferred_username.clone()
+        } else {
+            token_data.claims.email.clone()
+        };
+
+        Ok(OidcUserInfo {
+            subject: token_data.claims.sub,
+            email,
+            display_name: token_data.claims.name,
+        })
     }
 
     async fn fetch_user_info(&self, access_token: &str) -> Result<OidcUserInfo, AppError> {
