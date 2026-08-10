@@ -79,12 +79,53 @@
     error = '';
     successMsg = '';
     try {
-      await client.put('/settings/certificates/config', config);
-      successMsg = 'Certificate configuration applied successfully';
-      success('Certificate configuration updated');
+      // Backend expects nested letsencrypt / self_signed / provided objects
+      const body: Record<string, unknown> = {
+        mode: config.mode,
+        domains: config.domains,
+      };
+      if (config.mode === 'letsencrypt') {
+        body.letsencrypt = {
+          email: config.adminEmail || '',
+          challenge_type: config.challengeType || 'http-01',
+          dns_provider:
+            config.challengeType === 'dns-01'
+              ? {
+                  provider: config.dnsProvider || 'cloudflare',
+                  api_key: config.dnsApiKey || '',
+                  api_secret: config.dnsApiSecret || '',
+                  api_token: config.dnsApiToken || '',
+                  zone_id: config.dnsZoneId || '',
+                }
+              : null,
+        };
+      } else if (config.mode === 'self-signed') {
+        body.self_signed = { domains: config.domains };
+      } else if (config.mode === 'provided') {
+        body.provided = {
+          cert_path: config.certPath || '',
+          key_path: config.keyPath || '',
+        };
+      }
+
+      const res = (await client.put('/settings/certificates/config', body)) as {
+        message?: string;
+        restartRequired?: boolean;
+        overlayPath?: string;
+      };
+      successMsg =
+        res.message ||
+        'TLS config saved. Restart TCS (systemctl restart tcs) for certificates to take effect.';
+      success(successMsg);
+      // Refresh status (still shows old mode until restart)
+      try {
+        status = (await client.get('/settings/certificates/status')) as CertStatus;
+      } catch {
+        /* ignore */
+      }
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Failed to apply configuration';
-      notifyError('Failed to apply certificate configuration');
+      notifyError(error);
     } finally {
       saving = false;
     }
@@ -96,11 +137,12 @@
     successMsg = '';
     try {
       await client.post('/settings/certificates/renew');
-      successMsg = 'Certificate renewal initiated';
-      success('Certificate renewal initiated');
+      successMsg =
+        'Renewal requested for the currently loaded TLS mode. If you just switched to Let\'s Encrypt, restart TCS first so the new mode is active.';
+      success(successMsg);
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Failed to renew certificate';
-      notifyError('Failed to renew certificate');
+      notifyError(error);
     } finally {
       renewing = false;
     }
@@ -110,7 +152,11 @@
 <div class="cert-page">
   <div class="page-header">
     <h1>SSL/TLS Certificates</h1>
-    <p class="description">Manage TLS certificates for your TCS deployment.</p>
+    <p class="description">
+      Manage TLS for the TCS HTTPS listener. Mode is loaded at process start — after saving, run
+      <code>systemctl restart tcs</code>. Let's Encrypt HTTP-01 needs port 80 reachable from the
+      public internet on the configured domain(s).
+    </p>
   </div>
 
   {#if loading}

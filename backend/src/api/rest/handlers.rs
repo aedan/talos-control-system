@@ -1478,59 +1478,199 @@ pub struct ProvidedCertConfigRequest {
 
 pub async fn update_cert_config(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<CertConfigRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // Write TLS config to TOML file
-    let config_path = "/etc/tcs/config.toml";
-    
-    let mut config_data = toml::value::Table::new();
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" {
+        return Err((StatusCode::FORBIDDEN, "Admin role required".into()));
+    }
+
+    // Domains: prefer top-level, then nested self_signed / empty
+    let domains = req
+        .domains
+        .clone()
+        .or_else(|| req.self_signed.as_ref().map(|s| s.domains.clone()))
+        .unwrap_or_default();
+
+    if req.mode == "letsencrypt" {
+        let le = req.letsencrypt.as_ref().ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "letsencrypt config required (email, challenge_type)".into(),
+            )
+        })?;
+        if le.email.trim().is_empty() {
+            return Err((StatusCode::BAD_REQUEST, "letsencrypt.email is required".into()));
+        }
+        if domains.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "at least one domain is required for Let's Encrypt".into(),
+            ));
+        }
+    }
+
     let mut tls_table = toml::value::Table::new();
-    tls_table.insert("enabled".to_string(), toml::Value::Boolean(req.mode != "disabled"));
+    tls_table.insert(
+        "enabled".to_string(),
+        toml::Value::Boolean(req.mode != "disabled"),
+    );
     tls_table.insert("mode".to_string(), toml::Value::String(req.mode.clone()));
 
     if req.mode == "letsencrypt" {
-        if let Some(le) = req.letsencrypt {
+        if let Some(le) = &req.letsencrypt {
             let mut le_table = toml::value::Table::new();
-            le_table.insert("domains".to_string(), toml::Value::Array(
-                req.domains.unwrap_or_default().iter().map(|d| toml::Value::String(d.clone())).collect()
-            ));
-            le_table.insert("email".to_string(), toml::Value::String(le.email));
-            le_table.insert("challenge_type".to_string(), toml::Value::String(le.challenge_type));
+            le_table.insert(
+                "domains".to_string(),
+                toml::Value::Array(
+                    domains
+                        .iter()
+                        .map(|d| toml::Value::String(d.clone()))
+                        .collect(),
+                ),
+            );
+            le_table.insert("email".to_string(), toml::Value::String(le.email.clone()));
+            let challenge = if le.challenge_type.trim().is_empty() {
+                "http-01".to_string()
+            } else {
+                le.challenge_type.clone()
+            };
+            le_table.insert(
+                "challenge_type".to_string(),
+                toml::Value::String(challenge.clone()),
+            );
+            if challenge == "dns-01" {
+                if let Some(dns) = &le.dns_provider {
+                    let mut dns_table = toml::value::Table::new();
+                    dns_table.insert(
+                        "provider".to_string(),
+                        toml::Value::String(dns.provider.clone()),
+                    );
+                    dns_table.insert(
+                        "api_key".to_string(),
+                        toml::Value::String(dns.api_key.clone()),
+                    );
+                    dns_table.insert(
+                        "api_secret".to_string(),
+                        toml::Value::String(dns.api_secret.clone()),
+                    );
+                    dns_table.insert(
+                        "api_token".to_string(),
+                        toml::Value::String(dns.api_token.clone()),
+                    );
+                    dns_table.insert(
+                        "zone_id".to_string(),
+                        toml::Value::String(dns.zone_id.clone()),
+                    );
+                    le_table.insert("dns_provider".to_string(), toml::Value::Table(dns_table));
+                }
+            }
             tls_table.insert("letsencrypt".to_string(), toml::Value::Table(le_table));
         }
     } else if req.mode == "self-signed" {
-        if let Some(ss) = req.self_signed {
-            let mut ss_table = toml::value::Table::new();
-            ss_table.insert("domains".to_string(), toml::Value::Array(
-                ss.domains.iter().map(|d| toml::Value::String(d.clone())).collect()
-            ));
-            tls_table.insert("self-signed".to_string(), toml::Value::Table(ss_table));
-        }
+        let ss_domains = if domains.is_empty() {
+            vec!["localhost".to_string()]
+        } else {
+            domains.clone()
+        };
+        let mut ss_table = toml::value::Table::new();
+        ss_table.insert(
+            "domains".to_string(),
+            toml::Value::Array(
+                ss_domains
+                    .iter()
+                    .map(|d| toml::Value::String(d.clone()))
+                    .collect(),
+            ),
+        );
+        tls_table.insert("self-signed".to_string(), toml::Value::Table(ss_table));
     } else if req.mode == "provided" {
-        if let Some(prov) = req.provided {
+        if let Some(prov) = &req.provided {
             let mut prov_table = toml::value::Table::new();
-            prov_table.insert("cert_path".to_string(), toml::Value::String(prov.cert_path));
-            prov_table.insert("key_path".to_string(), toml::Value::String(prov.key_path));
-            if let Some(ca) = prov.ca_path {
-                prov_table.insert("ca_path".to_string(), toml::Value::String(ca));
+            prov_table.insert(
+                "cert_path".to_string(),
+                toml::Value::String(prov.cert_path.clone()),
+            );
+            prov_table.insert(
+                "key_path".to_string(),
+                toml::Value::String(prov.key_path.clone()),
+            );
+            if let Some(ca) = &prov.ca_path {
+                prov_table.insert("ca_path".to_string(), toml::Value::String(ca.clone()));
             }
             tls_table.insert("provided".to_string(), toml::Value::Table(prov_table));
+        } else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "provided cert_path and key_path required".into(),
+            ));
         }
     }
 
+    let mut config_data = toml::value::Table::new();
     config_data.insert("tls".to_string(), toml::Value::Table(tls_table));
-
-    if let Some(path) = std::path::Path::new(config_path).parent() {
-        std::fs::create_dir_all(path).ok();
-    }
     let config_str = toml::to_string_pretty(&config_data)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    std::fs::write(config_path, &config_str).ok();
 
-    // Restart would be needed for changes to take effect — note this in response
+    // Prefer writable data dir overlay (systemd ProtectSystem often makes /etc read-only).
+    let data_dir = std::path::Path::new(&state.config.database.sqlite_path)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/tcs"));
+    let overlay_path = data_dir.join("tls.toml");
+    std::fs::create_dir_all(&data_dir).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot create data dir: {}", e),
+        )
+    })?;
+    std::fs::write(&overlay_path, &config_str).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "cannot write {}: {} (check ReadWritePaths for the data directory)",
+                overlay_path.display(),
+                e
+            ),
+        )
+    })?;
+
+    // Best-effort merge into main config.toml when it is writable
+    let main_path = std::env::var("TCS_CONFIG").unwrap_or_else(|_| "/etc/tcs/config.toml".into());
+    let mut wrote_main = false;
+    if let Ok(existing) = std::fs::read_to_string(&main_path) {
+        if let Ok(mut root) = existing.parse::<toml::Value>() {
+            if let Some(table) = root.as_table_mut() {
+                table.insert(
+                    "tls".to_string(),
+                    config_data.get("tls").cloned().unwrap_or(toml::Value::Table(toml::map::Map::new())),
+                );
+                if let Ok(merged) = toml::to_string_pretty(&root) {
+                    if std::fs::write(&main_path, merged).is_ok() {
+                        wrote_main = true;
+                    }
+                }
+            }
+        }
+    }
+
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "tls_config_update",
+        &req.mode,
+        &format!("overlay={} main_merged={}", overlay_path.display(), wrote_main),
+    )
+    .await;
+
     Ok(Json(serde_json::json!({
-        "message": "TLS config updated. Restart required to apply changes.",
-        "mode": req.mode
+        "message": "TLS config saved. Restart TCS to apply (systemctl restart tcs). TLS mode is read only at process start.",
+        "mode": req.mode,
+        "overlayPath": overlay_path.display().to_string(),
+        "mainConfigMerged": wrote_main,
+        "restartRequired": true,
     })))
 }
 

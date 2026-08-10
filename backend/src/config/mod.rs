@@ -58,8 +58,19 @@ impl Config {
         let file_path = std::env::var("TCS_CONFIG")
             .unwrap_or_else(|_| "/etc/tcs/config.toml".to_string());
 
-        let config = config::Config::builder()
-            .add_source(config::File::with_name(&file_path).required(false))
+        // TLS overlay written by the Settings UI (writable under ProtectSystem=strict).
+        let data_dir = std::env::var("TCS_DATA_DIR").unwrap_or_else(|_| "/var/lib/tcs".into());
+        let tls_overlay = std::path::PathBuf::from(data_dir.trim_end_matches('/')).join("tls.toml");
+
+        let mut builder = config::Config::builder()
+            .add_source(config::File::from(std::path::PathBuf::from(&file_path)).required(false));
+
+        if tls_overlay.is_file() {
+            builder = builder.add_source(config::File::from(tls_overlay.clone()).required(false));
+            tracing::info!(path = %tls_overlay.display(), "Loading TLS config overlay");
+        }
+
+        let config = builder
             .add_source(config::Environment::with_prefix("TCS").separator("_"))
             .build()?;
 
