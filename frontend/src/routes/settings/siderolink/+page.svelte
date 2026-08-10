@@ -53,8 +53,8 @@
 <div class="page">
   <h1>Siderolink inventory</h1>
   <p class="desc">
-    Registration and join tokens for machines. WireGuard data path is not implemented yet — peers are
-    inventory-only.
+    Registration and join tokens for machines. WireGuard tunnel is managed automatically when
+    <code>wireguard-tools</code> is installed on the TCS host.
   </p>
 
   <section class="card">
