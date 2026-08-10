@@ -73,6 +73,28 @@ api_key = "YOUR_ACCOUNT_NUMBER"
 api_secret = "YOUR_API_KEY"
 ```
 
+## Settings UI caveats
+
+Saving TLS settings from **Settings → Certificates**:
+
+1. Writes a TLS overlay to `/var/lib/tcs/tls.toml` (always writable under the default systemd unit).
+2. Best-effort merges into `/etc/tcs/config.toml` when that path is writable.
+3. **Does not hot-reload** the running process — you must restart:
+
+```bash
+sudo systemctl restart tcs
+journalctl -u tcs -f   # watch ACME / TLS startup
+```
+
+Until restart, status/renew still use the **previous** mode (e.g. self-signed).
+
+### Let's Encrypt HTTP-01 checklist
+
+- DNS A/AAAA for the domain points at this host
+- Port **80** reachable from the internet (challenge); **443** for HTTPS
+- `email` and `domains` filled in the UI (or config)
+- After save + restart, logs should show ACME issuance (not only self-signed generation)
+
 ## Certificate Renewal
 
 A background tokio task runs daily checking certificate expiry. Renewal is triggered when less than 30 days remain. Renewal logs appear in the systemd journal:

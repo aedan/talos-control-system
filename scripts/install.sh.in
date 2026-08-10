@@ -178,7 +178,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=true
-ReadWritePaths=${TCS_DATA} /var/log
+ReadWritePaths=${TCS_DATA} ${TCS_CONFIG_DIR} /var/log
 
 [Install]
 WantedBy=multi-user.target
