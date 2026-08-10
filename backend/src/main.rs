@@ -23,7 +23,6 @@ use talos_control_system::utils::version::VERSION_INFO;
 use talos_control_system::AppState;
 
 type AcmeChallengeStore = Arc<DashMap<String, String>>;
-type CertStore = Arc<tokio::sync::RwLock<(String, String)>>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -162,6 +161,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let event_bus = Arc::new(EventBus::new());
     let app_cache = AppCache::new();
 
+    let tls_enabled = config.tls.enabled && config.tls.mode != TlsMode::Disabled;
+    let acme_store: AcmeChallengeStore = Arc::new(DashMap::new());
+
+    // Placeholder runtime; filled in run_with_tls before serving
     let state = AppState {
         config: Arc::new(config.clone()),
         db_pool: db_pool.clone(),
@@ -169,6 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         event_bus,
         cache: app_cache,
         siderolink_wg,
+        tls_runtime: None,
     };
 
     let _backup_sched = talos_control_system::runtime::spawn_backup_scheduler(
@@ -182,9 +186,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config.auth.jwt_secret.clone(),
     );
 
-    let tls_enabled = config.tls.enabled && config.tls.mode != TlsMode::Disabled;
-    let acme_store: AcmeChallengeStore = Arc::new(DashMap::new());
-
     if tls_enabled {
         run_with_tls(config, state, acme_store).await
     } else {
@@ -194,11 +195,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 async fn run_with_tls(
     config: Config,
-    state: AppState,
+    mut state: AppState,
     acme_store: AcmeChallengeStore,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let cert_store: CertStore = Arc::new(tokio::sync::RwLock::new((String::new(), String::new())));
-
     // Start HTTP server FIRST (required for ACME HTTP-01 challenge validation)
     let http_addr: SocketAddr = format!("{}:80", config.server.bind_addr).parse()?;
     let http_app = build_http_redirect_router(acme_store.clone());
@@ -240,27 +239,42 @@ async fn run_with_tls(
             talos_control_system::cert::self_signed::generate_self_signed(&["localhost".to_string()]).await?
         }
     } else {
-        load_certificates_from_config(&config.tls, &cert_store).await?
+        load_certificates_from_config(&config.tls).await?
     };
 
-    *cert_store.write().await = (cert_pem.clone(), key_pem.clone());
+    let data_dir = std::env::var("TCS_DATA_DIR").unwrap_or_else(|_| "/var/lib/tcs".into());
+
+    let tls_runtime = Arc::new(
+        talos_control_system::cert::TlsRuntime::new(
+            cert_pem.clone(),
+            key_pem.clone(),
+            acme_store.clone(),
+            config.tls.clone(),
+            data_dir.clone(),
+        )
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?,
+    );
+    state.tls_runtime = Some(tls_runtime.clone());
 
     let rest_app = create_rest_router(state.clone(), &config.branding);
 
     let https_addr: SocketAddr = format!("{}:443", config.server.bind_addr).parse()?;
 
-    let rustls_config = RustlsConfig::from_pem(cert_pem.clone().into_bytes(), key_pem.clone().into_bytes())
-        .await
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-
+    let renewal_config = config.clone();
+    let renewal_acme = acme_store.clone();
     let renewal_handle = tokio::spawn(async move {
-        if let Err(e) = talos_control_system::cert::start_cert_renewal_task(config, Some(acme_store)).await {
+        if let Err(e) =
+            talos_control_system::cert::start_cert_renewal_task(renewal_config, Some(renewal_acme))
+                .await
+        {
             error!(error = %e, "Certificate renewal task error");
         }
     });
 
+    let rustls_config = tls_runtime.rustls_config();
+
     let https_handle = tokio::spawn(async move {
-        info!(addr = %https_addr, "Starting HTTPS server (TLS)");
+        info!(addr = %https_addr, "Starting HTTPS server (TLS, live reload enabled)");
         if let Err(e) = axum_server::bind_rustls(https_addr, rustls_config)
             .serve(rest_app.into_make_service())
             .await
@@ -291,37 +305,31 @@ async fn run_with_tls(
 
 async fn load_certificates_from_config(
     tls_config: &talos_control_system::config::tls::TlsConfig,
-    cert_store: &CertStore,
 ) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
-    let (cert_pem, key_pem) = match tls_config.mode {
+    match tls_config.mode {
         TlsMode::SelfSigned => {
             let domains = tls_config
                 .self_signed
                 .as_ref()
                 .map(|c| c.domains.clone())
                 .unwrap_or_else(|| vec!["localhost".to_string()]);
-            talos_control_system::cert::self_signed::generate_self_signed(&domains).await?
+            Ok(talos_control_system::cert::self_signed::generate_self_signed(&domains).await?)
         }
         TlsMode::Provided => {
             let provided = tls_config.provided.as_ref().ok_or(
                 "Provided TLS mode requires cert_path and key_path in config",
             )?;
-            talos_control_system::cert::provided::load_provided_certs(
+            Ok(talos_control_system::cert::provided::load_provided_certs(
                 &provided.cert_path,
                 &provided.key_path,
             )
-            .await?
+            .await?)
         }
-        TlsMode::Disabled => {
-            return Err("TLS mode is Disabled".into());
-        }
+        TlsMode::Disabled => Err("TLS mode is Disabled".into()),
         TlsMode::LetsEncrypt => {
-            return Err("Let's Encrypt handled separately in run_with_tls".into());
+            Err("Let's Encrypt handled separately in run_with_tls".into())
         }
-    };
-
-    *cert_store.write().await = (cert_pem.clone(), key_pem.clone());
-    Ok((cert_pem, key_pem))
+    }
 }
 
 async fn run_without_tls(

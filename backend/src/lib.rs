@@ -23,6 +23,8 @@ pub struct AppState {
     pub event_bus: Arc<EventBus>,
     pub cache: AppCache,
     pub siderolink_wg: Arc<crate::network::SiderolinkWg>,
+    /// Present when the process started with HTTPS enabled (live cert reload).
+    pub tls_runtime: Option<Arc<crate::cert::TlsRuntime>>,
 }
 
 impl Clone for AppState {
@@ -34,6 +36,7 @@ impl Clone for AppState {
             event_bus: Arc::clone(&self.event_bus),
             cache: self.cache.clone(),
             siderolink_wg: Arc::clone(&self.siderolink_wg),
+            tls_runtime: self.tls_runtime.clone(),
         }
     }
 }
