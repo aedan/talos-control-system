@@ -23,12 +23,21 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route("/auth/login", post(handlers::login))
         .route("/auth/logout", post(handlers::logout))
         .route("/auth/token", post(handlers::refresh_token))
+        .route("/auth/providers", get(handlers::get_auth_providers))
         .route("/auth/oidc", get(handlers::oidc_authorize))
         .route("/auth/oidc/callback", get(handlers::oidc_callback))
+        .route("/auth/saml/metadata", get(handlers::saml_metadata))
+        .route("/auth/saml/login", get(handlers::saml_login))
+        .route("/auth/saml/acs", post(handlers::saml_acs))
         .route("/branding", get(handlers::get_branding))
         .route("/branding/css", get(handlers::get_branding_css))
         .route("/branding/logo", get(handlers::get_logo))
-        .route("/branding/favicon", get(handlers::get_favicon));
+        .route("/branding/favicon", get(handlers::get_favicon))
+        .route(
+            "/branding/tenants/:tenant_id",
+            get(handlers::get_tenant_branding),
+        )
+        .route("/siderolink/register", post(handlers::siderolink_register));
 
     // Metrics intentionally not on public API; use /metrics on metrics_port when exposed separately.
     // Kept behind auth for alpha simplicity:
@@ -47,10 +56,38 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route("/settings/auth/config", get(handlers::get_auth_config))
         .route("/settings/auth/config", put(handlers::update_auth_config))
         .route("/branding", put(handlers::update_branding))
+        .route(
+            "/branding/tenants/:tenant_id",
+            put(handlers::put_tenant_branding),
+        )
         .route("/clusters", get(handlers::list_clusters))
         .route("/clusters", post(handlers::create_cluster))
         .route("/clusters/import", post(handlers::import_cluster))
         .route("/clusters/import/preview", post(handlers::preview_import))
+        .route(
+            "/clusters/generate-config",
+            post(handlers::generate_cluster_config),
+        )
+        .route(
+            "/provision/artifacts",
+            get(handlers::list_provision_artifacts),
+        )
+        .route(
+            "/provision/artifacts/:id",
+            get(handlers::get_provision_artifact),
+        )
+        .route("/fleets/upgrades", post(handlers::start_fleet_upgrade))
+        .route("/upgrade-jobs", get(handlers::list_upgrade_jobs))
+        .route("/upgrade-jobs/:id", get(handlers::get_upgrade_job))
+        .route(
+            "/upgrade-jobs/:id/cancel",
+            post(handlers::cancel_upgrade_job),
+        )
+        .route("/siderolink/peers", get(handlers::siderolink_peers))
+        .route(
+            "/siderolink/tokens",
+            get(handlers::list_siderolink_tokens).post(handlers::create_siderolink_token),
+        )
         .route("/clusters/:id", get(handlers::get_cluster))
         .route("/clusters/:id", put(handlers::update_cluster))
         .route("/clusters/:id", delete(handlers::delete_cluster))
@@ -60,6 +97,10 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route(
             "/clusters/:id/talos/versions",
             post(handlers::probe_cluster_versions),
+        )
+        .route(
+            "/clusters/:id/upgrade",
+            post(handlers::start_cluster_upgrade),
         )
         .route(
             "/clusters/:id/access",

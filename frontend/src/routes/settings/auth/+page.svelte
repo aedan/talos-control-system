@@ -29,6 +29,13 @@
       redirectUrl: string;
       scopes: string;
     };
+    saml?: {
+      enabled: boolean;
+      spEntityId?: string;
+      acsUrl?: string;
+      idpMetadataUrl?: string;
+      hasIdpSsoUrl?: boolean;
+    };
   }
 
   interface PasswordChange {
@@ -63,6 +70,13 @@
       clientSecret: '',
       redirectUrl: '',
       scopes: 'openid,profile,email'
+    },
+    saml: {
+      enabled: false,
+      spEntityId: '',
+      acsUrl: '',
+      idpMetadataUrl: '',
+      hasIdpSsoUrl: false
     }
   });
 
@@ -74,9 +88,47 @@
 
   onMount(async () => {
     try {
-      const data = await client.get('/settings/auth/config') as AuthConfig;
+      const data = (await client.get('/settings/auth/config')) as any;
       if (data) {
-        config = data;
+        // Map backend response (mixed camel/snake) into form state.
+        if (data.ldap) {
+          config.ldap = {
+            enabled: true,
+            serverUrl: data.ldap.server || data.ldap.serverUrl || '',
+            bindDn: data.ldap.bind_dn || data.ldap.bindDn || '',
+            bindPassword: '',
+            userSearchBase: data.ldap.user_search_base || data.ldap.userSearchBase || '',
+            userSearchFilter: data.ldap.user_search_filter || data.ldap.userSearchFilter || '(mail={})',
+            defaultRole: data.ldap.default_role || data.ldap.defaultRole || 'reader',
+            groupRoleMappings: (data.ldap.group_role_mappings || data.ldap.groupRoleMappings || []).map(
+              (m: any) => ({
+                groupDnPattern: m.group_dn_pattern || m.groupDnPattern || '',
+                role: m.role || 'reader'
+              })
+            )
+          };
+        }
+        if (data.oidc) {
+          config.oidc = {
+            enabled: !!data.oidc.enabled,
+            issuerUrl: data.oidc.issuer_url || data.oidc.issuerUrl || '',
+            clientId: data.oidc.client_id || data.oidc.clientId || '',
+            clientSecret: '',
+            redirectUrl: data.oidc.redirect_url || data.oidc.redirectUrl || '',
+            scopes: Array.isArray(data.oidc.scopes)
+              ? data.oidc.scopes.join(',')
+              : data.oidc.scopes || 'openid,profile,email'
+          };
+        }
+        if (data.saml) {
+          config.saml = {
+            enabled: !!data.saml.enabled,
+            spEntityId: data.saml.spEntityId || data.saml.sp_entity_id || '',
+            acsUrl: data.saml.acsUrl || data.saml.acs_url || '',
+            idpMetadataUrl: data.saml.idpMetadataUrl || data.saml.idp_metadata_url || '',
+            hasIdpSsoUrl: !!(data.saml.hasIdpSsoUrl ?? data.saml.has_idp_sso_url)
+          };
+        }
       }
     } catch {
       // Use defaults if endpoint doesn't exist yet
@@ -387,6 +439,45 @@
           {/if}
         </div>
 
+        <div class="saml-card">
+          <div class="card-header">
+            <h2>SAML 2.0 (Service Provider)</h2>
+            <span class="badge {config.saml?.enabled ? 'on' : 'off'}">
+              {config.saml?.enabled ? 'Enabled' : 'Disabled'}
+            </span>
+          </div>
+          <p class="section-desc">
+            Configure SAML in <code>config.toml</code> under <code>[auth.saml]</code> (not via this form yet).
+            When enabled, the login page shows <strong>Sign in with SAML</strong>.
+          </p>
+          {#if config.saml?.enabled}
+            <div class="form-group">
+              <label>SP Entity ID</label>
+              <input type="text" value={config.saml.spEntityId || ''} readonly />
+            </div>
+            <div class="form-group">
+              <label>ACS URL</label>
+              <input type="text" value={config.saml.acsUrl || ''} readonly />
+            </div>
+            <div class="form-group">
+              <label>IdP metadata URL</label>
+              <input type="text" value={config.saml.idpMetadataUrl || ''} readonly />
+            </div>
+            <p class="hint">
+              Metadata: <code>/api/auth/saml/metadata</code> · Login: <code>/api/auth/saml/login</code> ·
+              IdP SSO configured: {config.saml.hasIdpSsoUrl ? 'yes' : 'no'}
+            </p>
+          {:else}
+            <pre class="sample-toml">[auth.saml]
+enabled = true
+idp_metadata_url = "https://idp.example.com/metadata"
+# or idp_sso_url = "https://idp.example.com/sso"
+sp_entity_id = "https://tcs.example.com/saml/sp"
+acs_url = "https://tcs.example.com/api/auth/saml/acs"
+default_role = "reader"</pre>
+          {/if}
+        </div>
+
         <Button variant="primary" onclick={saveConfig} disabled={saving}>
           {saving ? 'Saving...' : 'Save Configuration'}
         </Button>
@@ -417,6 +508,39 @@
     display: flex;
     flex-direction: column;
     gap: 1rem;
+  }
+
+  .saml-card {
+    background: var(--tcs-surface);
+    border: 1px solid var(--tcs-border);
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin-top: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  .badge {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.2rem 0.5rem;
+    border-radius: 999px;
+  }
+  .badge.on {
+    background: rgba(74, 222, 128, 0.15);
+    color: #4ade80;
+  }
+  .badge.off {
+    background: rgba(160, 160, 160, 0.15);
+    color: var(--tcs-text-muted);
+  }
+  .sample-toml {
+    font-size: 0.78rem;
+    background: var(--tcs-background);
+    padding: 0.75rem;
+    border-radius: 6px;
+    overflow: auto;
   }
 
   .password-card h2 {

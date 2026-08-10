@@ -45,6 +45,15 @@ export TCS_BRANDING_PRIMARY_COLOR="#2563EB"
 
 ## Customizing via UI
 
+### Multi-tenant resolution
+
+1. Header `X-Tenant-ID` (if non-empty)
+2. Else first DNS label of `Host` when it looks like a subdomain (not `www` / `api` / `localhost`)
+3. Else `default`
+
+Public: `GET /api/branding`, `GET /api/branding/tenants/:tenant_id`  
+Admin: `PUT /api/branding`, `PUT /api/branding/tenants/:tenant_id`
+
 Authenticated admins can customize branding directly from the **Settings > White-Label Branding** page:
 
 1. Navigate to `/settings/branding`

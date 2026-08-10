@@ -2,6 +2,7 @@ pub mod jwt;
 pub mod local;
 pub mod ldap;
 pub mod oidc;
+pub mod saml;
 pub mod rbac;
 
 pub use oidc::TcsOidcProvider;

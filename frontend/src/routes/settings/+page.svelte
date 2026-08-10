@@ -52,7 +52,31 @@
         </svg>
       </div>
       <h3>Authentication</h3>
-      <p>Configure OIDC, LDAP, and local auth providers.</p>
+      <p>Configure OIDC, LDAP, SAML status, and local auth.</p>
+      <span class="card-arrow">&rarr;</span>
+    </a>
+
+    <a href="/settings/siderolink" class="settings-card">
+      <div class="card-icon">
+        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+          <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+        </svg>
+      </div>
+      <h3>Siderolink</h3>
+      <p>Join tokens and registered peer inventory (WG later).</p>
+      <span class="card-arrow">&rarr;</span>
+    </a>
+
+    <a href="/upgrades" class="settings-card">
+      <div class="card-icon">
+        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="23 4 23 10 17 10"/>
+          <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+        </svg>
+      </div>
+      <h3>Rolling upgrades</h3>
+      <p>Fleet and cluster Talos upgrade jobs.</p>
       <span class="card-arrow">&rarr;</span>
     </a>
     

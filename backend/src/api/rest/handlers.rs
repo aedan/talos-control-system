@@ -29,6 +29,54 @@ pub async fn health_check() -> Json<HealthResponse> {
     })
 }
 
+/// Public: which auth entrypoints the login UI should show.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthProvidersResponse {
+    pub local: bool,
+    pub oidc: bool,
+    pub saml: bool,
+    pub ldap_configured: bool,
+}
+
+pub async fn get_auth_providers(State(state): State<AppState>) -> Json<AuthProvidersResponse> {
+    Json(AuthProvidersResponse {
+        local: true,
+        oidc: state
+            .config
+            .auth
+            .oidc
+            .as_ref()
+            .map(|o| o.enabled)
+            .unwrap_or(false),
+        saml: state
+            .config
+            .auth
+            .saml
+            .as_ref()
+            .map(|s| s.enabled)
+            .unwrap_or(false),
+        ldap_configured: state.config.auth.ldap.is_some(),
+    })
+}
+
+/// HTML bootstrap after browser SSO (OIDC redirect or SAML ACS POST).
+fn sso_token_html(token: &str) -> axum::response::Html<String> {
+    let escaped = token.replace('\\', "\\\\").replace('\'', "\\'");
+    axum::response::Html(format!(
+        r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>Signing in…</title></head>
+<body><p>Signing in…</p>
+<script>
+try {{
+  localStorage.setItem('tcs_token', '{escaped}');
+  window.location.replace('/');
+}} catch (e) {{
+  document.body.innerText = 'Login succeeded but browser storage failed: ' + e;
+}}
+</script></body></html>"#
+    ))
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrandingResponse {
@@ -46,12 +94,55 @@ pub struct BrandingResponse {
     pub support_url: String,
 }
 
-pub async fn get_branding(
-    State(state): State<AppState>,
-) -> Json<BrandingResponse> {
-    let branding = state.branding.get_branding("default").await;
+/// Resolve tenant id: X-Tenant-ID → subdomain → default.
+pub fn resolve_tenant_id(headers: &HeaderMap) -> String {
+    if let Some(h) = headers.get("x-tenant-id").and_then(|v| v.to_str().ok()) {
+        let t = h.trim();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    if let Some(host) = headers.get(axum::http::header::HOST).and_then(|v| v.to_str().ok()) {
+        let host = host.split(':').next().unwrap_or(host);
+        let parts: Vec<&str> = host.split('.').collect();
+        if parts.len() >= 3 {
+            let sub = parts[0];
+            if sub != "www" && sub != "api" && sub != "localhost" {
+                return sub.to_string();
+            }
+        }
+    }
+    "default".to_string()
+}
 
-    Json(BrandingResponse {
+#[cfg(test)]
+mod tenant_tests {
+    use super::resolve_tenant_id;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn tenant_from_header() {
+        let mut h = HeaderMap::new();
+        h.insert("x-tenant-id", HeaderValue::from_static("acme"));
+        assert_eq!(resolve_tenant_id(&h), "acme");
+    }
+
+    #[test]
+    fn tenant_from_subdomain() {
+        let mut h = HeaderMap::new();
+        h.insert(axum::http::header::HOST, HeaderValue::from_static("acme.tcs.example.com"));
+        assert_eq!(resolve_tenant_id(&h), "acme");
+    }
+
+    #[test]
+    fn tenant_default() {
+        let h = HeaderMap::new();
+        assert_eq!(resolve_tenant_id(&h), "default");
+    }
+}
+
+fn branding_response(branding: crate::config::BrandingConfig) -> BrandingResponse {
+    BrandingResponse {
         name: branding.name,
         short_name: branding.short_name,
         tagline: branding.tagline,
@@ -64,7 +155,16 @@ pub async fn get_branding(
         font_family: branding.font_family,
         docs_url: branding.docs_url,
         support_url: branding.support_url,
-    })
+    }
+}
+
+pub async fn get_branding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Json<BrandingResponse> {
+    let tenant = resolve_tenant_id(&headers);
+    let branding = state.branding.get_branding(&tenant).await;
+    Json(branding_response(branding))
 }
 
 #[derive(Deserialize)]
@@ -85,10 +185,12 @@ pub struct UpdateBrandingRequest {
 
 pub async fn update_branding(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<UpdateBrandingRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let tenant = resolve_tenant_id(&headers);
     let branding = TenantBranding {
-        tenant_id: "default".to_string(),
+        tenant_id: tenant,
         name: payload.name,
         short_name: payload.short_name,
         primary_color: payload.primary_color,
@@ -113,11 +215,53 @@ pub async fn update_branding(
 
 pub async fn get_branding_css(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> (StatusCode, String) {
-    let branding = state.branding.get_branding("default").await;
+    let tenant = resolve_tenant_id(&headers);
+    let branding = state.branding.get_branding(&tenant).await;
     let css = crate::branding::theme::generate_css_variables(&branding);
 
     (StatusCode::OK, css)
+}
+
+pub async fn get_tenant_branding(
+    State(state): State<AppState>,
+    Path(tenant_id): Path<String>,
+) -> Json<BrandingResponse> {
+    let branding = state.branding.get_branding(&tenant_id).await;
+    Json(branding_response(branding))
+}
+
+pub async fn put_tenant_branding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(tenant_id): Path<String>,
+    Json(payload): Json<UpdateBrandingRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" {
+        return Err((StatusCode::FORBIDDEN, "Admin role required".to_string()));
+    }
+    let branding = TenantBranding {
+        tenant_id,
+        name: payload.name,
+        short_name: payload.short_name,
+        primary_color: payload.primary_color,
+        secondary_color: payload.secondary_color,
+        background_color: payload.background_color,
+        surface_color: payload.surface_color,
+        text_color: payload.text_color,
+        text_muted_color: payload.text_muted_color,
+        font_family: payload.font_family,
+        docs_url: payload.docs_url,
+        support_url: payload.support_url,
+        ..Default::default()
+    };
+    repos::branding::upsert_tenant_branding(&state.db_pool, &branding)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    state.branding.reload().await.ok();
+    Ok(StatusCode::OK)
 }
 
 pub async fn get_logo(
@@ -1032,7 +1176,7 @@ pub struct OidcCallbackParams {
 pub async fn oidc_callback(
     State(state): State<AppState>,
     Query(params): Query<OidcCallbackParams>,
-) -> Result<Json<LoginResponse>, (StatusCode, String)> {
+) -> Result<axum::response::Html<String>, (StatusCode, String)> {
     let oidc_config = state.config.auth.oidc
         .as_ref()
         .ok_or_else(|| (StatusCode::BAD_GATEWAY, "OIDC is not configured".to_string()))?;
@@ -1056,16 +1200,11 @@ pub async fn oidc_callback(
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let token = provider.authenticate_and_issue_jwt(&state.db_pool, user_info.clone())
+    let token = provider.authenticate_and_issue_jwt(&state.db_pool, user_info)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let user = repos::user::get_by_email(&state.db_pool, &user_info.email)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "User not found after OIDC auth".to_string()))?;
-
-    Ok(Json(LoginResponse { token, user }))
+    Ok(sso_token_html(&token))
 }
 
 // ─── Certificate Settings ─────────────────────────────────────────────
@@ -1303,9 +1442,11 @@ pub async fn renew_certificate(
 // ─── Auth Settings ────────────────────────────────────────────────────
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuthConfigResponse {
     pub ldap: Option<LdapConfigResponse>,
     pub oidc: Option<OidcConfigResponse>,
+    pub saml: Option<SamlConfigResponse>,
 }
 
 #[derive(Serialize)]
@@ -1333,6 +1474,16 @@ pub struct OidcConfigResponse {
     pub scopes: Vec<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SamlConfigResponse {
+    pub enabled: bool,
+    pub sp_entity_id: String,
+    pub acs_url: String,
+    pub idp_metadata_url: String,
+    pub has_idp_sso_url: bool,
+}
+
 pub async fn get_auth_config(
     State(state): State<AppState>,
 ) -> Result<Json<AuthConfigResponse>, (StatusCode, String)> {
@@ -1356,7 +1507,15 @@ pub async fn get_auth_config(
         scopes: o.scopes.clone(),
     });
 
-    Ok(Json(AuthConfigResponse { ldap, oidc }))
+    let saml = state.config.auth.saml.as_ref().map(|s| SamlConfigResponse {
+        enabled: s.enabled,
+        sp_entity_id: s.sp_entity_id.clone(),
+        acs_url: s.acs_url.clone(),
+        idp_metadata_url: s.idp_metadata_url.clone(),
+        has_idp_sso_url: !s.idp_sso_url.is_empty(),
+    });
+
+    Ok(Json(AuthConfigResponse { ldap, oidc, saml }))
 }
 
 #[derive(Deserialize)]
@@ -1615,9 +1774,14 @@ pub async fn get_system_info(
             "machineUpgrade": true,
             "machineServices": true,
             "scheduledBackups": true,
-            "clusterProvision": false,
-            "siderolink": false,
-            "saml": false,
+            "clusterRollingUpgrade": true,
+            "fleetUpgrade": true,
+            "clusterProvision": true,
+            "provisionConfigFactory": true,
+            "siderolink": true,
+            "siderolinkWireguard": false,
+            "saml": true,
+            "multiTenantBranding": true,
             "postgres": false,
         }),
     })
@@ -2354,4 +2518,460 @@ pub async fn delete_machine_class(
         Ok(()) => Ok(StatusCode::NO_CONTENT),
         Err(e) => Err((StatusCode::NOT_FOUND, e.to_string())),
     }
+}
+
+// ─── Rolling upgrades ──────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterUpgradeRequest {
+    pub image: String,
+    #[serde(default = "default_max_unavail")]
+    pub max_unavailable: i32,
+    #[serde(default = "default_true")]
+    pub control_plane_last: bool,
+}
+
+fn default_max_unavail() -> i32 { 1 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FleetUpgradeRequest {
+    pub cluster_ids: Vec<Uuid>,
+    pub image: String,
+    #[serde(default = "default_max_unavail")]
+    pub max_unavailable: i32,
+    #[serde(default = "default_true")]
+    pub control_plane_last: bool,
+}
+
+pub async fn start_cluster_upgrade(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(cluster_id): Path<Uuid>,
+    Json(payload): Json<ClusterUpgradeRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    let ctrl = crate::controllers::UpgradeController::new(state.db_pool.clone());
+    let job = ctrl
+        .start_cluster_upgrade(
+            cluster_id,
+            &payload.image,
+            payload.max_unavailable,
+            payload.control_plane_last,
+            Some(claims.sub.clone()),
+        )
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "cluster_upgrade_start",
+        &cluster_id.to_string(),
+        &format!("job={} image={}", job.id, job.image),
+    )
+    .await;
+    Ok((StatusCode::ACCEPTED, Json(serde_json::json!({ "job": job }))))
+}
+
+pub async fn start_fleet_upgrade(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<FleetUpgradeRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    let ctrl = crate::controllers::UpgradeController::new(state.db_pool.clone());
+    let job = ctrl
+        .start_fleet_upgrade(
+            &payload.cluster_ids,
+            &payload.image,
+            payload.max_unavailable,
+            payload.control_plane_last,
+            Some(claims.sub.clone()),
+        )
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok((StatusCode::ACCEPTED, Json(serde_json::json!({ "job": job }))))
+}
+
+pub async fn list_upgrade_jobs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let _ = extract_claims(&headers)?;
+    let jobs = crate::db::repos::upgrade_job::list_jobs(&state.db_pool, 50)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(
+        jobs.into_iter()
+            .filter_map(|j| serde_json::to_value(j).ok())
+            .collect(),
+    ))
+}
+
+pub async fn get_upgrade_job(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _ = extract_claims(&headers)?;
+    let ctrl = crate::controllers::UpgradeController::new(state.db_pool.clone());
+    ctrl.get_job_detail(id)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))
+}
+
+pub async fn cancel_upgrade_job(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    crate::db::repos::upgrade_job::request_cancel(&state.db_pool, id)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "upgrade_cancel",
+        &id.to_string(),
+        "",
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── SAML ──────────────────────────────────────────────────────────────
+
+pub async fn saml_metadata(State(state): State<AppState>) -> Result<(StatusCode, String), (StatusCode, String)> {
+    let cfg = state
+        .config
+        .auth
+        .saml
+        .as_ref()
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "SAML not configured".into()))?;
+    if !cfg.enabled {
+        return Err((StatusCode::NOT_FOUND, "SAML disabled".into()));
+    }
+    let p = crate::auth::saml::SamlProvider::new(cfg.clone())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok((
+        StatusCode::OK,
+        p.sp_metadata_xml(),
+    ))
+}
+
+pub async fn saml_login(
+    State(state): State<AppState>,
+) -> Result<axum::response::Redirect, (StatusCode, String)> {
+    let cfg = state
+        .config
+        .auth
+        .saml
+        .as_ref()
+        .ok_or_else(|| (StatusCode::BAD_GATEWAY, "SAML not configured".into()))?;
+    if !cfg.enabled {
+        return Err((StatusCode::BAD_GATEWAY, "SAML disabled".into()));
+    }
+    let p = crate::auth::saml::SamlProvider::new(cfg.clone())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let url = p
+        .login_redirect_url("")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(axum::response::Redirect::temporary(&url))
+}
+
+#[derive(Deserialize)]
+pub struct SamlAcsForm {
+    #[serde(rename = "SAMLResponse")]
+    pub saml_response: String,
+    #[serde(default, rename = "RelayState")]
+    pub relay_state: String,
+}
+
+pub async fn saml_acs(
+    State(state): State<AppState>,
+    axum::Form(form): axum::Form<SamlAcsForm>,
+) -> Result<axum::response::Html<String>, (StatusCode, String)> {
+    let cfg = state
+        .config
+        .auth
+        .saml
+        .as_ref()
+        .ok_or_else(|| (StatusCode::BAD_GATEWAY, "SAML not configured".into()))?;
+    if !cfg.enabled {
+        return Err((StatusCode::BAD_GATEWAY, "SAML disabled".into()));
+    }
+    let p = crate::auth::saml::SamlProvider::new(cfg.clone())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let info = p
+        .parse_response(&form.saml_response)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let token = p
+        .authenticate_and_issue_jwt(&state.db_pool, info)
+        .await
+        .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?;
+    let _ = form.relay_state;
+    Ok(sso_token_html(&token))
+}
+
+// ─── Provision / greenfield config factory ─────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateConfigRequest {
+    pub name: String,
+    pub endpoint: String,
+    #[serde(default = "default_talos_ver")]
+    pub talos_version: String,
+    #[serde(default = "default_k8s_ver")]
+    pub kubernetes_version: String,
+    pub cluster_id: Option<Uuid>,
+}
+
+fn default_talos_ver() -> String { "v1.13.7".into() }
+fn default_k8s_ver() -> String { "v1.36.3".into() }
+
+pub async fn generate_cluster_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<GenerateConfigRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    let ctrl = crate::controllers::ProvisionController::new(
+        state.db_pool.clone(),
+        state.config.auth.jwt_secret.clone(),
+    );
+    let art = ctrl
+        .generate_config(
+            &payload.name,
+            &payload.endpoint,
+            &payload.talos_version,
+            &payload.kubernetes_version,
+            payload.cluster_id,
+        )
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "provision_generate",
+        &art.id.to_string(),
+        &art.name,
+    )
+    .await;
+    // Do not return secrets_enc plaintext; return configs only
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "id": art.id,
+            "name": art.name,
+            "talosVersion": art.talos_version,
+            "kubernetesVersion": art.kubernetes_version,
+            "controlplaneConfig": art.controlplane_config,
+            "workerConfig": art.worker_config,
+            "hasSecrets": art.secrets_enc.is_some(),
+            "createdAt": art.created_at,
+        })),
+    ))
+}
+
+pub async fn list_provision_artifacts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let _ = extract_claims(&headers)?;
+    let ctrl = crate::controllers::ProvisionController::new(
+        state.db_pool.clone(),
+        state.config.auth.jwt_secret.clone(),
+    );
+    let list = ctrl
+        .list()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(
+        list.into_iter()
+            .map(|a| {
+                serde_json::json!({
+                    "id": a.id,
+                    "name": a.name,
+                    "talosVersion": a.talos_version,
+                    "kubernetesVersion": a.kubernetes_version,
+                    "clusterId": a.cluster_id,
+                    "createdAt": a.created_at,
+                })
+            })
+            .collect(),
+    ))
+}
+
+pub async fn get_provision_artifact(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _ = extract_claims(&headers)?;
+    let ctrl = crate::controllers::ProvisionController::new(
+        state.db_pool.clone(),
+        state.config.auth.jwt_secret.clone(),
+    );
+    let art = ctrl
+        .get(id)
+        .await
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "id": art.id,
+        "name": art.name,
+        "talosVersion": art.talos_version,
+        "kubernetesVersion": art.kubernetes_version,
+        "controlplaneConfig": art.controlplane_config,
+        "workerConfig": art.worker_config,
+        "hasSecrets": art.secrets_enc.is_some(),
+        "createdAt": art.created_at,
+    })))
+}
+
+// ─── Siderolink inventory ──────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiderolinkRegisterRequest {
+    pub token: String,
+    pub system_uuid: String,
+    pub public_key: String,
+}
+
+pub async fn siderolink_register(
+    State(state): State<AppState>,
+    Json(payload): Json<SiderolinkRegisterRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let ok = crate::db::repos::siderolink::validate_token(&state.db_pool, &payload.token)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !ok {
+        return Err((StatusCode::UNAUTHORIZED, "Invalid join token".into()));
+    }
+    let existing = crate::db::repos::siderolink::find_by_uuid(&state.db_pool, &payload.system_uuid)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let now = chrono::Utc::now();
+    let peer = if let Some(mut p) = existing {
+        p.public_key = payload.public_key;
+        p.last_seen = now;
+        p
+    } else {
+        let start = 0x6440_0000u32; // 100.64.0.0
+        let ip = crate::db::repos::siderolink::next_ip(&state.db_pool, start)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        crate::db::repos::siderolink::SiderolinkPeer {
+            id: Uuid::new_v4(),
+            system_uuid: payload.system_uuid.clone(),
+            public_key: payload.public_key,
+            assigned_ip: ip,
+            last_seen: now,
+            created_at: now,
+        }
+    };
+    crate::db::repos::siderolink::upsert_peer(&state.db_pool, &peer)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Best-effort mark machine connected if inventory exists
+    if let Ok(machines) = repos::machine::list(&state.db_pool).await {
+        for mut m in machines {
+            if m.system_uuid == peer.system_uuid || m.system_uuid.contains(&peer.system_uuid) {
+                m.siderolink_connected = true;
+                if m.address.is_empty() {
+                    m.address = peer.assigned_ip.clone();
+                }
+                m.updated_at = now;
+                let _ = repos::machine::update(&state.db_pool, &m).await;
+            }
+        }
+    }
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "peerId": peer.id,
+            "assignedIp": peer.assigned_ip,
+            "systemUuid": peer.system_uuid,
+            "note": "WireGuard data path not yet implemented; use assigned IP for inventory only",
+        })),
+    ))
+}
+
+pub async fn siderolink_peers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let _ = extract_claims(&headers)?;
+    let peers = crate::db::repos::siderolink::list_peers(&state.db_pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(
+        peers
+            .into_iter()
+            .filter_map(|p| serde_json::to_value(p).ok())
+            .collect(),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateJoinTokenRequest {
+    pub label: Option<String>,
+    pub expires_hours: Option<i64>,
+}
+
+pub async fn create_siderolink_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateJoinTokenRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" {
+        return Err((StatusCode::FORBIDDEN, "Admin required".into()));
+    }
+    let token = format!("slj_{}", Uuid::new_v4().simple());
+    let exp = payload
+        .expires_hours
+        .map(|h| chrono::Utc::now() + chrono::Duration::hours(h));
+    crate::db::repos::siderolink::create_token(
+        &state.db_pool,
+        &token,
+        payload.label.as_deref(),
+        exp,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "token": token, "expiresAt": exp })),
+    ))
+}
+
+pub async fn list_siderolink_tokens(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" {
+        return Err((StatusCode::FORBIDDEN, "Admin required".into()));
+    }
+    let tokens = crate::db::repos::siderolink::list_tokens(&state.db_pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(
+        tokens
+            .into_iter()
+            .filter_map(|t| serde_json::to_value(t).ok())
+            .collect(),
+    ))
 }
