@@ -1,7 +1,7 @@
 # Authentication
 
-TCS supports **local passwords**, **LDAP/Active Directory**, and **OIDC**.
-**SAML is not available** in alpha (login button is disabled).
+TCS supports **local passwords**, **LDAP/Active Directory**, **OIDC**, and **SAML 2.0 SP** (alpha).
+The login page discovers enabled SSO via `GET /api/auth/providers`.
 
 ## JWT secret (required in production)
 
@@ -107,6 +107,40 @@ If JWKS verification fails, TCS falls back to userinfo / unverified claims (logg
 
 - OIDC `state` is in-memory (lost on restart; not multi-replica)
 - Only RSA JWKs (`n`/`e`) are supported for ID token verify
+- Browser callbacks inject the JWT into `localStorage` via a small HTML page
+
+### SAML 2.0 (Service Provider)
+
+Alpha SP: builds HTTP-Redirect AuthnRequest, serves SP metadata, accepts HTTP-POST ACS,
+parses NameID / attributes, maps groups → roles, auto-provisions local users.
+
+```toml
+[auth.saml]
+enabled = true
+idp_metadata_url = "https://idp.example.com/realms/tcs/protocol/saml/descriptor"
+# or set idp_sso_url + optional idp_cert_pem
+sp_entity_id = "https://tcs.example.com/saml/sp"
+acs_url = "https://tcs.example.com/api/auth/saml/acs"
+attribute_email = "email"
+attribute_name = "displayName"
+attribute_groups = "groups"
+default_role = "reader"
+
+[[auth.saml.group_role_mappings]]
+group_pattern = "tcs-admins"
+role = "admin"
+```
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/auth/saml/metadata` | SP metadata XML |
+| `GET /api/auth/saml/login` | Redirect to IdP |
+| `POST /api/auth/saml/acs` | Assertion consumer (HTML → JWT in localStorage) |
+
+**Known alpha limits:**
+
+- Full XML digital signature verification is best-effort (prefer TLS + trusted network path; validate with your IdP before production)
+- Attribute extraction is string/XML naive (works with common IdP shapes)
 
 ## Roles (RBAC)
 

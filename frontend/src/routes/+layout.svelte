@@ -79,12 +79,14 @@
       <li><a href="/clusters">Clusters</a></li>
       <li><a href="/machines">Machines</a></li>
       <li><a href="/machine-classes">Machine Classes</a></li>
+      <li><a href="/upgrades">Upgrades</a></li>
     </ul>
     <ul class="sidebar-nav sidebar-nav-bottom">
       <li><a href="/settings">Settings</a></li>
       <li class="sub"><a href="/settings/certificates">Certificates</a></li>
       <li class="sub"><a href="/settings/auth">Auth</a></li>
       <li class="sub"><a href="/settings/branding">Branding</a></li>
+      <li class="sub"><a href="/settings/siderolink">Siderolink</a></li>
       <li class="sub"><a href="/settings/users">Users</a></li>
       <li><button type="button" class="logout-btn" onclick={handleLogout}>Logout</button></li>
     </ul>

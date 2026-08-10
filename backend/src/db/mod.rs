@@ -1,4 +1,5 @@
 pub mod models;
+pub mod postgres;
 pub mod repos;
 
 use sqlx::SqlitePool;
@@ -9,8 +10,15 @@ pub type Pool = SqlitePool;
 
 pub async fn init_pool(config: &DatabaseConfig) -> Result<SqlitePool, AppError> {
     if config.backend == DatabaseBackend::Postgres {
+        // Validate URL + apply greenfield schema, then refuse app runtime until
+        // dual-backend query dialect abstraction lands. Operators can use this
+        // to prepare a Postgres instance ahead of cutover.
+        let pg = postgres::connect(config).await?;
+        postgres::run_schema(&pg).await?;
+        pg.close().await;
         return Err(AppError::Config(
-            "PostgreSQL is not implemented in this alpha. Set database.backend = \"sqlite\"."
+            "PostgreSQL schema bootstrap succeeded, but application runtime still uses SQLite. \
+             Set database.backend = \"sqlite\" for this release. See docs/POSTGRES.md."
                 .to_string(),
         ));
     }
@@ -62,6 +70,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
         ("005_control_plane.sql", include_str!("migrations/005_control_plane.sql")),
         ("006_backup_schedule.sql", include_str!("migrations/006_backup_schedule.sql")),
         ("007_cluster_access.sql", include_str!("migrations/007_cluster_access.sql")),
+        ("008_deferred_mvps.sql", include_str!("migrations/008_deferred_mvps.sql")),
     ];
 
     let mut tx = pool.begin().await?;

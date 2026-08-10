@@ -50,7 +50,7 @@ metrics_port = 9090            # Prometheus metrics endpoint port
 
 ```toml
 [database]
-backend = "sqlite"              # alpha: sqlite only (postgres refuses to start)
+backend = "sqlite"              # alpha runtime: sqlite (postgres = schema bootstrap only)
 sqlite_path = "/var/lib/tcs/data.db"
 postgres_url = ""               # e.g., "postgresql://user:pass@host:5432/tcs"
 max_connections = 10
@@ -59,7 +59,7 @@ connection_timeout = 30         # seconds
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `backend` | string | `"sqlite"` | Database backend: `sqlite` or `postgres` |
+| `backend` | string | `"sqlite"` | Runtime: `sqlite`. `postgres` bootstraps schema then exits (see POSTGRES.md) |
 | `sqlite_path` | string | `"/var/lib/tcs/data.db"` | Path to SQLite database file |
 | `postgres_url` | string | `""` | PostgreSQL connection URL |
 | `max_connections` | u32 | `10` | Maximum connection pool size |

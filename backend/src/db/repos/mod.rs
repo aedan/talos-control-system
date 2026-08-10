@@ -6,3 +6,6 @@ pub mod machine_class;
 pub mod config_patch;
 pub mod cluster_backup;
 pub mod cluster_access;
+pub mod upgrade_job;
+pub mod siderolink;
+pub mod provision;

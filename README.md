@@ -8,22 +8,24 @@ TCS runs **on a management host** (systemd binary). It is **not** deployed with 
 
 ## What works today
 
-- Local auth (Argon2) + JWT; LDAP and OIDC (alpha — validate in your environment)
-- Basic RBAC (admin / operator / reader)
-- White-label branding
+- Local auth (Argon2) + JWT; LDAP, OIDC, and SAML SP (alpha — validate in your environment)
+- RBAC (admin / operator / reader) + optional per-cluster memberships
+- White-label + multi-tenant branding (`X-Tenant-ID` / subdomain)
 - Cluster **import** via kubeconfig (+ optional talosconfig)
 - Inventory CRUD for clusters and machines
 - Config patches applied via Talos (pure-Rust COSI merge + ApplyConfiguration)
 - Real etcd snapshots (download, schedule, retention, disaster-recovery restore)
 - Machine version probe, reboot, upgrade
+- Cluster / fleet **rolling upgrade jobs** (max-unavailable, control-plane-last)
+- Greenfield **config factory** (talosctl gen config or template stub — not metal provision)
+- Siderolink **inventory** (join tokens + peer register; no WireGuard path yet)
 
 ## What does **not** work yet
 
-- Greenfield cluster create / scale / destroy (UI “create” is inventory-only)
-- Siderolink machine discovery
-- SAML
-- Postgres (SQLite only)
-- Multi-tenant branding
+- Bare-metal provision / scale / destroy
+- Siderolink WireGuard data path
+- Postgres **application runtime** (SQLite only; optional schema bootstrap — see docs/POSTGRES.md)
+- Multi-replica HA TCS
 - In-cluster / Helm deployment (by design)
 
 ## Quick start

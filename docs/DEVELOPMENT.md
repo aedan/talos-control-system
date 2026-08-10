@@ -147,8 +147,8 @@ cargo run  # Migrations run automatically on startup
 
 ### PostgreSQL
 
-**Not implemented.** Setting `database.backend = "postgres"` causes startup to fail.
-Use SQLite for alpha.
+Runtime is **SQLite**. Setting `database.backend = "postgres"` connects, applies a
+greenfield schema, then exits — see [POSTGRES.md](POSTGRES.md).
 
 ## Adding a New Page
 

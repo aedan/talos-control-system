@@ -29,6 +29,7 @@ pub struct Config {
 pub struct AuthConfig {
     pub ldap: Option<LdapConfig>,
     pub oidc: Option<OidcConfig>,
+    pub saml: Option<crate::config::auth::SamlConfig>,
     #[serde(default = "default_jwt_secret")]
     pub jwt_secret: String,
 }
@@ -46,6 +47,7 @@ impl Default for AuthConfig {
         Self {
             ldap: None,
             oidc: None,
+            saml: None,
             jwt_secret: default_jwt_secret(),
         }
     }

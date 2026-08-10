@@ -89,3 +89,56 @@ impl Default for OidcConfig {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SamlGroupMapping {
+    pub group_pattern: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SamlConfig {
+    pub enabled: bool,
+    /// Optional metadata URL to discover SSO location + signing cert.
+    pub idp_metadata_url: String,
+    /// Direct IdP SSO URL (HTTP-Redirect).
+    pub idp_sso_url: String,
+    /// Optional PEM of IdP signing certificate.
+    pub idp_cert_pem: Option<String>,
+    pub sp_entity_id: String,
+    pub acs_url: String,
+    pub attribute_email: String,
+    pub attribute_name: String,
+    pub attribute_groups: String,
+    pub default_role: String,
+    pub group_role_mappings: Vec<SamlGroupMapping>,
+}
+
+impl Default for SamlGroupMapping {
+    fn default() -> Self {
+        Self {
+            group_pattern: String::new(),
+            role: "reader".to_string(),
+        }
+    }
+}
+
+impl Default for SamlConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            idp_metadata_url: String::new(),
+            idp_sso_url: String::new(),
+            idp_cert_pem: None,
+            sp_entity_id: "https://tcs.local/saml/sp".to_string(),
+            acs_url: "https://tcs.local/api/auth/saml/acs".to_string(),
+            attribute_email: "email".to_string(),
+            attribute_name: "displayName".to_string(),
+            attribute_groups: "groups".to_string(),
+            default_role: "reader".to_string(),
+            group_role_mappings: vec![],
+        }
+    }
+}

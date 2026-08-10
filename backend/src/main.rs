@@ -125,6 +125,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     let _backup_sched = talos_control_system::runtime::spawn_backup_scheduler(
+        db_pool.clone(),
+        config.database.sqlite_path.clone(),
+        config.auth.jwt_secret.clone(),
+    );
+    let _upgrade_sched = talos_control_system::runtime::spawn_upgrade_scheduler(
         db_pool,
         config.database.sqlite_path.clone(),
         config.auth.jwt_secret.clone(),

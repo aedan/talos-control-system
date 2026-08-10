@@ -54,7 +54,11 @@ PUT /api/machines/{id}
 | Hostname | `GET /api/machines/{id}/hostname` | talosconfig + address |
 | Service list | `GET /api/machines/{id}/services` | talosconfig + address |
 | Reboot | `POST /api/machines/{id}/reboot` | talosconfig + address |
-| Upgrade | `POST /api/machines/{id}/upgrade` | `{ "image": "ghcr.io/siderolabs/installer:v1.x" }` |
+| Upgrade (single machine) | `POST /api/machines/{id}/upgrade` | `{ "image": "ghcr.io/siderolabs/installer:v1.x" }` |
+| Rolling upgrade (cluster) | `POST /api/clusters/{id}/upgrade` | `{ "image", "maxUnavailable", "controlPlaneLast" }` |
+| Rolling upgrade (fleet) | `POST /api/fleets/upgrades` | `{ "clusterIds", "image", ... }` |
+| Upgrade job status | `GET /api/upgrade-jobs`, `GET /api/upgrade-jobs/{id}` | cancel via `POST .../cancel` |
+| Generate machine configs | `POST /api/clusters/generate-config` | greenfield assist (`talosctl` or stub) |
 | Apply config patches | `POST /api/clusters/{id}/config/apply` | optional `{ "dry_run": true }` |
 | Etcd snapshot | `POST /api/clusters/{id}/backups` | control-plane node |
 | Download snapshot | `GET /api/clusters/{id}/backups/{id}/download` | |

@@ -10,6 +10,9 @@
   let error = $state('');
   let busy = $state(false);
   let talosconfigText = $state('');
+  let upgradeImage = $state('ghcr.io/siderolabs/installer:v1.9.0');
+  let upgradeMaxUnavail = $state(1);
+  let upgradeCpLast = $state(true);
 
   onMount(async () => {
     try {
@@ -89,6 +92,27 @@
       busy = false;
     }
   }
+
+  async function startClusterUpgrade() {
+    if (!upgradeImage.trim()) {
+      notifyError('Installer image is required');
+      return;
+    }
+    if (!confirm(`Start rolling upgrade of this cluster to ${upgradeImage}?`)) return;
+    busy = true;
+    try {
+      const res = (await client.post(`/clusters/${$page.params.id}/upgrade`, {
+        image: upgradeImage.trim(),
+        maxUnavailable: upgradeMaxUnavail,
+        controlPlaneLast: upgradeCpLast,
+      })) as { job?: { id: string } };
+      success(`Upgrade job queued${res.job?.id ? `: ${res.job.id}` : ''}`);
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Failed to start cluster upgrade');
+    } finally {
+      busy = false;
+    }
+  }
 </script>
 
 <div class="cluster-detail">
@@ -145,6 +169,28 @@
       </Button>
     </details>
 
+    <details class="talos-attach">
+      <summary>Rolling Talos upgrade</summary>
+      <div class="upgrade-form">
+        <label>
+          Installer image
+          <input type="text" bind:value={upgradeImage} placeholder="ghcr.io/siderolabs/installer:v1.x" />
+        </label>
+        <label class="num">
+          Max unavailable
+          <input type="number" min="1" max="20" bind:value={upgradeMaxUnavail} />
+        </label>
+        <label class="check">
+          <input type="checkbox" bind:checked={upgradeCpLast} />
+          Workers first (control plane last)
+        </label>
+        <Button variant="primary" size="sm" onclick={startClusterUpgrade} disabled={busy}>
+          Start rolling upgrade
+        </Button>
+        <a class="jobs-link" href="/upgrades">View upgrade jobs →</a>
+      </div>
+    </details>
+
     <nav class="tabs">
       <a href="/clusters/{$page.params.id}/nodes">Nodes</a>
       <a href="/clusters/{$page.params.id}/machines">Machines</a>
@@ -165,6 +211,42 @@
 
   .talos-attach { margin-bottom: 1.5rem; background: var(--tcs-surface); border: 1px solid var(--tcs-border); border-radius: 8px; padding: 0.75rem 1rem; }
   .talos-attach textarea { width: 100%; margin: 0.75rem 0; font-family: ui-monospace, monospace; font-size: 0.8rem; }
+  .upgrade-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem 1rem;
+    align-items: flex-end;
+    margin-top: 0.75rem;
+  }
+  .upgrade-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    font-size: 0.8rem;
+    color: var(--tcs-text-muted);
+    flex: 1;
+    min-width: 200px;
+  }
+  .upgrade-form label.num { flex: 0 0 120px; min-width: 100px; }
+  .upgrade-form label.check {
+    flex-direction: row;
+    align-items: center;
+    min-width: auto;
+    color: var(--tcs-text);
+  }
+  .upgrade-form input[type='text'],
+  .upgrade-form input[type='number'] {
+    background: var(--tcs-background);
+    border: 1px solid var(--tcs-border);
+    border-radius: 6px;
+    padding: 0.45rem 0.6rem;
+    color: var(--tcs-text);
+  }
+  .jobs-link {
+    font-size: 0.85rem;
+    color: var(--tcs-secondary);
+    align-self: center;
+  }
 
   .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--tcs-border); margin-bottom: 1.5rem; }
   .tabs a {
