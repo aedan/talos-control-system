@@ -11,10 +11,10 @@ cluster. Prefer **import + observe + limited Talos actions** over greenfield cla
 | Feature | Status | Notes |
 |---------|--------|--------|
 | Local auth (Argon2) + JWT | **Supported** | Set `TCS_AUTH_JWT_SECRET` in production |
-| OIDC | **Supported (alpha)** | Code flow + discovery + CSRF state; validate against your IdP |
+| OIDC | **Supported (alpha)** | Code flow + discovery + CSRF + JWKS ID-token verify; validate against your IdP |
 | LDAP / AD | **Supported (alpha)** | Service bind + search + user bind; validate against your directory |
 | SAML | **Not available** | UI disabled |
-| RBAC (admin / operator / reader) | **Supported** | Coarse route-level; no cluster scopes yet |
+| RBAC (admin / operator / reader) | **Supported** | Global + optional per-cluster memberships |
 | White-label branding | **Supported** | Single tenant (`default`) |
 | Per-tenant branding | **Planned** | Schema exists; not multi-tenant |
 | Cluster import (kubeconfig) | **Supported** | Encrypted kubeconfig when provided |

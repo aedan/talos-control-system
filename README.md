@@ -99,6 +99,7 @@ talos-control-system/
 - [Branding](docs/BRANDING.md)
 - [Development](docs/DEVELOPMENT.md)
 - [Lab smoke checklist](docs/SMOKE.md)
+- [Operations / RBAC scopes](docs/OPS.md)
 
 ## License
 
