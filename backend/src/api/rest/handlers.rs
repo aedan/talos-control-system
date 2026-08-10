@@ -9,6 +9,7 @@ use crate::auth::local::{authenticate_local, change_password as local_change_pas
 use crate::db::models::auth::User;
 use crate::db::models::branding::TenantBranding;
 use crate::db::repos::{self, user};
+use crate::config::tls::TlsConfig;
 use crate::AppState;
 
 #[derive(Serialize)]
@@ -1410,17 +1411,17 @@ pub async fn get_cert_status(
         crate::config::TlsMode::Disabled => (vec![], "None".to_string(), None),
     };
 
-    // Try to compute days remaining from cert on disk
-    let cert_path = "/var/lib/tcs/certs/cert.pem";
-    let days_remaining = if let Ok(pem) = std::fs::read_to_string(cert_path) {
-        if let Some(exp) = crate::cert::provided::parse_expiry_from_cert_pem(&pem) {
+    // Read cert from TlsRuntime if available, otherwise fall back to config
+    let (days_remaining, issuer) = if let Some(tls_runtime) = &state.tls_runtime {
+        let certs = tls_runtime.certs.read().await;
+        if let Some(exp) = crate::cert::provided::parse_expiry_from_cert_pem(&certs.0) {
             let diff = exp - chrono::Utc::now();
-            diff.num_days()
+            (diff.num_days(), issuer)
         } else {
-            -1
+            (-1, issuer)
         }
     } else {
-        -1
+        (-1, issuer)
     };
 
     Ok(Json(CertStatusResponse {
@@ -1474,6 +1475,70 @@ pub struct ProvidedCertConfigRequest {
     pub key_path: String,
     #[serde(default)]
     pub ca_path: Option<String>,
+}
+
+/// Build a `TlsConfig` from the API request, ready for live reload.
+fn build_tls_config_from_request(req: &CertConfigRequest) -> TlsConfig {
+    let domains: Vec<String> = req
+        .domains
+        .clone()
+        .or_else(|| req.self_signed.as_ref().map(|s| s.domains.clone()))
+        .unwrap_or_default();
+
+    let mode = match req.mode.as_str() {
+        "letsencrypt" => crate::config::tls::TlsMode::LetsEncrypt,
+        "self-signed" => crate::config::tls::TlsMode::SelfSigned,
+        "provided" => crate::config::tls::TlsMode::Provided,
+        _ => crate::config::tls::TlsMode::Disabled,
+    };
+
+    let letsencrypt = req.letsencrypt.as_ref().map(|le| {
+        crate::config::tls::LetsEncryptConfig {
+            domains: domains.clone(),
+            email: le.email.clone(),
+            challenge_type: match le.challenge_type.as_str() {
+                "dns-01" => crate::config::tls::ChallengeType::Dns01,
+                _ => crate::config::tls::ChallengeType::Http01,
+            },
+            dns_provider: le.dns_provider.as_ref().map(|dns| {
+                crate::config::tls::DnsProviderConfig {
+                    provider: dns.provider.clone(),
+                    api_key: dns.api_key.clone(),
+                    api_secret: dns.api_secret.clone(),
+                    api_token: dns.api_token.clone(),
+                    zone_id: dns.zone_id.clone(),
+                }
+            }),
+        }
+    });
+
+    let self_signed = if req.mode == "self-signed" {
+        Some(crate::config::tls::SelfSignedConfig {
+            domains: if domains.is_empty() {
+                vec!["localhost".to_string()]
+            } else {
+                domains.clone()
+            },
+        })
+    } else {
+        None
+    };
+
+    let provided = req.provided.as_ref().map(|p| {
+        crate::config::tls::ProvidedCertConfig {
+            cert_path: p.cert_path.clone(),
+            key_path: p.key_path.clone(),
+            ca_path: p.ca_path.clone(),
+        }
+    });
+
+    TlsConfig {
+        enabled: req.mode != "disabled",
+        mode,
+        letsencrypt,
+        self_signed,
+        provided,
+    }
 }
 
 pub async fn update_cert_config(
@@ -1665,13 +1730,44 @@ pub async fn update_cert_config(
     )
     .await;
 
-    Ok(Json(serde_json::json!({
-        "message": "TLS config saved. Restart TCS to apply (systemctl restart tcs). TLS mode is read only at process start.",
-        "mode": req.mode,
-        "overlayPath": overlay_path.display().to_string(),
-        "mainConfigMerged": wrote_main,
-        "restartRequired": true,
-    })))
+    // Attempt live reload if TLS is currently active
+    let live_result = if let Some(tls_runtime) = &state.tls_runtime {
+        // Build TlsConfig directly from the request (avoids TOML round-trip)
+        let new_tls_config = build_tls_config_from_request(&req);
+        match tls_runtime.apply_mode(&new_tls_config).await {
+            Ok(note) => Some(Ok(note)),
+            Err(e) => Some(Err(e.to_string())),
+        }
+    } else {
+        None
+    };
+
+    match live_result {
+        Some(Ok(note)) => Ok(Json(serde_json::json!({
+            "message": note,
+            "mode": req.mode,
+            "overlayPath": overlay_path.display().to_string(),
+            "mainConfigMerged": wrote_main,
+            "restartRequired": false,
+            "appliedLive": true,
+        }))),
+        Some(Err(err)) => Ok(Json(serde_json::json!({
+            "message": format!("Config saved but live reload failed: {}", err),
+            "mode": req.mode,
+            "overlayPath": overlay_path.display().to_string(),
+            "mainConfigMerged": wrote_main,
+            "restartRequired": true,
+            "appliedLive": false,
+        }))),
+        None => Ok(Json(serde_json::json!({
+            "message": "TLS config saved. Restart TCS to apply (systemctl restart tcs).",
+            "mode": req.mode,
+            "overlayPath": overlay_path.display().to_string(),
+            "mainConfigMerged": wrote_main,
+            "restartRequired": true,
+            "appliedLive": false,
+        }))),
+    }
 }
 
 pub async fn renew_certificate(
@@ -1683,48 +1779,96 @@ pub async fn renew_certificate(
         crate::config::TlsMode::LetsEncrypt => {
             let le = tls.letsencrypt.as_ref()
                 .ok_or_else(|| (StatusCode::BAD_REQUEST, "Let's Encrypt not configured".to_string()))?;
-            
-            // Trigger ACME renewal
-            let acme = crate::cert::acme::AcmeClient::new(
-                &le.email,
-                le.dns_provider.as_ref().map(|d| crate::config::tls::DnsProviderConfig {
-                    provider: d.provider.clone(),
-                    api_key: d.api_key.clone(),
-                    api_secret: d.api_secret.clone(),
-                    api_token: d.api_token.clone(),
-                    zone_id: d.zone_id.clone(),
-                }),
-                le.challenge_type.clone(),
-            )
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            
-            let result = acme.renew_certificate(&le.domains).await;
-            match result {
-                Ok(_) => Ok(Json(serde_json::json!({
-                    "message": "Certificate renewed successfully",
-                    "mode": "letsencrypt"
-                }))),
-                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+
+            // If TlsRuntime is available, do live reload
+            if let Some(tls_runtime) = &state.tls_runtime {
+                let new_tls_config = crate::config::tls::TlsConfig {
+                    enabled: true,
+                    mode: crate::config::tls::TlsMode::LetsEncrypt,
+                    letsencrypt: Some(crate::config::tls::LetsEncryptConfig {
+                        domains: le.domains.clone(),
+                        email: le.email.clone(),
+                        challenge_type: le.challenge_type.clone(),
+                        dns_provider: le.dns_provider.clone(),
+                    }),
+                    self_signed: None,
+                    provided: None,
+                };
+                match tls_runtime.apply_mode(&new_tls_config).await {
+                    Ok(note) => Ok(Json(serde_json::json!({
+                        "message": note,
+                        "mode": "letsencrypt",
+                        "appliedLive": true,
+                    }))),
+                    Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+                }
+            } else {
+                let acme = crate::cert::acme::AcmeClient::new(
+                    &le.email,
+                    le.dns_provider.as_ref().map(|d| crate::config::tls::DnsProviderConfig {
+                        provider: d.provider.clone(),
+                        api_key: d.api_key.clone(),
+                        api_secret: d.api_secret.clone(),
+                        api_token: d.api_token.clone(),
+                        zone_id: d.zone_id.clone(),
+                    }),
+                    le.challenge_type.clone(),
+                )
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+                let result = acme.renew_certificate(&le.domains).await;
+                match result {
+                    Ok(_) => Ok(Json(serde_json::json!({
+                        "message": "Certificate renewed successfully (restart to apply)",
+                        "mode": "letsencrypt",
+                        "appliedLive": false,
+                    }))),
+                    Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+                }
             }
         }
         crate::config::TlsMode::SelfSigned => {
-            let domains = tls.self_signed.as_ref()
-                .map(|c| c.domains.clone())
-                .unwrap_or_else(|| vec!["localhost".to_string()]);
-            
-            let (cert, key) = crate::cert::self_signed::generate_self_signed(&domains)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            
-            // Write to disk
-            std::fs::create_dir_all("/var/lib/tcs/certs/").ok();
-            std::fs::write("/var/lib/tcs/certs/cert.pem", &cert).ok();
-            std::fs::write("/var/lib/tcs/certs/key.pem", &key).ok();
-            
-            Ok(Json(serde_json::json!({
-                "message": "Self-signed certificate regenerated",
-                "mode": "self-signed"
-            })))
+            if let Some(tls_runtime) = &state.tls_runtime {
+                let new_tls_config = crate::config::tls::TlsConfig {
+                    enabled: true,
+                    mode: crate::config::tls::TlsMode::SelfSigned,
+                    self_signed: Some(crate::config::tls::SelfSignedConfig {
+                        domains: tls.self_signed.as_ref()
+                            .map(|c| c.domains.clone())
+                            .unwrap_or_else(|| vec!["localhost".to_string()]),
+                    }),
+                    letsencrypt: None,
+                    provided: None,
+                };
+                match tls_runtime.apply_mode(&new_tls_config).await {
+                    Ok(note) => Ok(Json(serde_json::json!({
+                        "message": note,
+                        "mode": "self-signed",
+                        "appliedLive": true,
+                    }))),
+                    Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+                }
+            } else {
+                let domains = tls.self_signed.as_ref()
+                    .map(|c| c.domains.clone())
+                    .unwrap_or_else(|| vec!["localhost".to_string()]);
+
+                let (cert, key) = crate::cert::self_signed::generate_self_signed(&domains)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+                let data_dir = std::env::var("TCS_DATA_DIR").unwrap_or_else(|_| "/var/lib/tcs".into());
+                let certs_dir = format!("{}/certs", data_dir);
+                std::fs::create_dir_all(&certs_dir).ok();
+                std::fs::write(format!("{}/cert.pem", certs_dir), &cert).ok();
+                std::fs::write(format!("{}/key.pem", certs_dir), &key).ok();
+
+                Ok(Json(serde_json::json!({
+                    "message": "Self-signed certificate regenerated (restart to apply)",
+                    "mode": "self-signed",
+                    "appliedLive": false,
+                })))
+            }
         }
         _ => Err((StatusCode::BAD_REQUEST, format!("Cannot renew {} certificates", match &tls.mode {
             crate::config::TlsMode::Provided => "provided",
