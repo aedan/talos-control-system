@@ -1457,7 +1457,15 @@ pub struct CertStatusResponse {
 pub async fn get_cert_status(
     State(state): State<AppState>,
 ) -> Result<Json<CertStatusResponse>, (StatusCode, String)> {
-    let tls = &state.config.tls;
+    // Prefer live runtime TLS (updated by Apply without restart); fall back to boot config.
+    let tls_owned;
+    let tls = if let Some(rt) = &state.tls_runtime {
+        tls_owned = rt.tls.read().await.clone();
+        &tls_owned
+    } else {
+        &state.config.tls
+    };
+
     let mode = match &tls.mode {
         crate::config::TlsMode::LetsEncrypt => "letsencrypt".to_string(),
         crate::config::TlsMode::SelfSigned => "self-signed".to_string(),
@@ -1465,49 +1473,52 @@ pub async fn get_cert_status(
         crate::config::TlsMode::Disabled => "disabled".to_string(),
     };
 
-    let (domains, issuer, expires_at) = match &tls.mode {
+    let (domains, issuer) = match &tls.mode {
         crate::config::TlsMode::LetsEncrypt => {
             let le = tls.letsencrypt.as_ref();
             (
                 le.map(|c| c.domains.clone()).unwrap_or_default(),
                 "Let's Encrypt".to_string(),
-                None,
             )
         }
         crate::config::TlsMode::SelfSigned => (
-            tls.self_signed.as_ref().map(|c| c.domains.clone()).unwrap_or_else(|| vec!["localhost".to_string()]),
+            tls.self_signed
+                .as_ref()
+                .map(|c| c.domains.clone())
+                .unwrap_or_else(|| vec!["localhost".to_string()]),
             "Self-Signed".to_string(),
-            None,
         ),
-        crate::config::TlsMode::Provided => {
-            let prov = tls.provided.as_ref();
-            (
-                vec![],
-                "Custom".to_string(),
-                None::<String>,
-            )
-        }
-        crate::config::TlsMode::Disabled => (vec![], "None".to_string(), None),
+        crate::config::TlsMode::Provided => (vec![], "Custom".to_string()),
+        crate::config::TlsMode::Disabled => (vec![], "None".to_string()),
     };
 
-    // Read cert from TlsRuntime if available, otherwise fall back to config
-    let (days_remaining, issuer) = if let Some(tls_runtime) = &state.tls_runtime {
+    let (days_remaining, expires_at) = if let Some(tls_runtime) = &state.tls_runtime {
         let certs = tls_runtime.certs.read().await;
         if let Some(exp) = crate::cert::provided::parse_expiry_from_cert_pem(&certs.0) {
             let diff = exp - chrono::Utc::now();
-            (diff.num_days(), issuer)
+            (diff.num_days(), Some(exp.to_rfc3339()))
         } else {
-            (-1, issuer)
+            (-1, None)
         }
     } else {
-        (-1, issuer)
+        let cert_path = "/var/lib/tcs/certs/cert.pem";
+        if let Ok(pem) = std::fs::read_to_string(cert_path) {
+            if let Some(exp) = crate::cert::provided::parse_expiry_from_cert_pem(&pem) {
+                let diff = exp - chrono::Utc::now();
+                (diff.num_days(), Some(exp.to_rfc3339()))
+            } else {
+                (-1, None)
+            }
+        } else {
+            (-1, None)
+        }
     };
 
     Ok(Json(CertStatusResponse {
         mode,
         domains,
         issuer,
-        expires_at: None,
+        expires_at,
         days_remaining,
         error: None,
     }))
@@ -1852,8 +1863,15 @@ pub async fn update_cert_config(
 pub async fn renew_certificate(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let tls = &state.config.tls;
-    
+    // Use live runtime mode when present (updated by Settings without restart)
+    let tls_owned;
+    let tls = if let Some(rt) = &state.tls_runtime {
+        tls_owned = rt.tls.read().await.clone();
+        &tls_owned
+    } else {
+        &state.config.tls
+    };
+
     match &tls.mode {
         crate::config::TlsMode::LetsEncrypt => {
             let le = tls.letsencrypt.as_ref()

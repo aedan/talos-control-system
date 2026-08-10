@@ -111,15 +111,25 @@
       const res = (await client.put('/settings/certificates/config', body)) as {
         message?: string;
         restartRequired?: boolean;
+        appliedLive?: boolean;
         overlayPath?: string;
       };
-      successMsg =
-        res.message ||
-        'TLS config saved. Restart TCS (systemctl restart tcs) for certificates to take effect.';
+      if (res.appliedLive) {
+        successMsg = res.message || 'Certificate applied live — no restart needed.';
+      } else if (res.restartRequired) {
+        successMsg =
+          res.message ||
+          'Config saved. Restart TCS only if HTTPS was not already running (systemctl restart tcs).';
+      } else {
+        successMsg = res.message || 'Certificate configuration updated.';
+      }
       success(successMsg);
-      // Refresh status (still shows old mode until restart)
       try {
         status = (await client.get('/settings/certificates/status')) as CertStatus;
+        if (status) {
+          config.mode = status.mode;
+          domainsInput = status.domains.join(', ');
+        }
       } catch {
         /* ignore */
       }
@@ -136,10 +146,21 @@
     error = '';
     successMsg = '';
     try {
-      await client.post('/settings/certificates/renew');
+      const res = (await client.post('/settings/certificates/renew', {})) as {
+        message?: string;
+        appliedLive?: boolean;
+      };
       successMsg =
-        'Renewal requested for the currently loaded TLS mode. If you just switched to Let\'s Encrypt, restart TCS first so the new mode is active.';
+        res.message ||
+        (res.appliedLive
+          ? 'Certificate renewed and applied live.'
+          : 'Renewal requested.');
       success(successMsg);
+      try {
+        status = (await client.get('/settings/certificates/status')) as CertStatus;
+      } catch {
+        /* ignore */
+      }
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Failed to renew certificate';
       notifyError(error);
@@ -153,9 +174,10 @@
   <div class="page-header">
     <h1>SSL/TLS Certificates</h1>
     <p class="description">
-      Manage TLS for the TCS HTTPS listener. Mode is loaded at process start — after saving, run
-      <code>systemctl restart tcs</code>. Let's Encrypt HTTP-01 needs port 80 reachable from the
-      public internet on the configured domain(s).
+      Manage TLS for the HTTPS listener. Switching modes (including Let's Encrypt) applies
+      <strong>live</strong> when TCS already serves HTTPS — no restart. Let's Encrypt HTTP-01 needs
+      port 80 reachable from the public internet for the configured domain(s). Enabling TLS for the
+      first time from a pure HTTP process still needs a restart to open :443.
     </p>
   </div>
 

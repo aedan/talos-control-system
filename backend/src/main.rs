@@ -7,7 +7,6 @@ use axum::http::StatusCode;
 use axum::response::Redirect;
 use axum::routing::get;
 use axum::Router;
-use axum_server::tls_rustls::RustlsConfig;
 use dashmap::DashMap;
 use tokio::signal;
 use tracing::{error, info, warn};

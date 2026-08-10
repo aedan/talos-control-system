@@ -73,27 +73,33 @@ api_key = "YOUR_ACCOUNT_NUMBER"
 api_secret = "YOUR_API_KEY"
 ```
 
-## Settings UI caveats
+## Settings UI (live reload)
 
 Saving TLS settings from **Settings → Certificates**:
 
-1. Writes a TLS overlay to `/var/lib/tcs/tls.toml` (always writable under the default systemd unit).
+1. Writes a TLS overlay to `/var/lib/tcs/tls.toml` (writable under the default systemd unit).
 2. Best-effort merges into `/etc/tcs/config.toml` when that path is writable.
-3. **Does not hot-reload** the running process — you must restart:
+3. **Hot-reloads** the HTTPS listener when TCS already started with TLS (self-signed, LE, or provided). New certs apply on the next TLS handshake — **no restart**.
+
+Response fields:
+
+| Field | Meaning |
+|-------|---------|
+| `appliedLive: true` | Cert reloaded in-process |
+| `restartRequired: true` | Saved only (e.g. process was HTTP-only, or live ACME failed) |
 
 ```bash
+# Only needed when going from TLS disabled → enabled (bind :443), or if live apply failed:
 sudo systemctl restart tcs
-journalctl -u tcs -f   # watch ACME / TLS startup
+journalctl -u tcs -f
 ```
-
-Until restart, status/renew still use the **previous** mode (e.g. self-signed).
 
 ### Let's Encrypt HTTP-01 checklist
 
 - DNS A/AAAA for the domain points at this host
 - Port **80** reachable from the internet (challenge); **443** for HTTPS
 - `email` and `domains` filled in the UI (or config)
-- After save + restart, logs should show ACME issuance (not only self-signed generation)
+- After **Apply**, logs should show live ACME issuance (or a clear ACME error) without requiring a restart
 
 ## Certificate Renewal
 
