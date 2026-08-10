@@ -12,7 +12,7 @@ use talos_rust_client::machine::{
     ApplyConfigurationRequest, EtcdSnapshotRequest, RebootRequest, UpgradeRequest,
 };
 use talos_rust_client::talosconfig::TalosConfig;
-use talos_rust_client::{MachineServiceClient, TalosConnector};
+use talos_rust_client::{MachineServiceClient, StorageServiceClient, TalosConnector};
 use tracing::{info, warn};
 
 use crate::AppError;
@@ -141,6 +141,17 @@ impl TalosClient {
         Ok(Self::from_credentials(&host, creds))
     }
 
+    /// Create a client from raw PEM data (bypasses talosconfig parsing).
+    /// Used during greenfield provisioning with our generated PKI.
+    pub fn from_pem(node_address: &str, ca_pem: &str, crt_pem: &str, key_pem: &str) -> Self {
+        Self::new(
+            node_address.to_string(),
+            ca_pem.as_bytes().to_vec(),
+            crt_pem.as_bytes().to_vec(),
+            key_pem.as_bytes().to_vec(),
+        )
+    }
+
     async fn connect(&self) -> Result<MachineServiceClient<talos_rust_client::Channel>, AppError> {
         // rustls Identity::from_pem rejects OpenSSL "BEGIN ED25519 PRIVATE KEY"
         // (common in talosconfig). Convert to PKCS#8 labels first.
@@ -191,18 +202,19 @@ impl TalosClient {
 
     /// Apply machine configuration or a strategic-merge config patch.
     pub async fn apply_config(&self, config: &str) -> Result<(), AppError> {
-        self.apply_config_with_options(config, false).await
+        self.apply_config_with_options(config, false, false).await
     }
 
     pub async fn apply_config_with_options(
         &self,
         config: &str,
         dry_run: bool,
+        reboot: bool,
     ) -> Result<(), AppError> {
         let mut client = self.connect().await?;
         let request = ApplyConfigurationRequest {
             data: config.as_bytes().to_vec(),
-            mode: ApplyMode::NoReboot as i32,
+            mode: if reboot { ApplyMode::Reboot as i32 } else { ApplyMode::NoReboot as i32 },
             dry_run,
             try_mode_timeout: None,
         };
@@ -253,6 +265,24 @@ impl TalosClient {
         })?;
         info!(endpoint = %self.endpoint, "Reboot initiated");
         Ok(())
+    }
+
+    /// Discover available disks on the machine via StorageService.
+    pub async fn list_disks(&self) -> Result<Vec<talos_rust_client::storage::Disk>, AppError> {
+        let channel = self.connect_channel().await?;
+        let mut client = StorageServiceClient::new(channel);
+        let request = tonic::Request::new(
+            talos_rust_client::generated::google::protobuf::Empty {}
+        );
+        let response = client.disks(request).await.map_err(|e| {
+            AppError::Grpc(format!("Disks RPC failed on {}: {}", self.endpoint, e))
+        })?;
+        let inner = response.into_inner();
+        let mut result = Vec::new();
+        for msg in &inner.messages {
+            result.extend(msg.disks.clone());
+        }
+        Ok(result)
     }
 
     /// Wipe/reset a machine (destructive). Prefer graceful=true for etcd leave.
@@ -543,7 +573,7 @@ impl TalosClient {
                 merged.len()
             )));
         }
-        self.apply_config_with_options(&merged, dry_run).await?;
+        self.apply_config_with_options(&merged, dry_run, false).await?;
         info!(
             endpoint = %self.endpoint,
             dry_run,

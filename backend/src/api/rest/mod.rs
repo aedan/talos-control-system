@@ -133,6 +133,9 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route("/machines/:id/version", get(handlers::get_machine_version))
         .route("/machines/:id/services", get(handlers::get_machine_services))
         .route("/machines/:id/hostname", get(handlers::get_machine_hostname))
+        .route("/machines/:id/disks", get(handlers::list_machine_disks))
+        .route("/machines/:id/install-disk", post(handlers::set_install_disk))
+        .route("/machines/:id/install", post(handlers::install_machine))
         // Cluster sub-routes
         .route("/clusters/:id/nodes", get(handlers::get_cluster_nodes))
         .route("/clusters/:id/machines", get(handlers::get_cluster_machines))

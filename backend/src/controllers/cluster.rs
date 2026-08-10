@@ -165,6 +165,7 @@ impl ClusterController {
                     secure_boot: false,
                     siderolink_connected: false,
                     address: node.internal_ip.clone(),
+                    install_disk: String::new(),
                     created_at: now,
                     updated_at: now,
                 };
@@ -541,7 +542,67 @@ impl ClusterController {
             ));
         }
         let client = self.client_for_machine(&cluster, &machine).await?;
-        client.bootstrap().await
+        client.bootstrap().await?;
+        let mut m = machine;
+        m.status = "running".to_string();
+        m.updated_at = chrono::Utc::now();
+        let _ = crate::db::repos::machine::update(&self.pool, &m).await;
+        Ok(())
+    }
+
+    /// List disks available on a machine via the Talos Storage service.
+    pub async fn list_disks(&self, machine_id: Uuid) -> Result<Vec<serde_json::Value>, AppError> {
+        let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
+        let client = self.client_for_machine(&cluster, &machine).await?;
+        let disks = client.list_disks().await?;
+        Ok(disks.into_iter().map(|d| serde_json::json!({
+            "deviceName": d.device_name,
+            "name": d.name,
+            "serial": d.serial,
+            "size": d.size,
+            "type": d.r#type,
+            "model": d.model,
+            "systemDisk": d.system_disk,
+        })).collect())
+    }
+
+    /// Set the install disk for a machine (DB-only, no Talos API call).
+    pub async fn set_install_disk(&self, machine_id: Uuid, disk: &str) -> Result<Machine, AppError> {
+        if disk.trim().is_empty() {
+            return Err(AppError::InvalidInput("disk must not be empty".to_string()));
+        }
+        let mut machine = crate::db::repos::machine::get(&self.pool, machine_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Machine {} not found", machine_id)))?;
+        machine.install_disk = disk.trim().to_string();
+        machine.updated_at = chrono::Utc::now();
+        crate::db::repos::machine::update(&self.pool, &machine).await
+    }
+
+    /// Apply config with reboot to install Talos on a machine.
+    pub async fn install_machine(
+        &self,
+        machine_id: Uuid,
+        config_yaml: &str,
+    ) -> Result<(), AppError> {
+        let (cluster, mut machine) = self.cluster_and_machine(machine_id).await?;
+
+        if machine.install_disk.is_empty() {
+            return Err(AppError::InvalidInput("install_disk not set for this machine".into()));
+        }
+
+        machine.status = "installing".to_string();
+        machine.updated_at = chrono::Utc::now();
+        crate::db::repos::machine::update(&self.pool, &machine).await?;
+
+        let client = self.client_for_machine(&cluster, &machine).await?;
+        client.apply_config_with_options(config_yaml, false, true).await?;
+
+        machine.status = "booting".to_string();
+        machine.updated_at = chrono::Utc::now();
+        crate::db::repos::machine::update(&self.pool, &machine).await?;
+
+        Ok(())
     }
 
     /// Apply full machine config YAML (from provision artifact) to a node.

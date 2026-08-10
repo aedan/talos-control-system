@@ -11,8 +11,8 @@ pub async fn create(pool: &DbPool, machine: &Machine) -> Result<Machine, AppErro
     }
     let n = pool
         .execute(
-            "INSERT INTO machines (id, system_uuid, machine_type, cluster_id, status, talos_version, secure_boot, siderolink_connected, address, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO machines (id, system_uuid, machine_type, cluster_id, status, talos_version, secure_boot, siderolink_connected, address, install_disk, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             &[
                 SqlVal::Uuid(machine.id),
                 SqlVal::text(&machine.system_uuid),
@@ -23,6 +23,7 @@ pub async fn create(pool: &DbPool, machine: &Machine) -> Result<Machine, AppErro
                 SqlVal::Bool(machine.secure_boot),
                 SqlVal::Bool(machine.siderolink_connected),
                 SqlVal::text(&machine.address),
+                SqlVal::text(&machine.install_disk),
                 SqlVal::DateTime(machine.created_at),
                 SqlVal::DateTime(machine.updated_at),
             ],
@@ -69,7 +70,7 @@ pub async fn list_by_cluster(
 pub async fn update(pool: &DbPool, machine: &Machine) -> Result<Machine, AppError> {
     let n = pool
         .execute(
-            "UPDATE machines SET system_uuid = ?, machine_type = ?, cluster_id = ?, status = ?, talos_version = ?, secure_boot = ?, siderolink_connected = ?, address = ?, updated_at = ?
+            "UPDATE machines SET system_uuid = ?, machine_type = ?, cluster_id = ?, status = ?, talos_version = ?, secure_boot = ?, siderolink_connected = ?, address = ?, install_disk = ?, updated_at = ?
              WHERE id = ?",
             &[
                 SqlVal::text(&machine.system_uuid),
@@ -80,6 +81,7 @@ pub async fn update(pool: &DbPool, machine: &Machine) -> Result<Machine, AppErro
                 SqlVal::Bool(machine.secure_boot),
                 SqlVal::Bool(machine.siderolink_connected),
                 SqlVal::text(&machine.address),
+                SqlVal::text(&machine.install_disk),
                 SqlVal::DateTime(machine.updated_at),
                 SqlVal::Uuid(machine.id),
             ],

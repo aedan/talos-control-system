@@ -1,0 +1,1 @@
+ALTER TABLE machines ADD COLUMN install_disk TEXT NOT NULL DEFAULT '';

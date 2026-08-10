@@ -24,6 +24,8 @@ pub struct Machine {
     pub siderolink_connected: bool,
     #[sqlx(rename = "address")]
     pub address: String,
+    #[sqlx(rename = "install_disk")]
+    pub install_disk: String,
     #[sqlx(rename = "created_at")]
     pub created_at: DateTime<Utc>,
     #[sqlx(rename = "updated_at")]
@@ -42,6 +44,7 @@ impl Machine {
             secure_boot: false,
             siderolink_connected: false,
             address: String::new(),
+            install_disk: String::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
