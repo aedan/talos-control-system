@@ -70,3 +70,23 @@ support_url = ""
 # [tls]
 # enabled = false
 # mode = "disabled"  # disabled | self_signed | provided | letsencrypt
+
+# Bare-metal: full DHCP + PXE + BMC (off by default — use a dedicated provision VLAN)
+# [metal]
+# enabled = true
+# [metal.dhcp]
+# enabled = true
+# interface = "eth1"
+# subnet = "10.88.0.0/24"
+# range_start = "10.88.0.100"
+# range_end = "10.88.0.200"
+# gateway = "10.88.0.1"
+# dns = ["10.88.0.1"]
+# allow_unknown = false
+# [metal.pxe]
+# enabled = true
+# http_port = 6969
+# asset_dir = "/var/lib/tcs/pxe"
+# default_talos_version = "v1.13.7"
+# [metal.bmc]
+# connect_timeout_secs = 15

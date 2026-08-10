@@ -1107,8 +1107,14 @@ pub async fn install_machine(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateMachineRequest {
     pub address: Option<String>,
+    pub machine_type: Option<String>,
+    pub cluster_id: Option<Uuid>,
+    pub mac_address: Option<String>,
+    pub hostname: Option<String>,
+    pub install_disk: Option<String>,
 }
 
 pub async fn update_machine(
@@ -1116,18 +1122,109 @@ pub async fn update_machine(
     Path(id): Path<uuid::Uuid>,
     Json(payload): Json<UpdateMachineRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mut m = repos::machine::get(&state.db_pool, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Machine not found".into()))?;
+    let mut changed = false;
     if let Some(addr) = payload.address {
-        let controller = controller_for(&state);
-        match controller.update_machine_address(id, addr).await {
-            Ok(m) => match serde_json::to_value(m) {
-                Ok(v) => Ok(Json(v)),
-                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-            },
-            Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
-        }
-    } else {
-        Err((StatusCode::BAD_REQUEST, "No fields to update".to_string()))
+        m.address = addr.trim().to_string();
+        changed = true;
     }
+    if let Some(t) = payload.machine_type {
+        m.machine_type = t;
+        changed = true;
+    }
+    if let Some(c) = payload.cluster_id {
+        m.cluster_id = Some(c);
+        changed = true;
+    }
+    if let Some(mac) = payload.mac_address {
+        m.mac_address = repos::machine::normalize_mac(&mac);
+        changed = true;
+    }
+    if let Some(h) = payload.hostname {
+        m.hostname = h;
+        changed = true;
+    }
+    if let Some(d) = payload.install_disk {
+        m.install_disk = d;
+        changed = true;
+    }
+    if !changed {
+        return Err((StatusCode::BAD_REQUEST, "No fields to update".into()));
+    }
+    m.updated_at = chrono::Utc::now();
+    let m = repos::machine::update(&state.db_pool, &m)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    serde_json::to_value(m)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateMachineRequest {
+    pub system_uuid: Option<String>,
+    pub machine_type: Option<String>,
+    pub cluster_id: Option<Uuid>,
+    pub address: Option<String>,
+    pub mac_address: Option<String>,
+    pub hostname: Option<String>,
+    pub bmc_address: Option<String>,
+    pub bmc_username: Option<String>,
+    pub bmc_password: Option<String>,
+    pub bmc_type: Option<String>,
+    pub install_disk: Option<String>,
+}
+
+pub async fn create_machine(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateMachineRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    let system_uuid = payload
+        .system_uuid
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("baremetal-{}", Uuid::new_v4()));
+    let machine_type = payload
+        .machine_type
+        .unwrap_or_else(|| "worker".into());
+    let mut m = crate::db::models::machine::Machine::new(system_uuid, machine_type);
+    m.cluster_id = payload.cluster_id;
+    m.address = payload.address.unwrap_or_default();
+    if let Some(mac) = payload.mac_address {
+        m.mac_address = repos::machine::normalize_mac(&mac);
+    }
+    m.hostname = payload.hostname.unwrap_or_default();
+    m.bmc_address = payload.bmc_address.unwrap_or_default();
+    m.bmc_username = payload.bmc_username.unwrap_or_default();
+    m.bmc_type = payload.bmc_type.unwrap_or_else(|| "auto".into());
+    m.install_disk = payload.install_disk.unwrap_or_default();
+    if let Some(pw) = payload.bmc_password.filter(|p| !p.is_empty()) {
+        m.bmc_password_enc = Some(
+            crate::utils::secrets::encrypt(&state.config.auth.jwt_secret, &pw)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        );
+    }
+    let m = repos::machine::create(&state.db_pool, &m)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "create_machine",
+        &m.id.to_string(),
+        &m.system_uuid,
+    )
+    .await;
+    let v = serde_json::to_value(&m).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok((StatusCode::CREATED, Json(v)))
 }
 
 #[derive(Deserialize)]
@@ -3592,4 +3689,467 @@ pub async fn list_siderolink_tokens(
             .filter_map(|t| serde_json::to_value(t).ok())
             .collect(),
     ))
+}
+
+// ─── Metal / BMC / PXE ─────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetBmcRequest {
+    pub bmc_address: Option<String>,
+    pub bmc_username: Option<String>,
+    pub bmc_password: Option<String>,
+    pub bmc_type: Option<String>,
+    pub bmc_redfish_path: Option<String>,
+    pub bmc_tls_insecure: Option<bool>,
+}
+
+pub async fn put_machine_bmc(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<SetBmcRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    let mut m = repos::machine::get(&state.db_pool, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Machine not found".into()))?;
+    if let Some(a) = payload.bmc_address {
+        m.bmc_address = a;
+    }
+    if let Some(u) = payload.bmc_username {
+        m.bmc_username = u;
+    }
+    if let Some(t) = payload.bmc_type {
+        m.bmc_type = t;
+    }
+    if let Some(p) = payload.bmc_redfish_path {
+        m.bmc_redfish_path = p;
+    }
+    if let Some(i) = payload.bmc_tls_insecure {
+        m.bmc_tls_insecure = i;
+    }
+    if let Some(pw) = payload.bmc_password.filter(|p| !p.is_empty()) {
+        m.bmc_password_enc = Some(
+            crate::utils::secrets::encrypt(&state.config.auth.jwt_secret, &pw)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        );
+    }
+    m.updated_at = chrono::Utc::now();
+    let m = repos::machine::update(&state.db_pool, &m)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "bmcAddress": m.bmc_address,
+        "bmcUsername": m.bmc_username,
+        "bmcType": m.bmc_type,
+        "hasPassword": m.bmc_password_enc.as_ref().map(|p| !p.is_empty()).unwrap_or(false),
+    })))
+}
+
+pub async fn get_machine_bmc(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _ = extract_claims(&headers)?;
+    let m = repos::machine::get(&state.db_pool, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Machine not found".into()))?;
+    if !m.has_bmc() {
+        return Ok(Json(serde_json::json!({
+            "configured": false,
+            "powerState": m.last_power_state,
+        })));
+    }
+    let enc = m.bmc_password_enc.as_ref().unwrap();
+    let plain = crate::utils::secrets::decrypt(&state.config.auth.jwt_secret, enc)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let creds = crate::integration::bmc::BmcCredentials::from_machine(
+        &m,
+        &plain,
+        state.config.metal.bmc.connect_timeout_secs,
+        &state.config.metal.bmc.ipmi_interface,
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    match crate::integration::bmc::BmcSession::connect(&creds).await {
+        Ok(sess) => {
+            let power = sess
+                .get_power_state()
+                .await
+                .map(|p| p.as_str().to_string())
+                .unwrap_or_else(|_| "unknown".into());
+            // best-effort persist
+            if let Ok(Some(mut mm)) = repos::machine::get(&state.db_pool, id).await {
+                mm.last_power_state = power.clone();
+                mm.updated_at = chrono::Utc::now();
+                let _ = repos::machine::update(&state.db_pool, &mm).await;
+            }
+            Ok(Json(serde_json::json!({
+                "configured": true,
+                "protocol": sess.protocol().as_str(),
+                "powerState": power,
+                "bmcAddress": m.bmc_address,
+                "bmcType": m.bmc_type,
+            })))
+        }
+        Err(e) => Ok(Json(serde_json::json!({
+            "configured": true,
+            "error": e.to_string(),
+            "powerState": m.last_power_state,
+            "bmcAddress": m.bmc_address,
+        }))),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct PowerRequest {
+    pub action: String,
+}
+
+pub async fn machine_power(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<PowerRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    let m = repos::machine::get(&state.db_pool, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Machine not found".into()))?;
+    if !m.has_bmc() {
+        return Err((StatusCode::BAD_REQUEST, "BMC not configured".into()));
+    }
+    let plain = crate::utils::secrets::decrypt(
+        &state.config.auth.jwt_secret,
+        m.bmc_password_enc.as_ref().unwrap(),
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let creds = crate::integration::bmc::BmcCredentials::from_machine(
+        &m,
+        &plain,
+        state.config.metal.bmc.connect_timeout_secs,
+        &state.config.metal.bmc.ipmi_interface,
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let sess = crate::integration::bmc::BmcSession::connect(&creds)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    sess.power(&payload.action)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "bmc_power",
+        &id.to_string(),
+        &payload.action,
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "ok": true, "action": payload.action })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootDeviceRequest {
+    pub target: String,
+    #[serde(default = "default_true")]
+    pub once: bool,
+}
+
+pub async fn machine_boot_device(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<BootDeviceRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    let m = repos::machine::get(&state.db_pool, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Machine not found".into()))?;
+    if !m.has_bmc() {
+        return Err((StatusCode::BAD_REQUEST, "BMC not configured".into()));
+    }
+    let target = match payload.target.to_ascii_lowercase().as_str() {
+        "pxe" => crate::integration::bmc::BootTarget::Pxe,
+        "disk" | "hdd" => crate::integration::bmc::BootTarget::Disk,
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("unknown boot target: {other}"),
+            ))
+        }
+    };
+    let plain = crate::utils::secrets::decrypt(
+        &state.config.auth.jwt_secret,
+        m.bmc_password_enc.as_ref().unwrap(),
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let creds = crate::integration::bmc::BmcCredentials::from_machine(
+        &m,
+        &plain,
+        state.config.metal.bmc.connect_timeout_secs,
+        &state.config.metal.bmc.ipmi_interface,
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let sess = crate::integration::bmc::BmcSession::connect(&creds)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    sess.set_boot(target, payload.once)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "bmc_boot_device",
+        &id.to_string(),
+        &payload.target,
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+pub async fn metal_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _ = extract_claims(&headers)?;
+    let m = &state.config.metal;
+    Ok(Json(serde_json::json!({
+        "enabled": m.enabled,
+        "dhcp": {
+            "enabled": m.dhcp.enabled,
+            "interface": m.dhcp.interface,
+            "bindIp": m.dhcp.bind_ip,
+            "subnet": m.dhcp.subnet,
+            "rangeStart": m.dhcp.range_start,
+            "rangeEnd": m.dhcp.range_end,
+            "gateway": m.dhcp.gateway,
+            "allowUnknown": m.dhcp.allow_unknown,
+        },
+        "pxe": {
+            "enabled": m.pxe.enabled,
+            "httpPort": m.pxe.http_port,
+            "assetDir": m.pxe.asset_dir,
+            "defaultTalosVersion": m.pxe.default_talos_version,
+        },
+        "bmc": {
+            "connectTimeoutSecs": m.bmc.connect_timeout_secs,
+            "preferRedfish": m.bmc.prefer_redfish,
+        },
+    })))
+}
+
+pub async fn list_dhcp_leases(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _ = extract_claims(&headers)?;
+    let leases = repos::dhcp_lease::list(&state.db_pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "leases": leases })))
+}
+
+pub async fn list_pxe_profiles(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _ = extract_claims(&headers)?;
+    let list = repos::pxe_profile::list(&state.db_pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "profiles": list })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatePxeProfileRequest {
+    pub name: String,
+    pub talos_version: String,
+    pub arch: Option<String>,
+    pub cmdline: Option<String>,
+}
+
+pub async fn create_pxe_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CreatePxeProfileRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" {
+        return Err((StatusCode::FORBIDDEN, "admin required".into()));
+    }
+    let now = chrono::Utc::now();
+    let p = repos::pxe_profile::PxeProfile {
+        id: Uuid::new_v4(),
+        name: payload.name,
+        talos_version: payload.talos_version,
+        arch: payload.arch.unwrap_or_else(|| "amd64".into()),
+        kernel_url: String::new(),
+        initramfs_url: String::new(),
+        cmdline: payload.cmdline.unwrap_or_default(),
+        enabled: true,
+        assets_ready: false,
+        created_at: now,
+        updated_at: now,
+    };
+    repos::pxe_profile::create(&state.db_pool, &p)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok((StatusCode::CREATED, Json(serde_json::to_value(&p).unwrap())))
+}
+
+pub async fn sync_pxe_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" {
+        return Err((StatusCode::FORBIDDEN, "admin required".into()));
+    }
+    let mut p = repos::pxe_profile::get(&state.db_pool, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "profile not found".into()))?;
+    crate::network::pxe::sync_profile_assets(&state.config.metal.pxe, &mut p)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    repos::pxe_profile::update(&state.db_pool, &p)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::to_value(&p).unwrap()))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartMetalProvisionRequest {
+    pub machine_ids: Vec<Uuid>,
+    pub artifact_id: Option<Uuid>,
+    pub install_disk: Option<String>,
+    #[serde(default = "default_true")]
+    pub auto_bootstrap: bool,
+}
+
+pub async fn start_cluster_provision(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(cluster_id): Path<Uuid>,
+    Json(payload): Json<StartMetalProvisionRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    if payload.machine_ids.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "machineIds required".into()));
+    }
+    if repos::cluster::get(&state.db_pool, cluster_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .is_none()
+    {
+        return Err((StatusCode::NOT_FOUND, "cluster not found".into()));
+    }
+    let metal_payload = crate::runtime::metal_scheduler::MetalJobPayload {
+        machine_ids: payload.machine_ids,
+        artifact_id: payload.artifact_id,
+        install_disk: payload.install_disk,
+        auto_bootstrap: payload.auto_bootstrap,
+        current_machine_index: 0,
+        step: "pending".into(),
+        steps_log: vec![format!("{} job created", chrono::Utc::now().to_rfc3339())],
+    };
+    let now = chrono::Utc::now();
+    let job = repos::provision_job::ProvisionJob {
+        id: Uuid::new_v4(),
+        cluster_id: Some(cluster_id),
+        kind: "metal_provision".into(),
+        status: "pending".into(),
+        desired_workers: 0,
+        payload: Some(serde_json::to_string(&metal_payload).unwrap_or_else(|_| "{}".into())),
+        error: None,
+        created_by: Some(claims.sub.clone()),
+        created_at: now,
+        updated_at: now,
+    };
+    repos::provision_job::create(&state.db_pool, &job)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "start_metal_provision",
+        &job.id.to_string(),
+        &cluster_id.to_string(),
+    )
+    .await;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "id": job.id,
+            "status": job.status,
+            "kind": job.kind,
+        })),
+    ))
+}
+
+pub async fn list_provision_jobs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _ = extract_claims(&headers)?;
+    let jobs = repos::provision_job::list(&state.db_pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "jobs": jobs })))
+}
+
+pub async fn get_provision_job(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _ = extract_claims(&headers)?;
+    let job = repos::provision_job::get(&state.db_pool, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "job not found".into()))?;
+    let mut val = serde_json::to_value(&job).unwrap();
+    if let Some(p) = &job.payload {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(p) {
+            val["payloadParsed"] = parsed;
+        }
+    }
+    Ok(Json(val))
+}
+
+pub async fn cancel_provision_job(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    repos::provision_job::update_status(&state.db_pool, id, "cancelled", Some("cancelled by user"), None)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }

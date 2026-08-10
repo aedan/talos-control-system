@@ -66,6 +66,29 @@ impl ProvisionController {
             created_at: Utc::now(),
         };
         provision::create(&self.pool, &art).await?;
+
+        // Auto-attach generated talosconfig to the cluster when cluster_id is set
+        if let (Some(cid), Some(ref enc)) = (cluster_id, &art.secrets_enc) {
+            if let Ok(plain) = secrets::decrypt(&self.jwt_secret, enc) {
+                if let Err(e) =
+                    crate::db::repos::cluster::set_talosconfig(&self.pool, cid, enc).await
+                {
+                    tracing::warn!(
+                        error = %e,
+                        cluster_id = %cid,
+                        "Failed to auto-attach talosconfig after generate_config"
+                    );
+                } else {
+                    tracing::info!(
+                        cluster_id = %cid,
+                        artifact_id = %art.id,
+                        "Auto-attached generated talosconfig to cluster"
+                    );
+                    let _ = plain; // validated path uses encrypted blob
+                }
+            }
+        }
+
         Ok(art)
     }
 

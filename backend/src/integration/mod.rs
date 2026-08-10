@@ -1,3 +1,4 @@
+pub mod bmc;
 pub mod kubernetes;
 pub mod talos;
 

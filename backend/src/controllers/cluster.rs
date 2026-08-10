@@ -155,20 +155,13 @@ impl ClusterController {
                 m.updated_at = now;
                 crate::db::repos::machine::update(&self.pool, &m).await?;
             } else {
-                let machine = Machine {
-                    id: Uuid::new_v4(),
-                    system_uuid,
-                    machine_type: mtype.to_string(),
-                    cluster_id: Some(cluster_id),
-                    status: "running".to_string(),
-                    talos_version: node.talos_version.clone(),
-                    secure_boot: false,
-                    siderolink_connected: false,
-                    address: node.internal_ip.clone(),
-                    install_disk: String::new(),
-                    created_at: now,
-                    updated_at: now,
-                };
+                let mut machine = Machine::new(system_uuid, mtype.to_string());
+                machine.cluster_id = Some(cluster_id);
+                machine.status = "running".to_string();
+                machine.talos_version = node.talos_version.clone();
+                machine.address = node.internal_ip.clone();
+                machine.created_at = now;
+                machine.updated_at = now;
                 crate::db::repos::machine::create(&self.pool, &machine).await?;
             }
             count += 1;
@@ -591,12 +584,16 @@ impl ClusterController {
             return Err(AppError::InvalidInput("install_disk not set for this machine".into()));
         }
 
+        let config_yaml = inject_install_disk(config_yaml, &machine.install_disk);
+
         machine.status = "installing".to_string();
         machine.updated_at = chrono::Utc::now();
         crate::db::repos::machine::update(&self.pool, &machine).await?;
 
         let client = self.client_for_machine(&cluster, &machine).await?;
-        client.apply_config_with_options(config_yaml, false, true).await?;
+        client
+            .apply_config_with_options(&config_yaml, false, true)
+            .await?;
 
         machine.status = "booting".to_string();
         machine.updated_at = chrono::Utc::now();
@@ -919,4 +916,22 @@ impl ClusterController {
             "results": results,
         }))
     }
+}
+
+/// Rewrite `machine.install.disk` in Talos machine config YAML.
+pub fn inject_install_disk(config_yaml: &str, disk: &str) -> String {
+    let disk = disk.trim();
+    if disk.is_empty() {
+        return config_yaml.to_string();
+    }
+    let re = regex::Regex::new(r"(?m)^([ \t]*disk:[ \t]*).+$").ok();
+    if let Some(re) = re {
+        if re.is_match(config_yaml) {
+            return re
+                .replace(config_yaml, format!("${{1}}{disk}"))
+                .into_owned();
+        }
+    }
+    // Fallback: no disk line found — leave YAML unchanged
+    config_yaml.to_string()
 }

@@ -22,6 +22,9 @@ cluster.
 | Rolling upgrade jobs (cluster/fleet) | **Supported (alpha)** | Leader-elected scheduler |
 | Greenfield config factory | **Supported (alpha)** | Pure-Rust PKI + machine configs (no talosctl) |
 | **Bare-metal install assist** | **Supported (alpha)** | Disk list, set install disk, apply+reboot install, bootstrap CP |
+| **PXE + full DHCP** | **Supported (alpha)** | Dedicated provision iface; MAC allowlist; HTTP iPXE + assets |
+| **BMC Redfish / IPMI** | **Supported (alpha)** | Power + PXE-once; IPMI via ipmitool fallback |
+| **Metal provision jobs** | **Supported (alpha)** | BMC → PXE → wait installer → install → bootstrap |
 | Scale workers (desired size) | **Supported (alpha)** | Inventory target |
 | Machine reset / wipe | **Supported (alpha)** | Talos Reset RPC; requires confirm |
 | Live TLS cert reload | **Supported** | Self-signed ↔ LE ↔ provided without restart when HTTPS already up |
@@ -31,18 +34,21 @@ cluster.
 | Multi-replica HA foundation | **Supported (alpha)** | DB locks for schedulers; OIDC state in DB |
 | Host installer | **Supported** | Self-extracting |
 | Helm / in-cluster | **Not provided** | By design |
-| PXE server / Redfish / IPMI | **Not provided** | Boot media and power are out-of-band |
+| BMC auto-discovery | **Not provided** | Inventory is operator-entered MAC/BMC |
 
 ## Bare-metal: what “complete” means
 
-**In scope (done):** machines already in Talos **installer** (ISO/PXE/USB) → register by address → discover disks → pick install disk → generate configs → install (apply config + reboot) → bootstrap first CP.
+**In scope (done):**
 
-**Out of scope:** TCS is not a metal orchestrator — no DHCP/PXE server, no BMC/Redfish power control, no automatic rack discovery.
+1. **Assisted:** nodes already in Talos installer → register → disks → install → bootstrap.  
+2. **Full path (alpha):** machine inventory with MAC + BMC → Redfish/IPMI power + PXE once → TCS DHCP + HTTP boot into Talos metal → install → bootstrap (job worker).
+
+**Still out of scope:** automatic rack BMC discovery, multi-region metal HA, Secure Boot enrollment UX.
 
 ## Explicitly still later
 
 - Production-grade SAML XML-DSig  
 - Full multi-region HA story  
-- Optional PXE/IPMI integrations if productized later  
+- proxyDHCP mode (optional alternative to full DHCP)  
 
-See [INSTALL](INSTALL.md), [CONFIGURATION](CONFIGURATION.md), [AUTH](AUTH.md), [POSTGRES](POSTGRES.md), [TALOS](TALOS.md), [TLS](TLS.md).
+See [METAL](METAL.md), [INSTALL](INSTALL.md), [CONFIGURATION](CONFIGURATION.md), [AUTH](AUTH.md), [POSTGRES](POSTGRES.md), [TALOS](TALOS.md), [TLS](TLS.md).

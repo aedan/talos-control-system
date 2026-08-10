@@ -10,3 +10,6 @@ pub mod upgrade_job;
 pub mod siderolink;
 pub mod provision;
 pub mod oidc_state;
+pub mod pxe_profile;
+pub mod dhcp_lease;
+pub mod provision_job;

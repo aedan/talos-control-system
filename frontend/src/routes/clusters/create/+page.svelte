@@ -4,19 +4,19 @@
   import { goto } from '$app/navigation';
   import Button from '$lib/components/Button.svelte';
 
-  let name = '';
-  let endpoint = 'https://192.168.0.10:6443';
-  let controlPlaneVersion = 'v1.31.0';
-  let talosVersion = 'v1.9.0';
-  let creating = false;
-  let generating = false;
+  let name = $state('');
+  let endpoint = $state('https://192.168.0.10:6443');
+  let controlPlaneVersion = $state('v1.31.0');
+  let talosVersion = $state('v1.9.0');
+  let creating = $state(false);
+  let generating = $state(false);
   let generated = $state<null | {
     id: string;
     controlplaneConfig?: string;
     workerConfig?: string;
     hasSecrets?: boolean;
   }>(null);
-  let alsoInventory = true;
+  let alsoInventory = $state(true);
   let clusterId = $state<string | null>(null);
 
   let machines = $state<Array<{
@@ -29,9 +29,15 @@
     loadingDisks: boolean;
     installing: boolean;
   }>>([]);
-  let newMachineAddress = '';
-  let newMachineType = 'controlplane';
-  let addingMachine = false;
+  let newMachineAddress = $state('');
+  let newMachineType = $state('controlplane');
+  let newMachineMac = $state('');
+  let newMachineBmc = $state('');
+  let newMachineBmcUser = $state('');
+  let newMachineBmcPass = $state('');
+  let addingMachine = $state(false);
+  let provisionJobId = $state<string | null>(null);
+  let provisionBusy = $state(false);
 
   async function handleCreate() {
     if (!name.trim()) return;
@@ -66,7 +72,7 @@
           controlPlaneVersion,
           talosVersion,
         })) as { id?: string };
-        clusterId = created?.id;
+        clusterId = created?.id ?? null;
       }
       const art = (await client.post('/clusters/generate-config', {
         name: name.trim(),
@@ -109,22 +115,59 @@
   }
 
   async function addMachine() {
-    if (!newMachineAddress.trim()) return;
+    if (!newMachineAddress.trim() && !newMachineMac.trim() && !newMachineBmc.trim()) {
+      notifyError('Provide address, MAC, or BMC');
+      return;
+    }
     addingMachine = true;
     try {
       await client.post('/machines', {
         systemUuid: `baremetal-${Date.now()}`,
         machineType: newMachineType,
         clusterId: clusterId,
-        address: newMachineAddress.trim(),
+        address: newMachineAddress.trim() || undefined,
+        macAddress: newMachineMac.trim() || undefined,
+        bmcAddress: newMachineBmc.trim() || undefined,
+        bmcUsername: newMachineBmcUser.trim() || undefined,
+        bmcPassword: newMachineBmcPass || undefined,
+        bmcType: 'auto',
       });
       success('Machine registered.');
       newMachineAddress = '';
+      newMachineMac = '';
+      newMachineBmc = '';
+      newMachineBmcUser = '';
+      newMachineBmcPass = '';
       await loadMachines();
     } catch (e: unknown) {
       notifyError(e instanceof Error ? e.message : 'Failed to register machine');
     } finally {
       addingMachine = false;
+    }
+  }
+
+  async function startMetalProvision() {
+    if (!clusterId || !generated) {
+      notifyError('Create cluster and generate configs first');
+      return;
+    }
+    if (machines.length === 0) {
+      notifyError('Add at least one machine with MAC/BMC');
+      return;
+    }
+    provisionBusy = true;
+    try {
+      const job = (await client.post(`/clusters/${clusterId}/provision`, {
+        machineIds: machines.map((m) => m.id),
+        artifactId: generated.id,
+        autoBootstrap: true,
+      })) as { id: string };
+      provisionJobId = job.id;
+      success('Metal provision job started');
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Failed to start provision job');
+    } finally {
+      provisionBusy = false;
     }
   }
 
@@ -241,8 +284,8 @@
 <div class="create-page">
   <h1>Provision bare metal</h1>
   <p class="hint">
-    Register machines booted to the Talos installer, generate configs with real PKI secrets,
-    then apply them to install Talos on disk.
+    Full metal path: add servers with MAC + BMC, enable DHCP/PXE in config, then start a provision
+    job — or register already-booted installer nodes by address and install manually.
   </p>
 
   <form
@@ -312,17 +355,16 @@
     <section class="machine-section">
       <h2>Register machines</h2>
       <p class="muted">
-        Add machines that are booted to the Talos installer (ISO, PXE, USB). TCS will reach
-        them on port 50000.
+        Prefer MAC + BMC for automated PXE (requires metal.dhcp/pxe enabled). Or provide a
+        management address if the node is already in the Talos installer.
       </p>
 
-      <div class="add-row">
-        <input
-          class="addr-input"
-          type="text"
-          bind:value={newMachineAddress}
-          placeholder="192.168.0.11"
-        />
+      <div class="add-row wrap">
+        <input class="addr-input" type="text" bind:value={newMachineAddress} placeholder="Address (optional)" />
+        <input class="addr-input" type="text" bind:value={newMachineMac} placeholder="MAC aa:bb:…" />
+        <input class="addr-input" type="text" bind:value={newMachineBmc} placeholder="BMC IP" />
+        <input class="addr-input" type="text" bind:value={newMachineBmcUser} placeholder="BMC user" />
+        <input class="addr-input" type="password" bind:value={newMachineBmcPass} placeholder="BMC password" />
         <select bind:value={newMachineType}>
           <option value="controlplane">Control plane</option>
           <option value="worker">Worker</option>
@@ -331,11 +373,22 @@
           variant="secondary"
           size="sm"
           onclick={addMachine}
-          disabled={addingMachine || !newMachineAddress.trim()}
+          disabled={addingMachine}
         >
           {addingMachine ? 'Adding...' : 'Register'}
         </Button>
+        <Button
+          variant="primary"
+          size="sm"
+          onclick={startMetalProvision}
+          disabled={provisionBusy || !generated || machines.length === 0}
+        >
+          {provisionBusy ? 'Starting…' : 'Start metal provision'}
+        </Button>
       </div>
+      {#if provisionJobId}
+        <p class="muted">Provision job: <code>{provisionJobId}</code> — track under Settings → Metal / PXE</p>
+      {/if}
 
       {#if machines.length > 0}
         <div class="machine-list">

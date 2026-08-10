@@ -110,6 +110,7 @@
       <li class="sub"><a href="/settings/auth">Auth</a></li>
       <li class="sub"><a href="/settings/branding">Branding</a></li>
       <li class="sub"><a href="/settings/siderolink">Siderolink</a></li>
+      <li class="sub"><a href="/settings/metal">Metal / PXE</a></li>
       <li class="sub"><a href="/settings/users">Users</a></li>
       <li><button type="button" class="logout-btn" onclick={handleLogout}>Logout</button></li>
     </ul>

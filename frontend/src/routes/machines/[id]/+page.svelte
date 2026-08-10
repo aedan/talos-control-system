@@ -23,11 +23,31 @@
   let services = $state<ServiceRow[]>([]);
   let servicesError = $state('');
   let hostnameLive = $state('');
+  let bmcStatus = $state<{
+    configured?: boolean;
+    powerState?: string;
+    protocol?: string;
+    error?: string;
+  } | null>(null);
+  let bmcAddress = $state('');
+  let bmcUsername = $state('');
+  let bmcPassword = $state('');
+  let bmcType = $state('auto');
+  let editMac = $state('');
 
   onMount(async () => {
     try {
       machine = (await client.get(`/machines/${$page.params.id}`)) as Machine;
       editAddress = machine.address || '';
+      editMac = machine.macAddress || '';
+      bmcAddress = machine.bmcAddress || '';
+      bmcUsername = machine.bmcUsername || '';
+      bmcType = machine.bmcType || 'auto';
+      try {
+        bmcStatus = (await client.get(`/machines/${$page.params.id}/bmc`)) as typeof bmcStatus;
+      } catch {
+        /* optional */
+      }
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Failed to load machine';
     } finally {
@@ -131,6 +151,58 @@
     }
   }
 
+  async function saveBmc() {
+    actionBusy = true;
+    try {
+      await client.put(`/machines/${$page.params.id}/bmc`, {
+        bmcAddress: bmcAddress.trim(),
+        bmcUsername: bmcUsername.trim(),
+        bmcPassword: bmcPassword || undefined,
+        bmcType,
+      });
+      if (editMac.trim()) {
+        machine = (await client.put(`/machines/${$page.params.id}`, {
+          macAddress: editMac.trim(),
+        })) as Machine;
+      }
+      bmcPassword = '';
+      bmcStatus = (await client.get(`/machines/${$page.params.id}/bmc`)) as typeof bmcStatus;
+      success('BMC settings saved');
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Failed to save BMC');
+    } finally {
+      actionBusy = false;
+    }
+  }
+
+  async function powerAction(action: string) {
+    actionBusy = true;
+    try {
+      await client.post(`/machines/${$page.params.id}/power`, { action });
+      success(`Power ${action} sent`);
+      bmcStatus = (await client.get(`/machines/${$page.params.id}/bmc`)) as typeof bmcStatus;
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : `Power ${action} failed`);
+    } finally {
+      actionBusy = false;
+    }
+  }
+
+  async function bootPxe() {
+    actionBusy = true;
+    try {
+      await client.post(`/machines/${$page.params.id}/boot-device`, {
+        target: 'pxe',
+        once: true,
+      });
+      success('Boot device set to PXE (once)');
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Set boot PXE failed');
+    } finally {
+      actionBusy = false;
+    }
+  }
+
   async function resetMachine() {
     if (
       !confirm(
@@ -202,6 +274,48 @@
             <input type="text" bind:value={upgradeImage} placeholder="ghcr.io/siderolabs/installer:v1.8.0" />
           </label>
           <Button variant="secondary" size="sm" onclick={upgrade} disabled={actionBusy}>Upgrade</Button>
+        </div>
+      </div>
+
+      <div class="info-section">
+        <h2>BMC / power</h2>
+        <div class="info-row">
+          <span class="label">Power</span>
+          <span class="value">{bmcStatus?.powerState || machine.lastPowerState || 'unknown'}</span>
+        </div>
+        <div class="info-row">
+          <span class="label">Protocol</span>
+          <span class="value">{bmcStatus?.protocol || '—'}</span>
+        </div>
+        {#if bmcStatus?.error}
+          <div class="error" style="margin:0.5rem 0">{bmcStatus.error}</div>
+        {/if}
+        <div class="form-row">
+          <label>MAC<input type="text" bind:value={editMac} placeholder="aa:bb:cc:dd:ee:ff" /></label>
+        </div>
+        <div class="form-row">
+          <label>BMC address<input type="text" bind:value={bmcAddress} placeholder="192.168.1.100" /></label>
+        </div>
+        <div class="form-row">
+          <label>BMC user<input type="text" bind:value={bmcUsername} /></label>
+          <label>BMC password<input type="password" bind:value={bmcPassword} placeholder="••••••••" /></label>
+        </div>
+        <div class="form-row">
+          <label>
+            Type
+            <select bind:value={bmcType}>
+              <option value="auto">auto</option>
+              <option value="redfish">redfish</option>
+              <option value="ipmi">ipmi</option>
+            </select>
+          </label>
+          <Button variant="secondary" size="sm" onclick={saveBmc} disabled={actionBusy}>Save BMC</Button>
+        </div>
+        <div class="header-actions" style="margin-top:0.5rem">
+          <Button variant="secondary" size="sm" onclick={() => powerAction('on')} disabled={actionBusy}>On</Button>
+          <Button variant="secondary" size="sm" onclick={() => powerAction('off')} disabled={actionBusy}>Off</Button>
+          <Button variant="secondary" size="sm" onclick={() => powerAction('cycle')} disabled={actionBusy}>Cycle</Button>
+          <Button variant="secondary" size="sm" onclick={bootPxe} disabled={actionBusy}>PXE once</Button>
         </div>
       </div>
     </div>

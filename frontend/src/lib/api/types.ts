@@ -27,6 +27,13 @@ export interface Machine {
   secureBoot: boolean;
   siderolinkConnected: boolean;
   address: string;
+  installDisk?: string;
+  macAddress?: string;
+  hostname?: string;
+  bmcAddress?: string;
+  bmcUsername?: string;
+  bmcType?: string;
+  lastPowerState?: string;
   createdAt: string;
   updatedAt: string;
 }

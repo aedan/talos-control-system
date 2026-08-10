@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Full metal provisioning (alpha)** — Redfish (primary) / IPMI power, full DHCP on a dedicated interface, HTTP iPXE + Talos asset cache, and metal provision jobs (PXE → install → bootstrap)
+- `POST /api/machines`, BMC power/boot APIs, PXE profiles, DHCP leases, `/clusters/:id/provision`
+- Settings → Metal / PXE UI; machine detail BMC panel; create-wizard MAC/BMC + start provision
+- Docs: `docs/METAL.md`
+
+### Fixed
+- Install path injects selected `install_disk` into machine config YAML
+- Generated greenfield talosconfig auto-attaches to cluster when `clusterId` is set
+
 ## [0.3.0] — 2026-08-10
 
 ### Added
