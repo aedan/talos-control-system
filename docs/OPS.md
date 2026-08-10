@@ -49,6 +49,22 @@ sudo ./tcs-VERSION-linux-x86_64.sh --upgrade
 # keeps config.toml, env, and SQLite data
 ```
 
+### Release policy (do not blind-rev)
+
+- **Production / FTC / shared labs:** deploy only **tagged GitHub releases**  
+  (`vX.Y.Z` → installer `tcs-X.Y.Z-linux-x86_64.sh`).
+- **Do not** install main-branch `tcs-0.1.0-dev-*.sh` artifacts onto shared hosts.  
+  Those are CI build outputs; the UI may still report an old `CARGO_PKG_VERSION` and the
+  commit will not match a release tag — that confuses operators and support.
+- Before deploy: bump `backend/Cargo.toml` version, update `CHANGELOG.md` / `docs/STATUS.md`,
+  commit, tag `vX.Y.Z`, wait for **Build & Release**, then upgrade from the release asset.
+- After deploy, verify:
+
+```bash
+curl -sk https://localhost/api/health
+# version and commit must match the intended tag (e.g. 0.4.0 + tag commit)
+```
+
 ## Health
 
 ```bash
