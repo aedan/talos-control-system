@@ -122,7 +122,7 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
             "/clusters/:id/access/:user_id",
             delete(handlers::delete_cluster_access),
         )
-        .route("/machines", get(handlers::list_machines))
+        .route("/machines", get(handlers::list_machines).post(handlers::create_machine))
         .route("/machines/:id", get(handlers::get_machine))
         .route("/machines/:id", put(handlers::update_machine))
         .route("/machines/:id", delete(handlers::delete_machine))
@@ -136,6 +136,17 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route("/machines/:id/disks", get(handlers::list_machine_disks))
         .route("/machines/:id/install-disk", post(handlers::set_install_disk))
         .route("/machines/:id/install", post(handlers::install_machine))
+        .route("/machines/:id/bmc", get(handlers::get_machine_bmc).put(handlers::put_machine_bmc))
+        .route("/machines/:id/power", post(handlers::machine_power))
+        .route("/machines/:id/boot-device", post(handlers::machine_boot_device))
+        .route("/metal/status", get(handlers::metal_status))
+        .route("/metal/dhcp/leases", get(handlers::list_dhcp_leases))
+        .route("/pxe/profiles", get(handlers::list_pxe_profiles).post(handlers::create_pxe_profile))
+        .route("/pxe/profiles/:id/sync", post(handlers::sync_pxe_profile))
+        .route("/clusters/:id/provision", post(handlers::start_cluster_provision))
+        .route("/provision-jobs", get(handlers::list_provision_jobs))
+        .route("/provision-jobs/:id", get(handlers::get_provision_job))
+        .route("/provision-jobs/:id/cancel", post(handlers::cancel_provision_job))
         // Cluster sub-routes
         .route("/clusters/:id/nodes", get(handlers::get_cluster_nodes))
         .route("/clusters/:id/machines", get(handlers::get_cluster_machines))

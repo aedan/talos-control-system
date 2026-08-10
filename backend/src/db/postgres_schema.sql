@@ -32,6 +32,42 @@ CREATE TABLE IF NOT EXISTS machines (
     secure_boot INTEGER NOT NULL DEFAULT 0,
     siderolink_connected INTEGER NOT NULL DEFAULT 0,
     address TEXT NOT NULL DEFAULT '',
+    install_disk TEXT NOT NULL DEFAULT '',
+    mac_address TEXT NOT NULL DEFAULT '',
+    hostname TEXT NOT NULL DEFAULT '',
+    bmc_address TEXT NOT NULL DEFAULT '',
+    bmc_username TEXT NOT NULL DEFAULT '',
+    bmc_password_enc TEXT,
+    bmc_type TEXT NOT NULL DEFAULT 'auto',
+    bmc_redfish_path TEXT NOT NULL DEFAULT '',
+    bmc_tls_insecure INTEGER NOT NULL DEFAULT 1,
+    pxe_profile_id TEXT,
+    last_power_state TEXT NOT NULL DEFAULT 'unknown',
+    last_seen_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pxe_profiles (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    talos_version TEXT NOT NULL,
+    arch TEXT NOT NULL DEFAULT 'amd64',
+    kernel_url TEXT NOT NULL DEFAULT '',
+    initramfs_url TEXT NOT NULL DEFAULT '',
+    cmdline TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    assets_ready INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dhcp_leases (
+    mac TEXT PRIMARY KEY NOT NULL,
+    ip TEXT NOT NULL,
+    hostname TEXT NOT NULL DEFAULT '',
+    machine_id TEXT,
+    expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );

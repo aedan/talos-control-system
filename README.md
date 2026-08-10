@@ -25,7 +25,7 @@ TCS runs **on a management host** (systemd binary). It is **not** deployed with 
 
 ## What does **not** work yet
 
-- Full bare-metal PXE/IPMI orchestration
+- ~~Full bare-metal PXE/IPMI orchestration~~ → **alpha** in-tree (see [docs/METAL.md](docs/METAL.md))
 - Automatic SQLite→Postgres data migrator
 - In-cluster / Helm deployment (by design)
 
