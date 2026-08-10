@@ -1,6 +1,6 @@
 # TCS Status (Alpha)
 
-**Last updated:** 2026-08-10 · **Release target: v0.2.0**
+**Last updated:** 2026-08-10 · **Release: v0.3.0**
 
 Talos Control System is an **alpha** management UI for Talos Linux clusters.
 It runs as a **host systemd service** (or bare binary), **outside** the managed
@@ -20,23 +20,29 @@ cluster.
 | Config apply (pure-Rust COSI) | **Supported** | |
 | Etcd backup / restore / schedule | **Supported** | Leader-only when multi-replica |
 | Rolling upgrade jobs (cluster/fleet) | **Supported (alpha)** | Leader-elected scheduler |
-| Greenfield config factory | **Supported (alpha)** | talosctl or template stub |
-| Apply provision config to machine | **Supported (alpha)** | `POST /api/provision/apply-config` |
-| Bootstrap control-plane machine | **Supported (alpha)** | Talos Bootstrap RPC |
-| Scale workers (desired size) | **Supported (alpha)** | Inventory target; metal still external |
+| Greenfield config factory | **Supported (alpha)** | Pure-Rust PKI + machine configs (no talosctl) |
+| **Bare-metal install assist** | **Supported (alpha)** | Disk list, set install disk, apply+reboot install, bootstrap CP |
+| Scale workers (desired size) | **Supported (alpha)** | Inventory target |
 | Machine reset / wipe | **Supported (alpha)** | Talos Reset RPC; requires confirm |
+| Live TLS cert reload | **Supported** | Self-signed ↔ LE ↔ provided without restart when HTTPS already up |
 | Siderolink inventory | **Supported** | Join tokens + register |
 | Siderolink WireGuard | **Supported (alpha)** | Host `wg`/`ip` when available; graceful degrade |
 | **Postgres runtime** | **Supported (alpha)** | Dual `DbPool`; SQLite default |
 | Multi-replica HA foundation | **Supported (alpha)** | DB locks for schedulers; OIDC state in DB |
 | Host installer | **Supported** | Self-extracting |
 | Helm / in-cluster | **Not provided** | By design |
-| Full bare-metal PXE/redfish provision | **Not provided** | Out of band; TCS assists configs + apply |
+| PXE server / Redfish / IPMI | **Not provided** | Boot media and power are out-of-band |
+
+## Bare-metal: what “complete” means
+
+**In scope (done):** machines already in Talos **installer** (ISO/PXE/USB) → register by address → discover disks → pick install disk → generate configs → install (apply config + reboot) → bootstrap first CP.
+
+**Out of scope:** TCS is not a metal orchestrator — no DHCP/PXE server, no BMC/Redfish power control, no automatic rack discovery.
 
 ## Explicitly still later
 
 - Production-grade SAML XML-DSig  
-- Automatic metal discovery / IPMI / PXE orchestration  
-- Full multi-region HA story (sticky sessions, shared object store for backups)  
+- Full multi-region HA story  
+- Optional PXE/IPMI integrations if productized later  
 
-See [INSTALL](INSTALL.md), [CONFIGURATION](CONFIGURATION.md), [AUTH](AUTH.md), [POSTGRES](POSTGRES.md), [TALOS](TALOS.md).
+See [INSTALL](INSTALL.md), [CONFIGURATION](CONFIGURATION.md), [AUTH](AUTH.md), [POSTGRES](POSTGRES.md), [TALOS](TALOS.md), [TLS](TLS.md).

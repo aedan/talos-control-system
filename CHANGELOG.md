@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.3.0] — 2026-08-10
+
+### Added
+- **Live TLS certificate reload** — switch self-signed / Let's Encrypt / provided without process restart when HTTPS is already bound
+- **Bare-metal install assist** — disk discovery, install-disk selection, install (apply+reboot), bootstrap via UI wizard
+- Pure-Rust Talos config/PKI generation (no `talosctl` for secrets)
+- TLS overlay at `/var/lib/tcs/tls.toml` for Settings UI under systemd hardening
+
+### Fixed
+- Certificate status/renew use live TLS mode (not boot-time config only)
+- Settings UI messaging for live apply vs restart-only cases
+- Login shell (sidebar) after client-side navigation
+
+### Notes
+- Bare-metal path assumes nodes are already in the Talos installer environment
+- PXE / Redfish / IPMI remain out of band
+- LE HTTP-01 still needs public port 80 + correct DNS
+
 ## [0.2.0] — 2026-08-10
 
 ### Added

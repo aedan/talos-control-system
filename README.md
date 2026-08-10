@@ -1,6 +1,6 @@
 # Talos Control System
 
-**Status: Alpha (v0.2.0)** — see [docs/STATUS.md](docs/STATUS.md) and [CHANGELOG.md](CHANGELOG.md).
+**Status: Alpha (v0.3.0)** — see [docs/STATUS.md](docs/STATUS.md) and [CHANGELOG.md](CHANGELOG.md).
 
 **Talos Control System (TCS)** is a self-hosted web UI for managing [Talos Linux](https://www.talos.dev/) clusters. Import existing clusters, inventory machines, apply config patches, take etcd snapshots, and run limited machine actions over the Talos gRPC API.
 
