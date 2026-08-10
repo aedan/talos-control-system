@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::db::pool::{DbPool, SqlVal};
 use crate::AppError;
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -25,107 +25,118 @@ pub struct SiderolinkJoinToken {
     pub created_at: DateTime<Utc>,
 }
 
-pub async fn list_peers(pool: &SqlitePool) -> Result<Vec<SiderolinkPeer>, AppError> {
-    Ok(sqlx::query_as::<_, SiderolinkPeer>(
+pub async fn list_peers(pool: &DbPool) -> Result<Vec<SiderolinkPeer>, AppError> {
+    pool.fetch_all_as(
         "SELECT * FROM siderolink_peers ORDER BY created_at DESC",
+        &[],
     )
-    .fetch_all(pool)
-    .await?)
+    .await
 }
 
-pub async fn upsert_peer(pool: &SqlitePool, peer: &SiderolinkPeer) -> Result<(), AppError> {
-    sqlx::query(
+pub async fn upsert_peer(pool: &DbPool, peer: &SiderolinkPeer) -> Result<(), AppError> {
+    pool.execute(
         "INSERT INTO siderolink_peers (id, system_uuid, public_key, assigned_ip, last_seen, created_at)
          VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            public_key = excluded.public_key,
            assigned_ip = excluded.assigned_ip,
            last_seen = excluded.last_seen",
+        &[
+            SqlVal::Uuid(peer.id),
+            SqlVal::text(&peer.system_uuid),
+            SqlVal::text(&peer.public_key),
+            SqlVal::text(&peer.assigned_ip),
+            SqlVal::DateTime(peer.last_seen),
+            SqlVal::DateTime(peer.created_at),
+        ],
     )
-    .bind(peer.id)
-    .bind(&peer.system_uuid)
-    .bind(&peer.public_key)
-    .bind(&peer.assigned_ip)
-    .bind(peer.last_seen)
-    .bind(peer.created_at)
-    .execute(pool)
     .await?;
     Ok(())
 }
 
 pub async fn find_by_uuid(
-    pool: &SqlitePool,
+    pool: &DbPool,
     system_uuid: &str,
 ) -> Result<Option<SiderolinkPeer>, AppError> {
-    Ok(sqlx::query_as::<_, SiderolinkPeer>(
+    pool.fetch_optional_as(
         "SELECT * FROM siderolink_peers WHERE system_uuid = ?",
+        &[SqlVal::text(system_uuid)],
     )
-    .bind(system_uuid)
-    .fetch_optional(pool)
-    .await?)
+    .await
 }
 
-pub async fn touch(pool: &SqlitePool, id: Uuid) -> Result<(), AppError> {
-    sqlx::query("UPDATE siderolink_peers SET last_seen = ? WHERE id = ?")
-        .bind(Utc::now())
-        .bind(id)
-        .execute(pool)
-        .await?;
+pub async fn touch(pool: &DbPool, id: Uuid) -> Result<(), AppError> {
+    pool.execute(
+        "UPDATE siderolink_peers SET last_seen = ? WHERE id = ?",
+        &[SqlVal::DateTime(Utc::now()), SqlVal::Uuid(id)],
+    )
+    .await?;
     Ok(())
 }
 
 pub async fn create_token(
-    pool: &SqlitePool,
+    pool: &DbPool,
     token: &str,
     label: Option<&str>,
     expires_at: Option<DateTime<Utc>>,
 ) -> Result<(), AppError> {
-    sqlx::query(
+    pool.execute(
         "INSERT INTO siderolink_join_tokens (token, label, expires_at, created_at) VALUES (?, ?, ?, ?)",
+        &[
+            SqlVal::text(token),
+            SqlVal::OptText(label.map(|s| s.to_string())),
+            SqlVal::OptDateTime(expires_at),
+            SqlVal::DateTime(Utc::now()),
+        ],
     )
-    .bind(token)
-    .bind(label)
-    .bind(expires_at)
-    .bind(Utc::now())
-    .execute(pool)
     .await?;
     Ok(())
 }
 
-pub async fn list_tokens(pool: &SqlitePool) -> Result<Vec<SiderolinkJoinToken>, AppError> {
-    Ok(sqlx::query_as::<_, SiderolinkJoinToken>(
+pub async fn list_tokens(pool: &DbPool) -> Result<Vec<SiderolinkJoinToken>, AppError> {
+    pool.fetch_all_as(
         "SELECT * FROM siderolink_join_tokens ORDER BY created_at DESC",
+        &[],
     )
-    .fetch_all(pool)
-    .await?)
+    .await
 }
 
-pub async fn validate_token(pool: &SqlitePool, token: &str) -> Result<bool, AppError> {
-    let row = sqlx::query_as::<_, SiderolinkJoinToken>(
-        "SELECT * FROM siderolink_join_tokens WHERE token = ?",
-    )
-    .bind(token)
-    .fetch_optional(pool)
-    .await?;
+pub async fn validate_token(pool: &DbPool, token: &str) -> Result<bool, AppError> {
+    let row: Option<SiderolinkJoinToken> = pool
+        .fetch_optional_as(
+            "SELECT * FROM siderolink_join_tokens WHERE token = ?",
+            &[SqlVal::text(token)],
+        )
+        .await?;
     Ok(match row {
         None => false,
         Some(t) => t.expires_at.map(|e| e > Utc::now()).unwrap_or(true),
     })
 }
 
-pub async fn delete_token(pool: &SqlitePool, token: &str) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM siderolink_join_tokens WHERE token = ?")
-        .bind(token)
-        .execute(pool)
-        .await?;
+pub async fn delete_token(pool: &DbPool, token: &str) -> Result<(), AppError> {
+    pool.execute(
+        "DELETE FROM siderolink_join_tokens WHERE token = ?",
+        &[SqlVal::text(token)],
+    )
+    .await?;
     Ok(())
 }
 
-pub async fn next_ip(pool: &SqlitePool, subnet_start: u32) -> Result<String, AppError> {
-    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM siderolink_peers")
-        .fetch_one(pool)
+pub async fn next_ip(pool: &DbPool, subnet_start: u32) -> Result<String, AppError> {
+    let count = pool
+        .fetch_scalar_i64("SELECT COUNT(*) FROM siderolink_peers", &[])
         .await?;
-    let ip = subnet_start.saturating_add(2 + count.0 as u32);
+    let ip = subnet_start.saturating_add(2 + count as u32);
     let b = ip.to_be_bytes();
     Ok(format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3]))
+}
+
+pub async fn delete_peer(pool: &DbPool, id: Uuid) -> Result<(), AppError> {
+    pool.execute(
+        "DELETE FROM siderolink_peers WHERE id = ?",
+        &[SqlVal::Uuid(id)],
+    )
+    .await?;
+    Ok(())
 }

@@ -2,9 +2,9 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::db::pool::{DbPool, SqlVal};
 use crate::AppError;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,8 +42,17 @@ fn default_per_page() -> usize {
     50
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct AuditRow {
+    id: String,
+    action: String,
+    resource_type: String,
+    details: String,
+    created_at: String,
+}
+
 pub async fn log_action(
-    pool: &SqlitePool,
+    pool: &DbPool,
     email: &str,
     action: &str,
     resource: &str,
@@ -59,64 +68,68 @@ pub async fn log_action(
         "Audit"
     );
 
-    if let Err(e) = sqlx::query(
-        "INSERT INTO audit_logs (id, user_id, resource_type, resource_id, action, details, created_at)
-         VALUES (?, NULL, ?, ?, ?, ?, ?)",
-    )
-    .bind(id)
-    .bind(resource)
-    .bind("") // resource_id optional legacy column
-    .bind(action)
-    .bind(format!("{} | user={}", details, email))
-    .bind(now)
-    .execute(pool)
-    .await
+    if let Err(e) = pool
+        .execute(
+            "INSERT INTO audit_logs (id, user_id, resource_type, resource_id, action, details, created_at)
+             VALUES (?, NULL, ?, ?, ?, ?, ?)",
+            &[
+                SqlVal::Uuid(id),
+                SqlVal::text(resource),
+                SqlVal::text(""),
+                SqlVal::text(action),
+                SqlVal::text(format!("{} | user={}", details, email)),
+                SqlVal::DateTime(now),
+            ],
+        )
+        .await
     {
         tracing::warn!(error = %e, "Failed to write audit log");
     }
 }
 
 pub async fn get_entries(
-    pool: &SqlitePool,
+    pool: &DbPool,
     filter: &AuditFilter,
 ) -> Result<(Vec<AuditEntry>, usize), AppError> {
-    // Load recent rows then filter in memory (alpha-scale)
-    let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
-        "SELECT id, action, resource_type, COALESCE(details, ''), created_at
-         FROM audit_logs
-         ORDER BY created_at DESC
-         LIMIT 5000",
-    )
-    .fetch_all(pool)
-    .await?;
+    let rows: Vec<AuditRow> = pool
+        .fetch_all_as(
+            "SELECT id, action, resource_type, COALESCE(details, '') as details, created_at
+             FROM audit_logs
+             ORDER BY created_at DESC
+             LIMIT 5000",
+            &[],
+        )
+        .await?;
 
     let mut entries: Vec<AuditEntry> = Vec::new();
-    for (id, action, resource, details, created_at) in rows {
-        let user_email = details
+    for row in rows {
+        let user_email = row
+            .details
             .split(" | user=")
             .nth(1)
             .unwrap_or("system")
             .to_string();
-        let clean_details = details
+        let clean_details = row
+            .details
             .split(" | user=")
             .next()
-            .unwrap_or(&details)
+            .unwrap_or(&row.details)
             .to_string();
-        let timestamp = DateTime::parse_from_rfc3339(&created_at)
+        let timestamp = DateTime::parse_from_rfc3339(&row.created_at)
             .map(|d| d.with_timezone(&Utc))
             .or_else(|_| {
-                chrono::NaiveDateTime::parse_from_str(&created_at, "%Y-%m-%d %H:%M:%S")
+                chrono::NaiveDateTime::parse_from_str(&row.created_at, "%Y-%m-%d %H:%M:%S")
                     .map(|n| DateTime::from_naive_utc_and_offset(n, Utc))
             })
             .unwrap_or_else(|_| Utc::now());
 
-        let uuid = Uuid::parse_str(&id).unwrap_or_else(|_| Uuid::new_v4());
+        let uuid = Uuid::parse_str(&row.id).unwrap_or_else(|_| Uuid::new_v4());
         entries.push(AuditEntry {
             id: uuid,
             timestamp,
             user_email,
-            action,
-            resource,
+            action: row.action,
+            resource: row.resource_type,
             details: clean_details,
         });
     }
@@ -160,14 +173,14 @@ pub async fn get_entries(
     Ok((page_entries, total))
 }
 
-pub async fn clear_all(pool: &SqlitePool) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM audit_logs").execute(pool).await?;
+pub async fn clear_all(pool: &DbPool) -> Result<(), AppError> {
+    pool.execute("DELETE FROM audit_logs", &[]).await?;
     Ok(())
 }
 
-pub async fn count(pool: &SqlitePool) -> Result<usize, AppError> {
-    let (c,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM audit_logs")
-        .fetch_one(pool)
+pub async fn count(pool: &DbPool) -> Result<usize, AppError> {
+    let c = pool
+        .fetch_scalar_i64("SELECT COUNT(*) FROM audit_logs", &[])
         .await?;
     Ok(c as usize)
 }

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use crate::db::pool::DbPool;
 use uuid::Uuid;
 
 use crate::auth::jwt::{Claims, create_claims, create_jwt, verify_jwt};
@@ -363,7 +363,7 @@ impl TcsOidcProvider {
 
     pub async fn authenticate_and_issue_jwt(
         &self,
-        pool: &SqlitePool,
+        pool: &DbPool,
         user_info: OidcUserInfo,
     ) -> Result<String, AppError> {
         let email = if user_info.email.is_empty() {

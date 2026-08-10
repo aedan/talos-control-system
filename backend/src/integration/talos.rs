@@ -255,6 +255,40 @@ impl TalosClient {
         Ok(())
     }
 
+    /// Wipe/reset a machine (destructive). Prefer graceful=true for etcd leave.
+    pub async fn reset(&self, graceful: bool, reboot: bool) -> Result<(), AppError> {
+        use talos_rust_client::machine::ResetRequest;
+        use talos_rust_client::machine::reset_request::WipeMode;
+        let mut client = self.connect().await?;
+        let request = ResetRequest {
+            graceful,
+            reboot,
+            system_partitions_to_wipe: vec![],
+            user_disks_to_wipe: vec![],
+            mode: WipeMode::All as i32,
+        };
+        client.reset(request).await.map_err(|e| {
+            AppError::Grpc(format!("Reset failed on {}: {}", self.endpoint, e))
+        })?;
+        info!(endpoint = %self.endpoint, graceful, reboot, "Machine reset initiated");
+        Ok(())
+    }
+
+    /// Bootstrap a control-plane node (initial etcd formation).
+    pub async fn bootstrap(&self) -> Result<(), AppError> {
+        use talos_rust_client::machine::BootstrapRequest;
+        let mut client = self.connect().await?;
+        let request = BootstrapRequest {
+            recover_etcd: false,
+            recover_skip_hash_check: false,
+        };
+        client.bootstrap(request).await.map_err(|e| {
+            AppError::Grpc(format!("Bootstrap failed on {}: {}", self.endpoint, e))
+        })?;
+        info!(endpoint = %self.endpoint, "Bootstrap initiated");
+        Ok(())
+    }
+
     pub async fn upgrade(&self, image: &str) -> Result<(), AppError> {
         use talos_rust_client::machine::upgrade_request::RebootMode as UpgradeRebootMode;
         let mut client = self.connect().await?;

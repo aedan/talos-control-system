@@ -3,17 +3,18 @@ use std::sync::Arc;
 
 use crate::config::BrandingConfig;
 use crate::db::models::branding::TenantBranding;
+use crate::db::pool::DbPool;
 use crate::db::repos;
 use crate::AppError;
 
 pub struct BrandingManager {
     defaults: BrandingConfig,
-    pool: sqlx::SqlitePool,
+    pool: DbPool,
     cache: Arc<tokio::sync::RwLock<HashMap<String, BrandingConfig>>>,
 }
 
 impl BrandingManager {
-    pub async fn new(defaults: &BrandingConfig, pool: &sqlx::SqlitePool) -> Result<Self, AppError> {
+    pub async fn new(defaults: &BrandingConfig, pool: &DbPool) -> Result<Self, AppError> {
         let manager = Self {
             defaults: defaults.clone(),
             pool: pool.clone(),
@@ -33,13 +34,7 @@ impl BrandingManager {
             }
         }
 
-        match sqlx::query_as::<_, TenantBranding>(
-            "SELECT * FROM tenant_branding WHERE tenant_id = ?",
-        )
-        .bind(tenant_id)
-        .fetch_optional(&self.pool)
-        .await
-        {
+        match repos::branding::get_tenant_branding(&self.pool, tenant_id).await {
             Ok(Some(tenant)) => {
                 let b = tenant.merge_with_defaults(&self.defaults);
                 let mut cache = self.cache.write().await;
@@ -80,9 +75,12 @@ impl BrandingManager {
         &self,
         cache: &mut HashMap<String, BrandingConfig>,
     ) -> Result<(), AppError> {
-        let rows = sqlx::query_as::<_, TenantBranding>("SELECT * FROM tenant_branding")
-            .fetch_all(&self.pool)
-            .await?;
+        // List via direct query helper
+        let rows: Vec<TenantBranding> = self
+            .pool
+            .fetch_all_as("SELECT * FROM tenant_branding", &[])
+            .await
+            .unwrap_or_default();
 
         for tenant in rows {
             let branding = tenant.merge_with_defaults(&self.defaults);

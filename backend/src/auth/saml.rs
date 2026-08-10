@@ -8,7 +8,7 @@ use std::time::Duration;
 use base64::Engine;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use crate::db::pool::DbPool;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -151,7 +151,7 @@ impl SamlProvider {
 
     pub async fn authenticate_and_issue_jwt(
         &self,
-        pool: &SqlitePool,
+        pool: &DbPool,
         info: SamlUserInfo,
     ) -> Result<String, AppError> {
         let role = self.resolve_role(&info.groups);

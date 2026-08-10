@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::db::pool::{DbPool, SqlVal};
 use crate::AppError;
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -36,119 +36,124 @@ pub struct UpgradeJobTarget {
     pub updated_at: DateTime<Utc>,
 }
 
-pub async fn create_job(pool: &SqlitePool, job: &UpgradeJob) -> Result<(), AppError> {
-    sqlx::query(
+pub async fn create_job(pool: &DbPool, job: &UpgradeJob) -> Result<(), AppError> {
+    pool.execute(
         "INSERT INTO upgrade_jobs (id, scope, image, status, max_unavailable, control_plane_last, cancel_requested, created_by, error, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        &[
+            SqlVal::Uuid(job.id),
+            SqlVal::text(&job.scope),
+            SqlVal::text(&job.image),
+            SqlVal::text(&job.status),
+            SqlVal::I32(job.max_unavailable),
+            SqlVal::Bool(job.control_plane_last),
+            SqlVal::Bool(job.cancel_requested),
+            SqlVal::OptText(job.created_by.clone()),
+            SqlVal::OptText(job.error.clone()),
+            SqlVal::DateTime(job.created_at),
+            SqlVal::DateTime(job.updated_at),
+        ],
     )
-    .bind(job.id)
-    .bind(&job.scope)
-    .bind(&job.image)
-    .bind(&job.status)
-    .bind(job.max_unavailable)
-    .bind(job.control_plane_last)
-    .bind(job.cancel_requested)
-    .bind(&job.created_by)
-    .bind(&job.error)
-    .bind(job.created_at)
-    .bind(job.updated_at)
-    .execute(pool)
     .await?;
     Ok(())
 }
 
-pub async fn insert_target(pool: &SqlitePool, t: &UpgradeJobTarget) -> Result<(), AppError> {
-    sqlx::query(
+pub async fn insert_target(pool: &DbPool, t: &UpgradeJobTarget) -> Result<(), AppError> {
+    pool.execute(
         "INSERT INTO upgrade_job_targets (id, job_id, cluster_id, machine_id, address, machine_type, status, error, sort_order, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        &[
+            SqlVal::Uuid(t.id),
+            SqlVal::Uuid(t.job_id),
+            SqlVal::Uuid(t.cluster_id),
+            SqlVal::Uuid(t.machine_id),
+            SqlVal::OptText(t.address.clone()),
+            SqlVal::OptText(t.machine_type.clone()),
+            SqlVal::text(&t.status),
+            SqlVal::OptText(t.error.clone()),
+            SqlVal::I32(t.sort_order),
+            SqlVal::DateTime(t.updated_at),
+        ],
     )
-    .bind(t.id)
-    .bind(t.job_id)
-    .bind(t.cluster_id)
-    .bind(t.machine_id)
-    .bind(&t.address)
-    .bind(&t.machine_type)
-    .bind(&t.status)
-    .bind(&t.error)
-    .bind(t.sort_order)
-    .bind(t.updated_at)
-    .execute(pool)
     .await?;
     Ok(())
 }
 
-pub async fn get_job(pool: &SqlitePool, id: Uuid) -> Result<Option<UpgradeJob>, AppError> {
-    Ok(sqlx::query_as::<_, UpgradeJob>("SELECT * FROM upgrade_jobs WHERE id = ?")
-        .bind(id)
-        .fetch_optional(pool)
-        .await?)
+pub async fn get_job(pool: &DbPool, id: Uuid) -> Result<Option<UpgradeJob>, AppError> {
+    pool.fetch_optional_as(
+        "SELECT * FROM upgrade_jobs WHERE id = ?",
+        &[SqlVal::Uuid(id)],
+    )
+    .await
 }
 
-pub async fn list_jobs(pool: &SqlitePool, limit: i64) -> Result<Vec<UpgradeJob>, AppError> {
-    Ok(sqlx::query_as::<_, UpgradeJob>(
+pub async fn list_jobs(pool: &DbPool, limit: i64) -> Result<Vec<UpgradeJob>, AppError> {
+    pool.fetch_all_as(
         "SELECT * FROM upgrade_jobs ORDER BY created_at DESC LIMIT ?",
+        &[SqlVal::I64(limit)],
     )
-    .bind(limit)
-    .fetch_all(pool)
-    .await?)
+    .await
 }
 
-pub async fn list_targets(pool: &SqlitePool, job_id: Uuid) -> Result<Vec<UpgradeJobTarget>, AppError> {
-    Ok(sqlx::query_as::<_, UpgradeJobTarget>(
+pub async fn list_targets(pool: &DbPool, job_id: Uuid) -> Result<Vec<UpgradeJobTarget>, AppError> {
+    pool.fetch_all_as(
         "SELECT * FROM upgrade_job_targets WHERE job_id = ? ORDER BY sort_order ASC",
+        &[SqlVal::Uuid(job_id)],
     )
-    .bind(job_id)
-    .fetch_all(pool)
-    .await?)
+    .await
 }
 
 pub async fn update_job_status(
-    pool: &SqlitePool,
+    pool: &DbPool,
     id: Uuid,
     status: &str,
     error: Option<&str>,
 ) -> Result<(), AppError> {
-    sqlx::query("UPDATE upgrade_jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?")
-        .bind(status)
-        .bind(error)
-        .bind(Utc::now())
-        .bind(id)
-        .execute(pool)
-        .await?;
+    pool.execute(
+        "UPDATE upgrade_jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+        &[
+            SqlVal::text(status),
+            SqlVal::OptText(error.map(|s| s.to_string())),
+            SqlVal::DateTime(Utc::now()),
+            SqlVal::Uuid(id),
+        ],
+    )
+    .await?;
     Ok(())
 }
 
-pub async fn request_cancel(pool: &SqlitePool, id: Uuid) -> Result<(), AppError> {
-    sqlx::query("UPDATE upgrade_jobs SET cancel_requested = 1, updated_at = ? WHERE id = ?")
-        .bind(Utc::now())
-        .bind(id)
-        .execute(pool)
-        .await?;
+pub async fn request_cancel(pool: &DbPool, id: Uuid) -> Result<(), AppError> {
+    pool.execute(
+        "UPDATE upgrade_jobs SET cancel_requested = 1, updated_at = ? WHERE id = ?",
+        &[SqlVal::DateTime(Utc::now()), SqlVal::Uuid(id)],
+    )
+    .await?;
     Ok(())
 }
 
 pub async fn update_target_status(
-    pool: &SqlitePool,
+    pool: &DbPool,
     id: Uuid,
     status: &str,
     error: Option<&str>,
 ) -> Result<(), AppError> {
-    sqlx::query(
+    pool.execute(
         "UPDATE upgrade_job_targets SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+        &[
+            SqlVal::text(status),
+            SqlVal::OptText(error.map(|s| s.to_string())),
+            SqlVal::DateTime(Utc::now()),
+            SqlVal::Uuid(id),
+        ],
     )
-    .bind(status)
-    .bind(error)
-    .bind(Utc::now())
-    .bind(id)
-    .execute(pool)
     .await?;
     Ok(())
 }
 
-pub async fn list_pending_jobs(pool: &SqlitePool) -> Result<Vec<UpgradeJob>, AppError> {
-    Ok(sqlx::query_as::<_, UpgradeJob>(
+pub async fn list_pending_jobs(pool: &DbPool) -> Result<Vec<UpgradeJob>, AppError> {
+    pool.fetch_all_as(
         "SELECT * FROM upgrade_jobs WHERE status IN ('pending', 'running') ORDER BY created_at ASC",
+        &[],
     )
-    .fetch_all(pool)
-    .await?)
+    .await
 }

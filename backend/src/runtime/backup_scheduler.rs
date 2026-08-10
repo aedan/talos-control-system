@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use sqlx::SqlitePool;
+use crate::db::pool::DbPool;
 use tracing::{info, warn};
 
 use crate::controllers::cluster::ClusterController;
@@ -10,7 +10,7 @@ use crate::utils::audit;
 
 /// Spawn a background loop that creates etcd backups for scheduled clusters.
 pub fn spawn_backup_scheduler(
-    pool: SqlitePool,
+    pool: DbPool,
     sqlite_path: String,
     jwt_secret: String,
 ) -> tokio::task::JoinHandle<()> {
@@ -19,8 +19,16 @@ pub fn spawn_backup_scheduler(
         let interval = Duration::from_secs(15 * 60);
         info!("Etcd backup scheduler started (interval {:?})", interval);
         loop {
-            if let Err(e) = run_once(&pool, &sqlite_path, &jwt_secret).await {
-                warn!(error = %e, "Backup scheduler tick failed");
+            match crate::runtime::ha::try_acquire(&pool, "backup_scheduler", 120).await {
+                Ok(true) => {
+                    if let Err(e) = run_once(&pool, &sqlite_path, &jwt_secret).await {
+                        warn!(error = %e, "Backup scheduler tick failed");
+                    }
+                }
+                Ok(false) => {
+                    // Follower: skip work
+                }
+                Err(e) => warn!(error = %e, "HA lock acquire failed (backup)"),
             }
             tokio::time::sleep(interval).await;
         }
@@ -28,7 +36,7 @@ pub fn spawn_backup_scheduler(
 }
 
 async fn run_once(
-    pool: &SqlitePool,
+    pool: &DbPool,
     sqlite_path: &str,
     jwt_secret: &str,
 ) -> Result<(), crate::AppError> {

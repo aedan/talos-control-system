@@ -18,10 +18,11 @@ use crate::runtime::cache::AppCache;
 
 pub struct AppState {
     pub config: Arc<crate::config::Config>,
-    pub db_pool: sqlx::SqlitePool,
+    pub db_pool: crate::db::DbPool,
     pub branding: Arc<BrandingManager>,
     pub event_bus: Arc<EventBus>,
     pub cache: AppCache,
+    pub siderolink_wg: Arc<crate::network::SiderolinkWg>,
 }
 
 impl Clone for AppState {
@@ -32,6 +33,7 @@ impl Clone for AppState {
             branding: Arc::clone(&self.branding),
             event_bus: Arc::clone(&self.event_bus),
             cache: self.cache.clone(),
+            siderolink_wg: Arc::clone(&self.siderolink_wg),
         }
     }
 }

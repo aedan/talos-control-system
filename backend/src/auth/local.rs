@@ -2,7 +2,7 @@ use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
-use sqlx::SqlitePool;
+use crate::db::pool::DbPool;
 use crate::db::models::auth::User;
 use crate::db::repos::user;
 use crate::AppError;
@@ -29,7 +29,7 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, AppError> {
 }
 
 pub async fn authenticate_local(
-    pool: &SqlitePool,
+    pool: &DbPool,
     email: &str,
     password: &str,
 ) -> Result<User, AppError> {
@@ -63,7 +63,7 @@ pub async fn authenticate_local(
 }
 
 pub async fn change_password(
-    pool: &SqlitePool,
+    pool: &DbPool,
     user_id: uuid::Uuid,
     new_password: &str,
 ) -> Result<(), AppError> {

@@ -847,6 +847,152 @@ pub async fn upgrade_machine(
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetMachineRequest {
+    #[serde(default)]
+    pub confirm: bool,
+    #[serde(default = "default_true_reset")]
+    pub graceful: bool,
+    #[serde(default = "default_true_reset")]
+    pub reboot: bool,
+}
+
+fn default_true_reset() -> bool {
+    true
+}
+
+/// Destructive machine reset/wipe via Talos Reset RPC.
+pub async fn reset_machine(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+    Json(payload): Json<ResetMachineRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    if !payload.confirm {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "confirm must be true for machine reset".into(),
+        ));
+    }
+    let controller = controller_for(&state);
+    controller
+        .reset_machine(id, payload.graceful, payload.reboot)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "machine_reset",
+        &id.to_string(),
+        &format!("graceful={} reboot={}", payload.graceful, payload.reboot),
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "ok": true, "action": "reset" })))
+}
+
+pub async fn bootstrap_machine(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    let controller = controller_for(&state);
+    controller
+        .bootstrap_machine(id)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "bootstrap",
+        &id.to_string(),
+        "",
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "ok": true, "action": "bootstrap" })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleWorkersRequest {
+    pub desired_workers: i32,
+}
+
+pub async fn scale_cluster_workers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+    Json(payload): Json<ScaleWorkersRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    let controller = controller_for(&state);
+    let cluster = controller
+        .scale_workers(id, payload.desired_workers)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "scale_workers",
+        &id.to_string(),
+        &format!("desired={}", payload.desired_workers),
+    )
+    .await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "clusterId": cluster.id,
+        "workerSize": cluster.worker_size,
+        "note": "Inventory desired size updated. Apply worker configs out-of-band then import/register machines.",
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyProvisionConfigRequest {
+    pub machine_id: Uuid,
+    pub config_yaml: String,
+}
+
+/// Apply a generated provision config to a machine (greenfield assist).
+pub async fn apply_provision_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ApplyProvisionConfigRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    if payload.config_yaml.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "configYaml required".into()));
+    }
+    let controller = controller_for(&state);
+    controller
+        .apply_machine_config(payload.machine_id, &payload.config_yaml)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "apply_provision_config",
+        &payload.machine_id.to_string(),
+        "",
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 pub async fn get_machine_version(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
@@ -1155,7 +1301,13 @@ pub async fn oidc_authorize(
     }
 
     let state_param = Uuid::new_v4().to_string();
-    crate::auth::TcsOidcProvider::remember_state(&state_param);
+    // Prefer DB-backed state for multi-replica HA; fall back to in-memory.
+    if crate::db::repos::oidc_state::remember(&state.db_pool, &state_param, 600)
+        .await
+        .is_err()
+    {
+        crate::auth::TcsOidcProvider::remember_state(&state_param);
+    }
 
     let provider = crate::auth::TcsOidcProvider::new(oidc_config.clone())
         .await
@@ -1185,7 +1337,10 @@ pub async fn oidc_callback(
         return Err((StatusCode::BAD_GATEWAY, "OIDC is disabled".to_string()));
     }
 
-    if !crate::auth::TcsOidcProvider::take_state(&params.state) {
+    let db_ok = crate::db::repos::oidc_state::take(&state.db_pool, &params.state)
+        .await
+        .unwrap_or(false);
+    if !db_ok && !crate::auth::TcsOidcProvider::take_state(&params.state) {
         return Err((
             StatusCode::BAD_REQUEST,
             "Invalid or expired OIDC state (CSRF check failed)".to_string(),
@@ -1779,10 +1934,13 @@ pub async fn get_system_info(
             "clusterProvision": true,
             "provisionConfigFactory": true,
             "siderolink": true,
-            "siderolinkWireguard": false,
+            "siderolinkWireguard": true,
             "saml": true,
             "multiTenantBranding": true,
-            "postgres": false,
+            "postgres": true,
+            "multiReplicaHa": true,
+            "machineReset": true,
+            "provisionLifecycle": true,
         }),
     })
 }
@@ -2053,20 +2211,22 @@ pub async fn delete_user(
         .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
     // Don't allow deleting the last admin
-    let admins: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM users WHERE role = 'admin'"
-    )
-    .fetch_one(&state.db_pool)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let admins = state
+        .db_pool
+        .fetch_scalar_i64("SELECT COUNT(*) FROM users WHERE role = 'admin'", &[])
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if user.role == "admin" && admins <= 1 {
         return Err((StatusCode::BAD_REQUEST, "Cannot delete the last admin user".to_string()));
     }
 
-    sqlx::query("DELETE FROM users WHERE id = ?")
-        .bind(id)
-        .execute(&state.db_pool)
+    state
+        .db_pool
+        .execute(
+            "DELETE FROM users WHERE id = ?",
+            &[crate::db::SqlVal::Uuid(id)],
+        )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -2883,6 +3043,10 @@ pub async fn siderolink_register(
     crate::db::repos::siderolink::upsert_peer(&state.db_pool, &peer)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let wg_ok = state
+        .siderolink_wg
+        .set_peer(&peer.public_key, &peer.assigned_ip)
+        .is_ok();
     // Best-effort mark machine connected if inventory exists
     if let Ok(machines) = repos::machine::list(&state.db_pool).await {
         for mut m in machines {
@@ -2902,7 +3066,14 @@ pub async fn siderolink_register(
             "peerId": peer.id,
             "assignedIp": peer.assigned_ip,
             "systemUuid": peer.system_uuid,
-            "note": "WireGuard data path not yet implemented; use assigned IP for inventory only",
+            "wireguard": {
+                "enabled": state.siderolink_wg.enabled() && wg_ok,
+                "serverPublicKey": state.siderolink_wg.server_public_key(),
+                "endpoint": state.siderolink_wg.endpoint_hint(),
+                "listenPort": state.siderolink_wg.listen_port(),
+                "allowedIps": "100.64.0.0/10",
+                "persistentKeepalive": 25,
+            },
         })),
     ))
 }

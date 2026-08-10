@@ -17,15 +17,16 @@ TCS runs **on a management host** (systemd binary). It is **not** deployed with 
 - Real etcd snapshots (download, schedule, retention, disaster-recovery restore)
 - Machine version probe, reboot, upgrade
 - Cluster / fleet **rolling upgrade jobs** (max-unavailable, control-plane-last)
-- Greenfield **config factory** (talosctl gen config or template stub — not metal provision)
-- Siderolink **inventory** (join tokens + peer register; no WireGuard path yet)
+- Greenfield config factory + apply/bootstrap/scale helpers (metal still external)
+- Machine reset (Talos wipe) with confirm
+- Siderolink inventory + **WireGuard** (host `wg`/`ip` when available)
+- **Postgres** dual-backend runtime (SQLite default)
+- Multi-replica HA foundation (scheduler locks + shared OIDC state)
 
 ## What does **not** work yet
 
-- Bare-metal provision / scale / destroy
-- Siderolink WireGuard data path
-- Postgres **application runtime** (SQLite only; optional schema bootstrap — see docs/POSTGRES.md)
-- Multi-replica HA TCS
+- Full bare-metal PXE/IPMI orchestration
+- Automatic SQLite→Postgres data migrator
 - In-cluster / Helm deployment (by design)
 
 ## Quick start

@@ -51,7 +51,7 @@ kube = { version = "0.94", features = ["rustls-tls"] }
 k8s-openapi = { version = "0.22", features = ["v1_30"] }
 serde_yaml = "0.9"
 async-trait = "0.1"
-x25519-dalek = "2"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 rand = "0.8"
 base64 = "0.22"
 hex = "0.4"
