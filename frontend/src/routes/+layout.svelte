@@ -1,7 +1,7 @@
 <script lang="ts">
   import { branding, applyBranding } from '$lib/stores/branding';
   import Logo from '$lib/branding/components/Logo.svelte';
-  import { goto } from '$app/navigation';
+  import { afterNavigate, goto } from '$app/navigation';
   import { onMount } from 'svelte';
   import type { Snippet } from 'svelte';
 
@@ -10,6 +10,7 @@
   let authenticated = $state(false);
   let checking = $state(true);
   let user = $state<any>(null);
+  let authGen = 0;
 
   async function checkAuth() {
     if (typeof window === 'undefined') {
@@ -17,41 +18,61 @@
       return;
     }
 
-    // Never redirect on /login
+    const gen = ++authGen;
+    checking = true;
+
+    // Login route: no shell chrome; do not require a token.
     if (window.location.pathname === '/login') {
-      checking = false;
+      authenticated = false;
+      user = null;
+      if (gen === authGen) checking = false;
       return;
     }
 
     const token = localStorage.getItem('tcs_token');
     if (!token) {
+      authenticated = false;
+      user = null;
+      if (gen === authGen) checking = false;
       goto('/login');
       return;
     }
 
     try {
       const res = await fetch('/api/auth/me', {
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}` }
       });
+      if (gen !== authGen) return;
       if (!res.ok) {
         localStorage.removeItem('tcs_token');
+        authenticated = false;
+        user = null;
+        checking = false;
         goto('/login');
         return;
       }
       user = await res.json();
       authenticated = true;
     } catch {
+      if (gen !== authGen) return;
       localStorage.removeItem('tcs_token');
+      authenticated = false;
+      user = null;
       goto('/login');
     } finally {
-      checking = false;
+      if (gen === authGen) checking = false;
     }
   }
 
   onMount(async () => {
     const m = await import('$lib/stores/branding');
     m.fetchBranding();
-    await checkAuth();
+  });
+
+  // Re-run after every navigation (including login → /). Root layout stays
+  // mounted across client-side goto(), so onMount alone never re-auths.
+  afterNavigate(() => {
+    void checkAuth();
   });
 
   $effect(() => {
@@ -60,6 +81,8 @@
 
   async function handleLogout() {
     localStorage.removeItem('tcs_token');
+    authenticated = false;
+    user = null;
     goto('/login');
   }
 </script>

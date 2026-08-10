@@ -46,7 +46,9 @@
       }
       const data = await res.json();
       localStorage.setItem('tcs_token', data.token);
-      goto('/');
+      // Client navigation so the root layout re-runs auth via afterNavigate
+      // and paints the app shell (sidebar) without a full reload.
+      await goto('/', { invalidateAll: true });
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Authentication failed';
     } finally {
