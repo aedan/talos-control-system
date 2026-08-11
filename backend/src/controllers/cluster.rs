@@ -613,6 +613,172 @@ impl ClusterController {
         client.apply_config(config_yaml).await
     }
 
+    /// Fetch live machine config from the node (requires address + talosconfig).
+    pub async fn get_live_machine_config(&self, machine_id: Uuid) -> Result<String, AppError> {
+        let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
+        let client = self.client_for_machine(&cluster, &machine).await?;
+        client.get_machine_config().await
+    }
+
+    /// Desired (saved) config YAML for a machine, if any.
+    pub async fn get_desired_machine_config(
+        &self,
+        machine_id: Uuid,
+    ) -> Result<Option<String>, AppError> {
+        let m = crate::db::repos::machine::get(&self.pool, machine_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Machine {machine_id} not found")))?;
+        Ok(m.desired_config.filter(|s| !s.trim().is_empty()))
+    }
+
+    /// Save desired machine config working copy (does not apply to node).
+    pub async fn set_desired_machine_config(
+        &self,
+        machine_id: Uuid,
+        config_yaml: &str,
+    ) -> Result<(), AppError> {
+        if config_yaml.trim().is_empty() {
+            return Err(AppError::InvalidInput("configYaml required".into()));
+        }
+        if !config_yaml.contains("machine:") && !config_yaml.contains("cluster:") {
+            return Err(AppError::InvalidInput(
+                "config does not look like a Talos machine config".into(),
+            ));
+        }
+        let mut m = crate::db::repos::machine::get(&self.pool, machine_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Machine {machine_id} not found")))?;
+        m.desired_config = Some(config_yaml.to_string());
+        m.updated_at = chrono::Utc::now();
+        crate::db::repos::machine::update(&self.pool, &m).await?;
+        Ok(())
+    }
+
+    /// Apply config to node. Prefer body yaml, else desired, else error.
+    pub async fn apply_machine_config_ex(
+        &self,
+        machine_id: Uuid,
+        config_yaml: Option<&str>,
+        dry_run: bool,
+        reboot: bool,
+        merge_with_live: bool,
+    ) -> Result<serde_json::Value, AppError> {
+        let mut yaml = if let Some(y) = config_yaml.filter(|s| !s.trim().is_empty()) {
+            y.to_string()
+        } else {
+            self.get_desired_machine_config(machine_id)
+                .await?
+                .ok_or_else(|| {
+                    AppError::InvalidInput(
+                        "No configYaml provided and no desired_config saved".into(),
+                    )
+                })?
+        };
+
+        // Optionally inject install disk from inventory
+        let machine = crate::db::repos::machine::get(&self.pool, machine_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Machine {machine_id} not found")))?;
+        if !machine.install_disk.is_empty() {
+            yaml = inject_install_disk(&yaml, &machine.install_disk);
+        }
+
+        if merge_with_live {
+            let (cluster, m) = self.cluster_and_machine(machine_id).await?;
+            let client = self.client_for_machine(&cluster, &m).await?;
+            let live = client.get_machine_config().await?;
+            yaml = crate::integration::talos::merge_yaml_docs_into_machine_config(&live, &yaml)?;
+        }
+
+        let (cluster, m) = self.cluster_and_machine(machine_id).await?;
+        let client = self.client_for_machine(&cluster, &m).await?;
+        client
+            .apply_config_with_options(&yaml, dry_run, reboot)
+            .await?;
+
+        if !dry_run {
+            // Keep desired in sync with what we applied
+            let mut m = m;
+            m.desired_config = Some(yaml.clone());
+            m.updated_at = chrono::Utc::now();
+            let _ = crate::db::repos::machine::update(&self.pool, &m).await;
+        }
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "dryRun": dry_run,
+            "reboot": reboot,
+            "bytes": yaml.len(),
+        }))
+    }
+
+    /// Merge structured helpers into desired (or live base) and save.
+    pub async fn apply_machine_config_helpers(
+        &self,
+        machine_id: Uuid,
+        install_image: Option<&str>,
+        network_yaml: Option<&str>,
+        extra_mounts_yaml: Option<&str>,
+        hostname: Option<&str>,
+        base_from_live: bool,
+    ) -> Result<String, AppError> {
+        let mut base = if let Some(d) = self.get_desired_machine_config(machine_id).await? {
+            d
+        } else if base_from_live {
+            self.get_live_machine_config(machine_id).await?
+        } else {
+            return Err(AppError::InvalidInput(
+                "No desired config yet — load live config first or paste a full YAML".into(),
+            ));
+        };
+
+        let mut patches: Vec<(String, String, i32)> = Vec::new();
+        if let Some(img) = install_image.map(str::trim).filter(|s| !s.is_empty()) {
+            // YAML string value for image
+            patches.push((
+                "/machine/install/image".into(),
+                format!("\"{img}\""),
+                10,
+            ));
+        }
+        if let Some(h) = hostname.map(str::trim).filter(|s| !s.is_empty()) {
+            patches.push((
+                "/machine/network/hostname".into(),
+                format!("\"{h}\""),
+                10,
+            ));
+        }
+        if let Some(net) = network_yaml.map(str::trim).filter(|s| !s.is_empty()) {
+            // Merge network document under machine.network
+            let patch = if net.contains("machine:") || net.trim_start().starts_with("network:") {
+                net.to_string()
+            } else {
+                format!("machine:\n  network:\n{}", indent_yaml(net, 4))
+            };
+            base = crate::integration::talos::merge_yaml_docs_into_machine_config(&base, &patch)?;
+        }
+        if let Some(mounts) = extra_mounts_yaml.map(str::trim).filter(|s| !s.is_empty()) {
+            // Expect list of extraMounts items or full kubelet.extraMounts
+            let patch = if mounts.contains("extraMounts:") || mounts.contains("machine:") {
+                if mounts.contains("machine:") {
+                    mounts.to_string()
+                } else {
+                    format!("machine:\n  kubelet:\n{}", indent_yaml(mounts, 4))
+                }
+            } else {
+                // assume raw sequence of mounts
+                format!("machine:\n  kubelet:\n    extraMounts:\n{}", indent_yaml(mounts, 6))
+            };
+            base = crate::integration::talos::merge_yaml_docs_into_machine_config(&base, &patch)?;
+        }
+        if !patches.is_empty() {
+            base = crate::integration::talos::merge_patches_into_machine_config(&base, &patches)?;
+        }
+
+        self.set_desired_machine_config(machine_id, &base).await?;
+        Ok(base)
+    }
+
     /// Scale worker inventory desired size and emit worker config for additional nodes.
     pub async fn scale_workers(
         &self,
@@ -916,6 +1082,20 @@ impl ClusterController {
             "results": results,
         }))
     }
+}
+
+fn indent_yaml(yaml: &str, spaces: usize) -> String {
+    let pad = " ".repeat(spaces);
+    yaml.lines()
+        .map(|l| {
+            if l.trim().is_empty() {
+                String::new()
+            } else {
+                format!("{pad}{l}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Rewrite `machine.install.disk` in Talos machine config YAML.

@@ -64,6 +64,11 @@ PUT /api/machines/{id}
 | Generate machine configs | `POST /api/clusters/generate-config` | greenfield assist (`talosctl` or stub) |
 | Apply provision config | `POST /api/provision/apply-config` | `{ "machineId", "configYaml" }` |
 | Apply config patches | `POST /api/clusters/{id}/config/apply` | optional `{ "dry_run": true }` |
+| Get desired machine config | `GET /api/machines/{id}/config` | working copy in TCS DB |
+| Get live machine config | `GET /api/machines/{id}/config/live` | COSI from node |
+| Save desired machine config | `PUT /api/machines/{id}/config` | `{ "configYaml" }` |
+| Apply machine config | `POST /api/machines/{id}/config/apply` | dryRun, reboot, mergeWithLive |
+| Config helpers (image/net/mounts) | `POST /api/machines/{id}/config/helpers` | merges into desired |
 | Etcd snapshot | `POST /api/clusters/{id}/backups` | control-plane node |
 | Download snapshot | `GET /api/clusters/{id}/backups/{id}/download` | |
 | Restore snapshot | `POST /api/clusters/{id}/backups/{id}/restore` | see below |

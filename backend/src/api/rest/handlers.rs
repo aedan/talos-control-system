@@ -2855,6 +2855,7 @@ pub struct CreateConfigPatchRequest {
     pub value: String,
     #[serde(default)]
     pub priority: i32,
+    pub machine_id: Option<Uuid>,
 }
 
 pub async fn list_config_patches(
@@ -2890,12 +2891,13 @@ pub async fn create_config_patch(
         Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
 
-    let patch = crate::db::models::config_patch::ConfigPatch::new(
+    let mut patch = crate::db::models::config_patch::ConfigPatch::new(
         cluster_id,
         payload.path,
         payload.value,
         payload.priority,
     );
+    patch.machine_id = payload.machine_id;
 
     match repos::config_patch::create(&state.db_pool, &patch).await {
         Ok(p) => match serde_json::to_value(p) {
@@ -4306,6 +4308,172 @@ pub async fn cancel_provision_job(
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+
+// ─── Per-machine Talos config editor ───────────────────────────────────
+
+pub async fn get_machine_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _ = extract_claims(&headers)?;
+    let ctrl = controller_for(&state);
+    let desired = ctrl
+        .get_desired_machine_config(id)
+        .await
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    let live_ok = ctrl.get_live_machine_config(id).await.is_ok();
+    Ok(Json(serde_json::json!({
+        "machineId": id,
+        "hasDesired": desired.is_some(),
+        "desiredConfig": desired,
+        "liveReachable": live_ok,
+    })))
+}
+
+pub async fn get_machine_config_live(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _ = extract_claims(&headers)?;
+    let ctrl = controller_for(&state);
+    let yaml = ctrl
+        .get_live_machine_config(id)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "machineId": id,
+        "configYaml": yaml,
+        "source": "live",
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PutMachineConfigRequest {
+    pub config_yaml: String,
+}
+
+pub async fn put_machine_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<PutMachineConfigRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    let ctrl = controller_for(&state);
+    ctrl.set_desired_machine_config(id, &payload.config_yaml)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "save_machine_config",
+        &id.to_string(),
+        "",
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "ok": true, "bytes": payload.config_yaml.len() })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyMachineConfigRequest {
+    pub config_yaml: Option<String>,
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default)]
+    pub reboot: bool,
+    /// If true, strategic-merge body/desired onto live config before apply.
+    #[serde(default)]
+    pub merge_with_live: bool,
+}
+
+pub async fn apply_machine_config_editor(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<ApplyMachineConfigRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    let ctrl = controller_for(&state);
+    let res = ctrl
+        .apply_machine_config_ex(
+            id,
+            payload.config_yaml.as_deref(),
+            payload.dry_run,
+            payload.reboot,
+            payload.merge_with_live,
+        )
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "apply_machine_config",
+        &id.to_string(),
+        if payload.dry_run { "dry_run" } else { "apply" },
+    )
+    .await;
+    Ok(Json(res))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineConfigHelpersRequest {
+    pub install_image: Option<String>,
+    pub network_yaml: Option<String>,
+    pub extra_mounts_yaml: Option<String>,
+    pub hostname: Option<String>,
+    /// When no desired config exists, pull live as base.
+    #[serde(default = "default_true")]
+    pub base_from_live: bool,
+}
+
+pub async fn machine_config_helpers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<MachineConfigHelpersRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    let ctrl = controller_for(&state);
+    let yaml = ctrl
+        .apply_machine_config_helpers(
+            id,
+            payload.install_image.as_deref(),
+            payload.network_yaml.as_deref(),
+            payload.extra_mounts_yaml.as_deref(),
+            payload.hostname.as_deref(),
+            payload.base_from_live,
+        )
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "machine_config_helpers",
+        &id.to_string(),
+        "",
+    )
+    .await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "desiredConfig": yaml,
+        "bytes": yaml.len(),
+    })))
 }
 
 // ─── Inventory import ──────────────────────────────────────────────────
