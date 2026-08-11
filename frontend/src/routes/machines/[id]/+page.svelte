@@ -34,15 +34,30 @@
   let bmcPassword = $state('');
   let bmcType = $state('auto');
   let editMac = $state('');
+  let editHostname = $state('');
+  let editMachineType = $state('worker');
+  let editInstallDisk = $state('');
+  let editClusterId = $state('');
+  let clusters = $state<Array<{ id: string; name: string }>>([]);
 
   onMount(async () => {
     try {
       machine = (await client.get(`/machines/${$page.params.id}`)) as Machine;
       editAddress = machine.address || '';
       editMac = machine.macAddress || '';
+      editHostname = machine.hostname || '';
+      editMachineType = machine.machineType || 'worker';
+      editInstallDisk = machine.installDisk || '';
+      editClusterId = machine.clusterId || '';
       bmcAddress = machine.bmcAddress || '';
       bmcUsername = machine.bmcUsername || '';
       bmcType = machine.bmcType || 'auto';
+      try {
+        const cl = (await client.get('/clusters')) as Array<{ id: string; name: string }>;
+        clusters = cl || [];
+      } catch {
+        clusters = [];
+      }
       try {
         bmcStatus = (await client.get(`/machines/${$page.params.id}/bmc`)) as typeof bmcStatus;
       } catch {
@@ -133,6 +148,30 @@
       success('Address updated');
     } catch (e: unknown) {
       notifyError(e instanceof Error ? e.message : 'Failed to update address');
+    } finally {
+      actionBusy = false;
+    }
+  }
+
+  async function saveInventory() {
+    actionBusy = true;
+    try {
+      const body: Record<string, unknown> = {
+        hostname: editHostname.trim(),
+        machineType: editMachineType,
+        address: editAddress.trim(),
+        macAddress: editMac.trim(),
+        installDisk: editInstallDisk.trim(),
+      };
+      if (editClusterId.trim()) {
+        body.clusterId = editClusterId.trim();
+      } else {
+        body.clearCluster = true;
+      }
+      machine = (await client.put(`/machines/${$page.params.id}`, body)) as Machine;
+      success('Inventory saved');
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Failed to save inventory');
     } finally {
       actionBusy = false;
     }
@@ -251,23 +290,49 @@
 
     <div class="info-grid">
       <div class="info-section">
-        <h2>Identity</h2>
+        <h2>Inventory</h2>
         <div class="info-row"><span class="label">System UUID</span><span class="value mono">{machine.systemUuid}</span></div>
-        <div class="info-row"><span class="label">Cluster</span><span class="value mono">{machine.clusterId || '—'}</span></div>
+        <div class="info-row"><span class="label">Status</span><span class="value">{machine.status}</span></div>
         <div class="info-row"><span class="label">Talos</span><span class="value">{machine.talosVersion || '—'}</span></div>
-        <div class="info-row"><span class="label">Secure boot</span><span class="value">{machine.secureBoot ? 'Yes' : 'No'}</span></div>
         <div class="info-row"><span class="label">Created</span><span class="value">{machine.createdAt ? new Date(machine.createdAt).toLocaleString() : '—'}</span></div>
+        <div class="form-row">
+          <label>Hostname<input type="text" bind:value={editHostname} placeholder="cp-1" /></label>
+        </div>
+        <div class="form-row">
+          <label>
+            Role
+            <select bind:value={editMachineType}>
+              <option value="controlplane">controlplane</option>
+              <option value="control-plane">control-plane</option>
+              <option value="worker">worker</option>
+            </select>
+          </label>
+        </div>
+        <div class="form-row">
+          <label>
+            Cluster
+            <select bind:value={editClusterId}>
+              <option value="">— none —</option>
+              {#each clusters as c (c.id)}
+                <option value={c.id}>{c.name}</option>
+              {/each}
+            </select>
+          </label>
+        </div>
+        <div class="form-row">
+          <label>MAC<input type="text" bind:value={editMac} placeholder="aa:bb:cc:dd:ee:ff" /></label>
+        </div>
+        <div class="form-row">
+          <label>Address<input type="text" bind:value={editAddress} placeholder="10.0.0.2 or host:50000" /></label>
+        </div>
+        <div class="form-row">
+          <label>Install disk<input type="text" bind:value={editInstallDisk} placeholder="/dev/sda" /></label>
+        </div>
+        <Button variant="primary" size="sm" onclick={saveInventory} disabled={actionBusy}>Save inventory</Button>
       </div>
 
       <div class="info-section">
-        <h2>Talos connectivity</h2>
-        <div class="form-row">
-          <label>
-            Address
-            <input type="text" bind:value={editAddress} placeholder="10.0.0.2 or host:50000" />
-          </label>
-          <Button variant="secondary" size="sm" onclick={saveAddress} disabled={actionBusy}>Save</Button>
-        </div>
+        <h2>Talos ops</h2>
         <div class="form-row">
           <label>
             Upgrade image
@@ -275,6 +340,10 @@
           </label>
           <Button variant="secondary" size="sm" onclick={upgrade} disabled={actionBusy}>Upgrade</Button>
         </div>
+        <p class="muted-hint">
+          Network and other machine config for an existing cluster: open the cluster →
+          <strong>Config</strong> tab and apply path patches (e.g. <code>/machine/network</code>), then reboot if needed.
+        </p>
       </div>
 
       <div class="info-section">
@@ -290,9 +359,6 @@
         {#if bmcStatus?.error}
           <div class="error" style="margin:0.5rem 0">{bmcStatus.error}</div>
         {/if}
-        <div class="form-row">
-          <label>MAC<input type="text" bind:value={editMac} placeholder="aa:bb:cc:dd:ee:ff" /></label>
-        </div>
         <div class="form-row">
           <label>BMC address<input type="text" bind:value={bmcAddress} placeholder="192.168.1.100" /></label>
         </div>
@@ -409,6 +475,12 @@
     padding: 1rem;
     color: var(--tcs-error);
     margin-bottom: 1rem;
+  }
+  .muted-hint {
+    font-size: 0.8rem;
+    color: var(--tcs-text-muted);
+    margin: 0.75rem 0 0;
+    line-height: 1.4;
   }
   .status-badge, .type-badge {
     font-size: 0.75rem;

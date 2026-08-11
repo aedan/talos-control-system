@@ -3,6 +3,7 @@ pub mod machine;
 pub mod config;
 pub mod upgrade;
 pub mod provision;
+pub mod inventory;
 
 pub use cluster::ClusterController;
 pub use machine::MachineController;

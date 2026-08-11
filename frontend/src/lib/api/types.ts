@@ -34,8 +34,14 @@ export interface Machine {
   bmcUsername?: string;
   bmcType?: string;
   lastPowerState?: string;
+  hasBmc?: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export function machineHasBmc(m: Partial<Machine>): boolean {
+  if (typeof m.hasBmc === 'boolean') return m.hasBmc;
+  return !!(m.bmcAddress && m.bmcAddress.trim());
 }
 
 export interface ClusterBackup {

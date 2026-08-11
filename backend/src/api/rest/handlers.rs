@@ -436,7 +436,7 @@ pub async fn list_machines(
         }
     };
 
-    let vals: Result<Vec<_>, _> = machines.into_iter().map(serde_json::to_value).collect();
+    let vals: Result<Vec<_>, _> = machines.iter().map(machine_to_json).collect();
     match vals {
         Ok(v) => Ok(Json(v)),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
@@ -554,12 +554,23 @@ pub async fn delete_cluster_access(
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn machine_to_json(machine: &crate::db::models::machine::Machine) -> Result<serde_json::Value, serde_json::Error> {
+    let mut v = serde_json::to_value(machine)?;
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert(
+            "hasBmc".to_string(),
+            serde_json::Value::Bool(machine.has_bmc()),
+        );
+    }
+    Ok(v)
+}
+
 pub async fn get_machine(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     match repos::machine::get(&state.db_pool, id).await {
-        Ok(Some(machine)) => match serde_json::to_value(machine) {
+        Ok(Some(machine)) => match machine_to_json(&machine) {
             Ok(v) => Ok(Json(v)),
             Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
         },
@@ -1112,6 +1123,8 @@ pub struct UpdateMachineRequest {
     pub address: Option<String>,
     pub machine_type: Option<String>,
     pub cluster_id: Option<Uuid>,
+    /// When true, detach machine from any cluster (overrides cluster_id).
+    pub clear_cluster: Option<bool>,
     pub mac_address: Option<String>,
     pub hostname: Option<String>,
     pub install_disk: Option<String>,
@@ -1135,7 +1148,10 @@ pub async fn update_machine(
         m.machine_type = t;
         changed = true;
     }
-    if let Some(c) = payload.cluster_id {
+    if payload.clear_cluster == Some(true) {
+        m.cluster_id = None;
+        changed = true;
+    } else if let Some(c) = payload.cluster_id {
         m.cluster_id = Some(c);
         changed = true;
     }
@@ -1158,7 +1174,7 @@ pub async fn update_machine(
     let m = repos::machine::update(&state.db_pool, &m)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    serde_json::to_value(m)
+    machine_to_json(&m)
         .map(Json)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
@@ -2821,16 +2837,9 @@ pub async fn get_cluster_machines(
         Ok(machines) => {
             let mut result = Vec::new();
             for machine in machines {
-                let mut map = serde_json::Map::new();
-                let mval = serde_json::to_value(&machine)
+                let v = machine_to_json(&machine)
                     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-                if let Some(obj) = mval.as_object() {
-                    for (k, v) in obj {
-                        map.insert(k.clone(), v.clone());
-                    }
-                }
-                map.insert("cluster_id".to_string(), serde_json::Value::String(cluster_id.to_string()));
-                result.push(serde_json::Value::Object(map));
+                result.push(v);
             }
             Ok(Json(result))
         }
@@ -3928,8 +3937,157 @@ pub async fn metal_status(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let _ = extract_claims(&headers)?;
-    let m = &state.config.metal;
+    let m = if let Some(rt) = &state.metal_runtime {
+        rt.snapshot().await
+    } else {
+        state.config.metal.clone()
+    };
     Ok(Json(serde_json::json!({
+        "enabled": m.enabled,
+        "liveReload": state.metal_runtime.is_some(),
+        "dhcp": {
+            "enabled": m.dhcp.enabled,
+            "interface": m.dhcp.interface,
+            "bindIp": m.dhcp.bind_ip,
+            "subnet": m.dhcp.subnet,
+            "rangeStart": m.dhcp.range_start,
+            "rangeEnd": m.dhcp.range_end,
+            "gateway": m.dhcp.gateway,
+            "dns": m.dhcp.dns,
+            "allowUnknown": m.dhcp.allow_unknown,
+            "leaseTtlSecs": m.dhcp.lease_ttl_secs,
+        },
+        "pxe": {
+            "enabled": m.pxe.enabled,
+            "httpPort": m.pxe.http_port,
+            "assetDir": m.pxe.asset_dir,
+            "defaultTalosVersion": m.pxe.default_talos_version,
+            "extraCmdline": m.pxe.extra_cmdline,
+        },
+        "bmc": {
+            "connectTimeoutSecs": m.bmc.connect_timeout_secs,
+            "preferRedfish": m.bmc.prefer_redfish,
+        },
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateMetalConfigRequest {
+    pub enabled: Option<bool>,
+    pub dhcp: Option<UpdateMetalDhcp>,
+    pub pxe: Option<UpdateMetalPxe>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateMetalDhcp {
+    pub enabled: Option<bool>,
+    pub interface: Option<String>,
+    pub bind_ip: Option<String>,
+    pub subnet: Option<String>,
+    pub range_start: Option<String>,
+    pub range_end: Option<String>,
+    pub gateway: Option<String>,
+    pub dns: Option<Vec<String>>,
+    pub allow_unknown: Option<bool>,
+    pub lease_ttl_secs: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateMetalPxe {
+    pub enabled: Option<bool>,
+    pub http_port: Option<u16>,
+    pub asset_dir: Option<String>,
+    pub default_talos_version: Option<String>,
+    pub extra_cmdline: Option<String>,
+}
+
+pub async fn update_metal_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateMetalConfigRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" {
+        return Err((StatusCode::FORBIDDEN, "admin required".into()));
+    }
+    let Some(rt) = &state.metal_runtime else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Metal runtime not available".into(),
+        ));
+    };
+    let mut m = rt.snapshot().await;
+    if let Some(e) = payload.enabled {
+        m.enabled = e;
+    }
+    if let Some(d) = payload.dhcp {
+        if let Some(v) = d.enabled {
+            m.dhcp.enabled = v;
+        }
+        if let Some(v) = d.interface {
+            m.dhcp.interface = v;
+        }
+        if let Some(v) = d.bind_ip {
+            m.dhcp.bind_ip = v;
+        }
+        if let Some(v) = d.subnet {
+            m.dhcp.subnet = v;
+        }
+        if let Some(v) = d.range_start {
+            m.dhcp.range_start = v;
+        }
+        if let Some(v) = d.range_end {
+            m.dhcp.range_end = v;
+        }
+        if let Some(v) = d.gateway {
+            m.dhcp.gateway = v;
+        }
+        if let Some(v) = d.dns {
+            m.dhcp.dns = v;
+        }
+        if let Some(v) = d.allow_unknown {
+            m.dhcp.allow_unknown = v;
+        }
+        if let Some(v) = d.lease_ttl_secs {
+            m.dhcp.lease_ttl_secs = v;
+        }
+    }
+    if let Some(p) = payload.pxe {
+        if let Some(v) = p.enabled {
+            m.pxe.enabled = v;
+        }
+        if let Some(v) = p.http_port {
+            m.pxe.http_port = v;
+        }
+        if let Some(v) = p.asset_dir {
+            m.pxe.asset_dir = v;
+        }
+        if let Some(v) = p.default_talos_version {
+            m.pxe.default_talos_version = v;
+        }
+        if let Some(v) = p.extra_cmdline {
+            m.pxe.extra_cmdline = v;
+        }
+    }
+    let m = rt
+        .write_overlay_and_apply(m)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "update_metal_config",
+        "metal",
+        &format!("dhcp={} pxe={}", m.dhcp.enabled, m.pxe.enabled),
+    )
+    .await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "applied": true,
+        "restartRequired": false,
         "enabled": m.enabled,
         "dhcp": {
             "enabled": m.dhcp.enabled,
@@ -3946,10 +4104,6 @@ pub async fn metal_status(
             "httpPort": m.pxe.http_port,
             "assetDir": m.pxe.asset_dir,
             "defaultTalosVersion": m.pxe.default_talos_version,
-        },
-        "bmc": {
-            "connectTimeoutSecs": m.bmc.connect_timeout_secs,
-            "preferRedfish": m.bmc.prefer_redfish,
         },
     })))
 }
@@ -4152,4 +4306,73 @@ pub async fn cancel_provision_job(
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ─── Inventory import ──────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InventoryImportRequest {
+    pub format: String,
+    pub content: String,
+    pub cluster_id: Option<Uuid>,
+    pub create_cluster: Option<bool>,
+    pub create_cluster_name: Option<String>,
+    #[serde(default = "default_true")]
+    pub upsert_by_mac: bool,
+}
+
+pub async fn preview_machine_import(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<InventoryImportRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _ = extract_claims(&headers)?;
+    let doc = crate::controllers::inventory::parse_inventory(&payload.format, &payload.content)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let preview = crate::controllers::inventory::preview_inventory(&doc);
+    serde_json::to_value(preview)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+pub async fn import_machines(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<InventoryImportRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    let doc = crate::controllers::inventory::parse_inventory(&payload.format, &payload.content)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let create_name = if payload.create_cluster.unwrap_or(false) {
+        payload
+            .create_cluster_name
+            .or_else(|| doc.cluster.as_ref().and_then(|c| c.name.clone()))
+    } else {
+        None
+    };
+    let result = crate::controllers::inventory::apply_inventory(
+        &state.db_pool,
+        &state.config.auth.jwt_secret,
+        &doc,
+        payload.cluster_id,
+        payload.upsert_by_mac,
+        create_name.as_deref(),
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "import_machines",
+        &format!("created={} updated={}", result.created, result.updated),
+        "",
+    )
+    .await;
+    serde_json::to_value(result)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
