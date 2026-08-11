@@ -26,6 +26,22 @@ pub struct ProvisionController {
     jwt_secret: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct NetworkConfigParams {
+    pub bond_name: String,
+    pub bond_interfaces: Vec<String>,
+    pub bond_mode: String,
+    pub bond_miimon: u32,
+    pub bond_lacp_rate: String,
+    pub vlan_name: String,
+    pub vlan_interface: String,
+    pub vlan_id: u32,
+    pub subnet: String,
+    pub gateway: String,
+    pub dns: Vec<String>,
+    pub mtu: Option<u32>,
+}
+
 impl ProvisionController {
     pub fn new(pool: DbPool, jwt_secret: String) -> Self {
         Self { pool, jwt_secret }
@@ -39,6 +55,11 @@ impl ProvisionController {
         talos_version: &str,
         kubernetes_version: &str,
         cluster_id: Option<Uuid>,
+        network_config: Option<NetworkConfigParams>,
+        install_disk: &str,
+        wipe: bool,
+        cert_sans: &[String],
+        cluster_domain: &str,
     ) -> Result<ProvisionArtifact, AppError> {
         if name.trim().is_empty() || endpoint.trim().is_empty() {
             return Err(AppError::InvalidInput(
@@ -51,6 +72,11 @@ impl ProvisionController {
             endpoint,
             talos_version,
             kubernetes_version,
+            network_config.as_ref(),
+            install_disk,
+            wipe,
+            cert_sans,
+            cluster_domain,
         )?;
 
         let secrets_enc = secrets::encrypt(&self.jwt_secret, &secrets.talosconfig_yaml)?;
@@ -123,8 +149,17 @@ fn generate_talos_secrets(
     endpoint: &str,
     talos_version: &str,
     kubernetes_version: &str,
+    network_config: Option<&NetworkConfigParams>,
+    install_disk: &str,
+    wipe: bool,
+    cert_sans: &[String],
+    cluster_domain: &str,
 ) -> Result<GeneratedSecrets, AppError> {
-    let ep = endpoint.trim_start_matches("https://").trim_start_matches("http://");
+    let ep = endpoint
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches(":6443")
+        .trim_end_matches(':');
 
     let cabs = CaBundle {
         machine_ca: generate_ca_issuer(&format!("{cluster_name}-talos-ca"), 3650)?,
@@ -133,8 +168,20 @@ fn generate_talos_secrets(
         etcd_ca: generate_ca_issuer(&format!("{cluster_name}-etcd-ca"), 3650)?,
     };
 
+    let mut cert_san_list: Vec<String> = vec![
+        "127.0.0.1".into(),
+        "localhost".into(),
+        ep.to_string(),
+    ];
+    for s in cert_sans {
+        if !cert_san_list.contains(s) {
+            cert_san_list.push(s.clone());
+        }
+    }
+    let sans_refs: Vec<&str> = cert_san_list.iter().map(|s| s.as_str()).collect();
+
     let (api_cert, _api_key) =
-        generate_server_cert(&cabs.k8s_ca, "apiserver-kubelet-client", &[ep], 365)?;
+        generate_server_cert(&cabs.k8s_ca, "apiserver-kubelet-client", &sans_refs, 365)?;
 
     let sa_key_pem = generate_rsa2048_pem()?;
 
@@ -165,6 +212,11 @@ fn generate_talos_secrets(
         ep,
         kubernetes_version,
         &install_image,
+        network_config,
+        install_disk,
+        wipe,
+        &cert_san_list,
+        cluster_domain,
     );
 
     let worker_yaml = build_worker_yaml(
@@ -175,6 +227,11 @@ fn generate_talos_secrets(
         &kube_token,
         ep,
         &install_image,
+        network_config,
+        install_disk,
+        wipe,
+        &cert_san_list,
+        cluster_domain,
     );
 
     let talosconfig_yaml = build_talosconfig_yaml(
@@ -286,6 +343,79 @@ fn bootstrap_token() -> String {
     format!("{p}.{s}")
 }
 
+// ── Network YAML helpers ─────────────────────────────────────────────────
+
+fn render_network_yaml(nc: &NetworkConfigParams) -> String {
+    let mut yaml = String::from("  network:\n    interfaces:\n");
+
+    // Physical NICs (bare, no IP)
+    for iface in &nc.bond_interfaces {
+        yaml.push_str(&format!("      - deviceSelector:\n          hardwareMac: {{}}\n        dhcp: false\n        name: {iface}\n"));
+    }
+
+    // Bond interface
+    let bond_mode_name = match nc.bond_mode.as_str() {
+        "802.3ad" | "lacp" => "802.3ad",
+        "active-backup" => "active-backup",
+        _ => "802.3ad",
+    };
+
+    yaml.push_str(&format!(
+        "      - interfaces:\n{}",
+        nc.bond_interfaces.iter()
+            .map(|i| format!("          - {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    ));
+
+    yaml.push_str(&format!(
+        "        bond:\n          mode: {bond_mode}\n          miimon: {miimon}",
+        bond_mode = bond_mode_name,
+        miimon = nc.bond_miimon,
+    ));
+
+    if nc.bond_lacp_rate.is_empty() {
+        yaml.push('\n');
+    } else {
+        yaml.push_str(&format!("\n          lacpRate: {}", nc.bond_lacp_rate));
+    }
+
+    yaml.push_str(&format!(
+        "\n        name: {bond_name}\n",
+        bond_name = nc.bond_name,
+    ));
+
+    if let Some(m) = nc.mtu {
+        yaml.push_str(&format!("        mtu: {m}\n"));
+    }
+
+    // VLAN interface (no IP yet, just the VLAN)
+    yaml.push_str(&format!(
+        "      - interface: {bond_name}\n        vlan:\n          id: {vlan_id}\n        name: {vlan_name}\n",
+        bond_name = nc.bond_name,
+        vlan_id = nc.vlan_id,
+        vlan_name = nc.vlan_name,
+    ));
+
+    // IP config on the VLAN interface
+    let dns_entries: String = nc.dns.iter()
+        .map(|d| format!("          - {d}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let subnet_cidr = nc.subnet.rfind('/').and_then(|idx| nc.subnet[idx+1..].parse::<u32>().ok()).unwrap_or(26);
+
+    yaml.push_str(&format!(
+        "      - deviceSelector:\n          hardwareMac: {{}}\n        name: {vlan_name}\n        dhcp: false\n        addresses:\n          - __IP__/{subnet_cidr}\n        routes:\n          - network: 0.0.0.0/0\n            gateway: {gateway}\n        dns:\n          servers:\n{dns}\n",
+        vlan_name = nc.vlan_name,
+        subnet_cidr = subnet_cidr,
+        gateway = nc.gateway,
+        dns = dns_entries,
+    ));
+
+    yaml
+}
+
 // ── YAML rendering ──────────────────────────────────────────────────────
 
 fn build_controlplane_yaml(
@@ -307,9 +437,30 @@ fn build_controlplane_yaml(
     endpoint: &str,
     k8s_version: &str,
     install_image: &str,
+    network_config: Option<&NetworkConfigParams>,
+    install_disk: &str,
+    wipe: bool,
+    cert_sans: &[String],
+    cluster_domain: &str,
 ) -> String {
     let k8s_ver = k8s_version.strip_prefix('v').unwrap_or(k8s_version);
     let sa_key_b64 = base64::engine::general_purpose::STANDARD.encode(sa_key.as_bytes());
+
+    let cert_sans_yaml = if cert_sans.is_empty() {
+        "  certSANs: []".to_string()
+    } else {
+        let entries: String = cert_sans.iter()
+            .map(|s| format!("    - {s}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("  certSANs:\n{entries}")
+    };
+
+    let network_yaml = if let Some(nc) = network_config {
+        render_network_yaml(nc)
+    } else {
+        String::new()
+    };
 
     format!(
         r#"# Generated by TCS - pure Rust PKI (v1alpha1)
@@ -322,13 +473,13 @@ machine:
   ca:
     crt: {mc_crt}
     key: {mc_key}
-  certSANs: []
+{cert_sans}
   kubelet:
     defaultRuntimeSeccompProfileEnabled: true
     disableManifestsDirectory: true
   install:
-    wipe: false
-    disk: /dev/sda
+    wipe: {wipe}
+    disk: {install_disk}
     image: {install_image}
   features:
     diskQuotaSupport: true
@@ -340,6 +491,7 @@ machine:
       forwardKubeDNSToHost: true
   nodeLabels:
     node.kubernetes.io/exclude-from-external-load-balancers: ""
+{network_yaml}
 cluster:
   id: {cid}
   secret: {csec}
@@ -347,7 +499,7 @@ cluster:
     endpoint: https://{ep}:6443
   clusterName: {name}
   network:
-    dnsDomain: cluster.local
+    dnsDomain: {cluster_domain}
     podSubnets:
       - 10.244.0.0/16
     serviceSubnets:
@@ -420,6 +572,11 @@ cluster:
         etcd_crt = b64_le(etcd_ca_crt),
         etcd_key = b64_le(etcd_ca_key),
         install_image = install_image,
+        install_disk = install_disk,
+        wipe = wipe,
+        cert_sans = cert_sans_yaml,
+        cluster_domain = cluster_domain,
+        network_yaml = network_yaml,
     )
 }
 
@@ -431,7 +588,28 @@ fn build_worker_yaml(
     kube_token: &str,
     endpoint: &str,
     install_image: &str,
+    network_config: Option<&NetworkConfigParams>,
+    install_disk: &str,
+    wipe: bool,
+    cert_sans: &[String],
+    cluster_domain: &str,
 ) -> String {
+    let cert_sans_yaml = if cert_sans.is_empty() {
+        "  certSANs: []".to_string()
+    } else {
+        let entries: String = cert_sans.iter()
+            .map(|s| format!("    - {s}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("  certSANs:\n{entries}")
+    };
+
+    let network_yaml = if let Some(nc) = network_config {
+        render_network_yaml(nc)
+    } else {
+        String::new()
+    };
+
     format!(
         r#"# Generated by TCS - worker config (v1alpha1)
 version: v1alpha1
@@ -440,13 +618,13 @@ persist: true
 machine:
   type: worker
   token: {machine_token}
-  certSANs: []
+{cert_sans}
   kubelet:
     defaultRuntimeSeccompProfileEnabled: true
     disableManifestsDirectory: true
   install:
-    wipe: false
-    disk: /dev/sda
+    wipe: {wipe}
+    disk: {install_disk}
     image: {install_image}
   features:
     diskQuotaSupport: true
@@ -458,6 +636,7 @@ machine:
       forwardKubeDNSToHost: true
   nodeLabels:
     node.kubernetes.io/exclude-from-external-load-balancers: ""
+{network_yaml}
 cluster:
   id: {cid}
   secret: {csec}
@@ -465,7 +644,7 @@ cluster:
     endpoint: https://{ep}:6443
   clusterName: {name}
   network:
-    dnsDomain: cluster.local
+    dnsDomain: {cluster_domain}
     podSubnets:
       - 10.244.0.0/16
     serviceSubnets:
@@ -485,6 +664,11 @@ cluster:
         name = name,
         ktok = kube_token,
         install_image = install_image,
+        install_disk = install_disk,
+        wipe = wipe,
+        cert_sans = cert_sans_yaml,
+        cluster_domain = cluster_domain,
+        network_yaml = network_yaml,
     )
 }
 

@@ -3441,6 +3441,27 @@ pub async fn saml_acs(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct NetworkConfigRequest {
+    pub bond_name: String,
+    pub bond_interfaces: Vec<String>,
+    pub bond_mode: String,
+    #[serde(default)]
+    pub bond_miimon: u32,
+    #[serde(default)]
+    pub bond_lacp_rate: String,
+    pub vlan_name: String,
+    pub vlan_interface: String,
+    pub vlan_id: u32,
+    pub subnet: String,
+    pub gateway: String,
+    #[serde(default)]
+    pub dns: Vec<String>,
+    #[serde(default)]
+    pub mtu: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GenerateConfigRequest {
     pub name: String,
     pub endpoint: String,
@@ -3449,6 +3470,16 @@ pub struct GenerateConfigRequest {
     #[serde(default = "default_k8s_ver")]
     pub kubernetes_version: String,
     pub cluster_id: Option<Uuid>,
+    #[serde(default)]
+    pub network: Option<NetworkConfigRequest>,
+    #[serde(default)]
+    pub install_disk: Option<String>,
+    #[serde(default)]
+    pub wipe: bool,
+    #[serde(default)]
+    pub cert_sans: Vec<String>,
+    #[serde(default)]
+    pub cluster_domain: String,
 }
 
 fn default_talos_ver() -> String { "v1.13.7".into() }
@@ -3464,6 +3495,22 @@ pub async fn generate_cluster_config(
         state.db_pool.clone(),
         state.config.auth.jwt_secret.clone(),
     );
+    let network_config = payload.network.as_ref().map(|n|
+        crate::controllers::provision::NetworkConfigParams {
+            bond_name: n.bond_name.clone(),
+            bond_interfaces: n.bond_interfaces.clone(),
+            bond_mode: n.bond_mode.clone(),
+            bond_miimon: n.bond_miimon,
+            bond_lacp_rate: n.bond_lacp_rate.clone(),
+            vlan_name: n.vlan_name.clone(),
+            vlan_interface: n.vlan_interface.clone(),
+            vlan_id: n.vlan_id,
+            subnet: n.subnet.clone(),
+            gateway: n.gateway.clone(),
+            dns: if n.dns.is_empty() { vec!["172.24.16.254".into()] } else { n.dns.clone() },
+            mtu: n.mtu,
+        }
+    );
     let art = ctrl
         .generate_config(
             &payload.name,
@@ -3471,6 +3518,11 @@ pub async fn generate_cluster_config(
             &payload.talos_version,
             &payload.kubernetes_version,
             payload.cluster_id,
+            network_config,
+            payload.install_disk.as_deref().unwrap_or("/dev/sda"),
+            payload.wipe,
+            &payload.cert_sans,
+            if payload.cluster_domain.is_empty() { "cluster.local" } else { &payload.cluster_domain },
         )
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;

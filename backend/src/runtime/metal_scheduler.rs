@@ -360,12 +360,19 @@ async fn load_config_yaml(
         let t = machine.machine_type.to_ascii_lowercase();
         t.contains("control")
     };
-    let yaml = if is_cp {
+    let mut yaml = if is_cp {
         art.controlplane_config
     } else {
         art.worker_config
     }
     .ok_or_else(|| AppError::InvalidInput("artifact missing config yaml".into()))?;
+
+    // Patch per-machine IP: replace __IP__ placeholder with machine's assigned address
+    if !machine.address.is_empty() {
+        let ip = machine.address.strip_suffix(":6443").unwrap_or(&machine.address);
+        yaml = yaml.replace("__IP__", ip);
+    }
+
     Ok(yaml)
 }
 
