@@ -25,6 +25,8 @@ pub struct AppState {
     pub siderolink_wg: Arc<crate::network::SiderolinkWg>,
     /// Present when the process started with HTTPS enabled (live cert reload).
     pub tls_runtime: Option<Arc<crate::cert::TlsRuntime>>,
+    /// Live metal DHCP/PXE config + service handles.
+    pub metal_runtime: Option<Arc<crate::network::MetalRuntime>>,
 }
 
 impl Clone for AppState {
@@ -37,6 +39,7 @@ impl Clone for AppState {
             cache: self.cache.clone(),
             siderolink_wg: Arc::clone(&self.siderolink_wg),
             tls_runtime: self.tls_runtime.clone(),
+            metal_runtime: self.metal_runtime.clone(),
         }
     }
 }

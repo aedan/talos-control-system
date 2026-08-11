@@ -6,6 +6,7 @@
   import Spinner from '$lib/components/Spinner.svelte';
 
   let loading = $state(true);
+  let saving = $state(false);
   let status = $state<any>(null);
   let profiles = $state<any[]>([]);
   let leases = $state<any[]>([]);
@@ -14,10 +15,45 @@
   let newVersion = $state('v1.13.7');
   let syncing = $state<string | null>(null);
 
+  // editable form
+  let enabled = $state(false);
+  let dhcpEnabled = $state(false);
+  let dhcpIface = $state('');
+  let dhcpBindIp = $state('');
+  let dhcpSubnet = $state('10.88.0.0/24');
+  let dhcpStart = $state('10.88.0.100');
+  let dhcpEnd = $state('10.88.0.200');
+  let dhcpGw = $state('10.88.0.1');
+  let dhcpDns = $state('10.88.0.1');
+  let dhcpAllowUnknown = $state(false);
+  let pxeEnabled = $state(false);
+  let pxePort = $state(6969);
+  let pxeAssetDir = $state('/var/lib/tcs/pxe');
+  let pxeTalos = $state('v1.13.7');
+
+  function fillForm(s: any) {
+    status = s;
+    enabled = !!s.enabled;
+    dhcpEnabled = !!s.dhcp?.enabled;
+    dhcpIface = s.dhcp?.interface || '';
+    dhcpBindIp = s.dhcp?.bindIp || '';
+    dhcpSubnet = s.dhcp?.subnet || '10.88.0.0/24';
+    dhcpStart = s.dhcp?.rangeStart || '10.88.0.100';
+    dhcpEnd = s.dhcp?.rangeEnd || '10.88.0.200';
+    dhcpGw = s.dhcp?.gateway || '10.88.0.1';
+    dhcpDns = (s.dhcp?.dns || []).join(', ') || '10.88.0.1';
+    dhcpAllowUnknown = !!s.dhcp?.allowUnknown;
+    pxeEnabled = !!s.pxe?.enabled;
+    pxePort = s.pxe?.httpPort || 6969;
+    pxeAssetDir = s.pxe?.assetDir || '/var/lib/tcs/pxe';
+    pxeTalos = s.pxe?.defaultTalosVersion || 'v1.13.7';
+  }
+
   async function refresh() {
     loading = true;
     try {
-      status = await client.get('/metal/status');
+      const s = await client.get('/settings/metal/config');
+      fillForm(s);
       const p = (await client.get('/pxe/profiles')) as { profiles?: any[] };
       profiles = p.profiles || [];
       const l = (await client.get('/metal/dhcp/leases')) as { leases?: any[] };
@@ -32,6 +68,49 @@
   }
 
   onMount(refresh);
+
+  async function applyConfig() {
+    if (dhcpEnabled && !dhcpIface.trim() && !dhcpBindIp.trim()) {
+      notifyError('DHCP requires interface or bind IP');
+      return;
+    }
+    saving = true;
+    try {
+      const res = (await client.put('/settings/metal/config', {
+        enabled,
+        dhcp: {
+          enabled: dhcpEnabled,
+          interface: dhcpIface.trim(),
+          bindIp: dhcpBindIp.trim(),
+          subnet: dhcpSubnet.trim(),
+          rangeStart: dhcpStart.trim(),
+          rangeEnd: dhcpEnd.trim(),
+          gateway: dhcpGw.trim(),
+          dns: dhcpDns
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean),
+          allowUnknown: dhcpAllowUnknown,
+        },
+        pxe: {
+          enabled: pxeEnabled,
+          httpPort: Number(pxePort) || 6969,
+          assetDir: pxeAssetDir.trim(),
+          defaultTalosVersion: pxeTalos.trim(),
+        },
+      })) as any;
+      success(
+        res.restartRequired
+          ? 'Saved (restart still required)'
+          : 'Metal config applied live (no process restart)'
+      );
+      await refresh();
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Apply failed');
+    } finally {
+      saving = false;
+    }
+  }
 
   async function createProfile() {
     try {
@@ -64,22 +143,42 @@
 <div class="metal-settings">
   <h1>Metal / PXE</h1>
   <p class="hint">
-    Full DHCP + PXE is configured in <code>/etc/tcs/config.toml</code> under
-    <code>[metal]</code>. Use a dedicated provisioning VLAN — DHCP is disabled by default.
+    Configure provisioning DHCP and PXE here. Changes write
+    <code>/var/lib/tcs/metal.toml</code> and rebind listeners <strong>without</strong>
+    restarting the TCS process. Use a dedicated provision VLAN.
   </p>
 
   {#if loading}
     <Spinner />
-  {:else if status}
+  {:else}
     <section class="card">
-      <h2>Runtime status</h2>
-      <div class="grid">
-        <div><span class="label">Metal master</span> {status.enabled ? 'on' : 'off'}</div>
-        <div><span class="label">DHCP</span> {status.dhcp?.enabled ? 'enabled' : 'disabled'} · {status.dhcp?.interface || '—'}</div>
-        <div><span class="label">DHCP range</span> {status.dhcp?.rangeStart} – {status.dhcp?.rangeEnd}</div>
-        <div><span class="label">PXE HTTP</span> {status.pxe?.enabled ? `:${status.pxe.httpPort}` : 'disabled'}</div>
-        <div><span class="label">Default Talos</span> {status.pxe?.defaultTalosVersion}</div>
-        <div><span class="label">Asset dir</span> <code>{status.pxe?.assetDir}</code></div>
+      <h2>Live configuration</h2>
+      {#if status?.liveReload}
+        <p class="ok">Live apply available</p>
+      {/if}
+      <div class="form-grid">
+        <label class="check"><input type="checkbox" bind:checked={enabled} /> Metal master enable</label>
+        <label class="check"><input type="checkbox" bind:checked={dhcpEnabled} /> DHCP enabled</label>
+        <label class="check"><input type="checkbox" bind:checked={pxeEnabled} /> PXE HTTP enabled</label>
+        <label>DHCP interface<input bind:value={dhcpIface} placeholder="eth1" /></label>
+        <label>DHCP bind IP<input bind:value={dhcpBindIp} placeholder="optional" /></label>
+        <label>Subnet CIDR<input bind:value={dhcpSubnet} /></label>
+        <label>Range start<input bind:value={dhcpStart} /></label>
+        <label>Range end<input bind:value={dhcpEnd} /></label>
+        <label>Gateway<input bind:value={dhcpGw} /></label>
+        <label>DNS (comma-separated)<input bind:value={dhcpDns} /></label>
+        <label class="check"
+          ><input type="checkbox" bind:checked={dhcpAllowUnknown} /> Allow unknown MACs</label
+        >
+        <label>PXE HTTP port<input type="number" bind:value={pxePort} /></label>
+        <label>Asset dir<input bind:value={pxeAssetDir} /></label>
+        <label>Default Talos version<input bind:value={pxeTalos} /></label>
+      </div>
+      <div class="row">
+        <Button variant="primary" onclick={applyConfig} disabled={saving}>
+          {saving ? 'Applying…' : 'Apply (no service restart)'}
+        </Button>
+        <Button variant="ghost" onclick={refresh}>Refresh</Button>
       </div>
     </section>
 
@@ -89,7 +188,6 @@
         <input bind:value={newName} placeholder="name" />
         <input bind:value={newVersion} placeholder="v1.13.7" />
         <Button variant="secondary" size="sm" onclick={createProfile}>Add profile</Button>
-        <Button variant="ghost" size="sm" onclick={refresh}>Refresh</Button>
       </div>
       <table class="data-table">
         <thead>
@@ -166,6 +264,7 @@
 
 <style>
   .hint { color: var(--tcs-text-muted); max-width: 48rem; }
+  .ok { color: #4ade80; font-size: 0.85rem; }
   .card {
     background: var(--tcs-surface);
     border: 1px solid var(--tcs-border);
@@ -173,14 +272,18 @@
     padding: 1rem 1.25rem;
     margin: 1rem 0;
   }
-  .grid {
+  .form-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
     gap: 0.75rem;
-    font-size: 0.9rem;
   }
-  .label { color: var(--tcs-text-muted); display: block; font-size: 0.75rem; }
-  .row { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.75rem; }
+  label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-size: 0.8rem;
+  }
+  label.check { flex-direction: row; align-items: center; gap: 0.5rem; }
   input {
     padding: 0.4rem 0.5rem;
     border-radius: 6px;
@@ -188,6 +291,7 @@
     background: var(--tcs-background);
     color: var(--tcs-text);
   }
+  .row { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; align-items: center; }
   .data-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
   .data-table th, .data-table td {
     text-align: left;

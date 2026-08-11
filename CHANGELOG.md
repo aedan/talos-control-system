@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+- Machine inventory **YAML/CSV import** (`/machines/import`, `POST /api/machines/import`)
+- Full machine inventory editor (hostname, role, cluster, MAC, address, install disk)
+- **Live metal config** apply via Settings UI (`/var/lib/tcs/metal.toml`, rebind DHCP/PXE without process restart)
+- Docs: `docs/INVENTORY.md`
+
 ## [0.4.0] — 2026-08-10
 
 ### Added

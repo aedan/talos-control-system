@@ -25,6 +25,8 @@ cluster.
 | **PXE + full DHCP** | **Supported (alpha)** | Dedicated provision iface; MAC allowlist; HTTP iPXE + assets |
 | **BMC Redfish / IPMI** | **Supported (alpha)** | Power + PXE-once; IPMI via ipmitool fallback |
 | **Metal provision jobs** | **Supported (alpha)** | BMC → PXE → wait installer → install → bootstrap |
+| **Inventory YAML/CSV import** | **Supported (alpha)** | Bulk MAC/BMC inventory; optional create cluster |
+| **Live metal config** | **Supported (alpha)** | Settings UI → `metal.toml` overlay; rebind DHCP/PXE without process restart |
 | Scale workers (desired size) | **Supported (alpha)** | Inventory target |
 | Machine reset / wipe | **Supported (alpha)** | Talos Reset RPC; requires confirm |
 | Live TLS cert reload | **Supported** | Self-signed ↔ LE ↔ provided without restart when HTTPS already up |

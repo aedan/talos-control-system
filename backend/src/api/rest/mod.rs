@@ -123,6 +123,11 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
             delete(handlers::delete_cluster_access),
         )
         .route("/machines", get(handlers::list_machines).post(handlers::create_machine))
+        .route(
+            "/machines/import/preview",
+            post(handlers::preview_machine_import),
+        )
+        .route("/machines/import", post(handlers::import_machines))
         .route("/machines/:id", get(handlers::get_machine))
         .route("/machines/:id", put(handlers::update_machine))
         .route("/machines/:id", delete(handlers::delete_machine))
@@ -140,6 +145,10 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route("/machines/:id/power", post(handlers::machine_power))
         .route("/machines/:id/boot-device", post(handlers::machine_boot_device))
         .route("/metal/status", get(handlers::metal_status))
+        .route(
+            "/settings/metal/config",
+            get(handlers::metal_status).put(handlers::update_metal_config),
+        )
         .route("/metal/dhcp/leases", get(handlers::list_dhcp_leases))
         .route("/pxe/profiles", get(handlers::list_pxe_profiles).post(handlers::create_pxe_profile))
         .route("/pxe/profiles/:id/sync", post(handlers::sync_pxe_profile))

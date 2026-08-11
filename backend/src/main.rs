@@ -163,6 +163,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let tls_enabled = config.tls.enabled && config.tls.mode != TlsMode::Disabled;
     let acme_store: AcmeChallengeStore = Arc::new(DashMap::new());
 
+    // Metal runtime: merge /var/lib/tcs/metal.toml overlay, own DHCP/PXE tasks
+    let metal_merged = talos_control_system::network::MetalRuntime::load_merged(
+        &config.metal,
+        std::path::Path::new(&data_dir),
+    );
+    let metal_runtime = talos_control_system::network::MetalRuntime::start(
+        db_pool.clone(),
+        config.metal.clone(),
+        &data_dir,
+    );
+
     // Placeholder runtime; filled in run_with_tls before serving
     let state = AppState {
         config: Arc::new(config.clone()),
@@ -172,6 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         cache: app_cache,
         siderolink_wg,
         tls_runtime: None,
+        metal_runtime: Some(metal_runtime),
     };
 
     let _backup_sched = talos_control_system::runtime::spawn_backup_scheduler(
@@ -185,59 +197,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config.auth.jwt_secret.clone(),
     );
     let _metal_sched = talos_control_system::runtime::spawn_metal_scheduler(
-        db_pool.clone(),
+        db_pool,
         config.database.sqlite_path.clone(),
         config.auth.jwt_secret.clone(),
-        config.metal.clone(),
+        metal_merged,
     );
-
-    // Metal PXE HTTP + DHCP (optional; disabled by default)
-    if config.metal.enabled || config.metal.pxe.enabled || config.metal.dhcp.enabled {
-        if let Err(e) = talos_control_system::network::pxe::ensure_default_profile(
-            &db_pool,
-            &config.metal.pxe,
-        )
-        .await
-        {
-            warn!(error = %e, "Failed to ensure default PXE profile");
-        }
-    }
-    let next_server = if !config.metal.dhcp.bind_ip.is_empty() {
-        config.metal.dhcp.bind_ip.parse().ok()
-    } else if !config.metal.dhcp.interface.is_empty() {
-        talos_control_system::network::dhcp::interface_ipv4(&config.metal.dhcp.interface)
-    } else {
-        None
-    };
-    let next_server = next_server.unwrap_or_else(|| std::net::Ipv4Addr::new(0, 0, 0, 0));
-    let http_boot_base = if next_server.is_unspecified() {
-        format!("http://127.0.0.1:{}", config.metal.pxe.http_port)
-    } else {
-        format!("http://{}:{}", next_server, config.metal.pxe.http_port)
-    };
-    let _pxe = talos_control_system::network::pxe::spawn_pxe_server(
-        db_pool.clone(),
-        config.metal.pxe.clone(),
-        &next_server.to_string(),
-    );
-    let _dhcp = talos_control_system::network::dhcp::spawn_dhcp_server(
-        db_pool,
-        talos_control_system::network::dhcp::DhcpServerConfig {
-            dhcp: config.metal.dhcp.clone(),
-            next_server,
-            http_boot_base,
-            boot_file: String::new(),
-        },
-    );
-    if config.metal.dhcp.enabled {
-        info!(
-            iface = %config.metal.dhcp.interface,
-            "Metal DHCP enabled — ensure dedicated provision VLAN"
-        );
-    }
-    if config.metal.pxe.enabled {
-        info!(port = config.metal.pxe.http_port, "Metal PXE HTTP enabled");
-    }
 
     if tls_enabled {
         run_with_tls(config, state, acme_store).await
