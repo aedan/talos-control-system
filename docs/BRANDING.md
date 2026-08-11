@@ -76,35 +76,18 @@ logo_path = "/app/branding/logo.svg"
 favicon_path = "/app/branding/favicon.svg"
 ```
 
-The paths are relative to the container or application root. For Docker/Kubernetes deployments, mount the files into the image:
+The paths are absolute paths on the host filesystem. For host deployments, place the files on disk and reference them:
 
-```dockerfile
-COPY branding/logo.svg /app/branding/logo.svg
-COPY branding/favicon.svg /app/branding/favicon.svg
+```bash
+sudo mkdir -p /etc/tcs/branding
+sudo cp logo.svg /etc/tcs/branding/logo.svg
+sudo cp favicon.svg /etc/tcs/branding/favicon.svg
 ```
 
-### Via Kubernetes ConfigMap
-
-```yaml
-apiVersion: v1
-kind: ConfigMap
-binaryData:
-  logo.svg: <base64-encoded-logo>
-  favicon.ico: <base64-encoded-favicon>
-metadata:
-  name: tcs-branding
-```
-
-```yaml
-# In your deployment:
-volumeMounts:
-  - name: branding
-    mountPath: /app/branding
-    readOnly: true
-volumes:
-  - name: branding
-    configMap:
-      name: tcs-branding
+```toml
+[branding]
+logo_path = "/etc/tcs/branding/logo.svg"
+favicon_path = "/etc/tcs/branding/favicon.svg"
 ```
 
 ### Via UI Upload

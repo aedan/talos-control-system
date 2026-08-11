@@ -110,8 +110,6 @@ sudo systemctl restart tcs
 # journalctl -u tcs | grep -i siderolink
 ```
 
-Set `TCS_SIDEROLINK_ENDPOINT` / `TCS_PUBLIC_HOST` if the advertised endpoint is not auto-correct.
-
 Or replace only the binary:
 
 ```bash

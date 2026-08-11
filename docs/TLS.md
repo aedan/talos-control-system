@@ -34,6 +34,7 @@ domains = ["localhost"]
 [tls.provided]
 cert_path = "/etc/tls/cert.pem"
 key_path = "/etc/tls/key.pem"
+# ca_path = "/etc/tls/ca.pem"   # optional CA chain
 ```
 
 ## ACME Challenges
@@ -129,6 +130,7 @@ mode = "provided"
 [tls.provided]
 cert_path = "/etc/tcs/tls/cert.pem"
 key_path = "/etc/tcs/tls/key.pem"
+# ca_path = "/etc/tls/ca.pem"   # optional CA chain
 ```
 
 Restart TCS after placing certificates:

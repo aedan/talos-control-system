@@ -70,7 +70,7 @@ Group patterns are case-insensitive. A single `*` wildcard is supported.
 ### OIDC
 
 - Authorization code flow via discovery (`/.well-known/openid-configuration`)
-- CSRF `state` is stored in-process (single-instance; multi-node needs sticky sessions or shared store)
+- CSRF `state` is **DB-backed** (`oidc_states` table), supporting multi-replica deployments
 - Query parameters are URL-encoded
 - Users auto-provisioned on first login with `default_role` (default `reader`)
 - Password login is rejected for existing `oidc` users (use the OIDC button)
@@ -105,7 +105,7 @@ If JWKS verification fails, TCS falls back to userinfo / unverified claims (logg
 
 **Known alpha limits:**
 
-- OIDC `state` is in-memory (lost on restart; not multi-replica)
+- OIDC `state` is DB-backed (`oidc_states` table), supporting multi-replica deployments
 - Only RSA JWKs (`n`/`e`) are supported for ID token verify
 - Browser callbacks inject the JWT into `localStorage` via a small HTML page
 

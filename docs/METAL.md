@@ -23,7 +23,7 @@ enabled = true
 [metal.dhcp]
 enabled = true
 interface = "eth1"              # REQUIRED — dedicated provision NIC
-# bind_ip = "10.88.0.1"         # optional; else interface primary
+bind_ip = "10.88.0.1"           # optional; else interface primary
 subnet = "10.88.0.0/24"
 range_start = "10.88.0.100"
 range_end = "10.88.0.200"
@@ -35,9 +35,11 @@ allow_unknown = false           # only inventory MACs get leases
 [metal.pxe]
 enabled = true
 http_port = 6969
+tftp_enabled = false
 asset_dir = "/var/lib/tcs/pxe"
 default_talos_version = "v1.13.7"
-# mirror_base = "https://github.com/siderolabs/talos/releases/download"
+mirror_base = "https://github.com/siderolabs/talos/releases/download"
+extra_cmdline = ""
 
 [metal.bmc]
 connect_timeout_secs = 15

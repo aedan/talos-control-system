@@ -121,6 +121,4 @@ PUT /api/clusters/{id}/backups/schedule
 
 ## Not implemented
 
-- Etcd **restore** automation  
-- Siderolink registration  
-- Generating new clusters from scratch  
+- Siderolink registration (use Talos Siderolink natively)  

@@ -9,7 +9,7 @@ http_port = 8081
 metrics_port = 9090
 
 [database]
-# Alpha: only "sqlite" is supported. "postgres" will refuse to start.
+# "sqlite" (default) or "postgres" (alpha, dual-backend runtime)
 backend = "sqlite"
 sqlite_path = "/var/lib/tcs/data.db"
 postgres_url = ""
@@ -67,9 +67,28 @@ favicon_path = ""
 docs_url = ""
 support_url = ""
 
+# TLS — disabled by default (HTTP-only on http_port)
 # [tls]
-# enabled = false
+# enabled = true
 # mode = "disabled"  # disabled | self_signed | provided | letsencrypt
+#
+# [tls.letsencrypt]
+# domains = ["tcs.example.com"]
+# email = "admin@example.com"
+# challenge_type = "http-01"
+#
+# [tls.letsencrypt.dns_provider]
+# provider = "cloudflare"
+# api_token = "your-token"
+# zone_id = "your-zone"
+#
+# [tls.self-signed]
+# domains = ["localhost", "tcs.local"]
+#
+# [tls.provided]
+# cert_path = "/etc/tls/cert.pem"
+# key_path = "/etc/tls/key.pem"
+# ca_path = "/etc/tls/ca.pem"   # optional CA chain
 
 # Bare-metal: full DHCP + PXE + BMC (off by default — use a dedicated provision VLAN)
 # [metal]
@@ -77,16 +96,23 @@ support_url = ""
 # [metal.dhcp]
 # enabled = true
 # interface = "eth1"
+# bind_ip = "10.88.0.1"         # optional; else interface primary
 # subnet = "10.88.0.0/24"
 # range_start = "10.88.0.100"
 # range_end = "10.88.0.200"
 # gateway = "10.88.0.1"
 # dns = ["10.88.0.1"]
+# lease_ttl_secs = 3600
 # allow_unknown = false
 # [metal.pxe]
 # enabled = true
 # http_port = 6969
+# tftp_enabled = false
 # asset_dir = "/var/lib/tcs/pxe"
 # default_talos_version = "v1.13.7"
+# mirror_base = "https://github.com/siderolabs/talos/releases/download"
+# extra_cmdline = ""
 # [metal.bmc]
 # connect_timeout_secs = 15
+# prefer_redfish = true
+# ipmi_interface = "lanplus"

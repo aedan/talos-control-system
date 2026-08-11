@@ -12,8 +12,8 @@ env:
 
 jobs:
   build:
-    name: Build (x86_64-linux)
-    runs-on: ubuntu-latest
+    name: Build (x86_64-linux, glibc 2.35 compat)
+    runs-on: ubuntu-22.04
     permissions:
       contents: write
 
