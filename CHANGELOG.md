@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-08-10
+
 ### Added
 - Machine inventory **YAML/CSV import** (`/machines/import`, `POST /api/machines/import`)
 - Full machine inventory editor (hostname, role, cluster, MAC, address, install disk)
