@@ -39,22 +39,22 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-registry-
+          key: ${{ runner.os }}-22.04-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-22.04-cargo-registry-
 
       - name: Cache cargo git
         uses: actions/cache@v4
         with:
           path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-22.04-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-22.04-cargo-
 
       - name: Cache cargo target
         uses: actions/cache@v4
         with:
           path: backend/target
-          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-target-
+          key: ${{ runner.os }}-22.04-cargo-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-22.04-cargo-target-
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -87,7 +87,9 @@ jobs:
         env:
           GIT_HASH: ${{ steps.meta.outputs.git_hash }}
           BUILD_TIME: ${{ steps.meta.outputs.build_time }}
-        run: cargo build --release --target x86_64-unknown-linux-gnu
+        run: |
+          cargo clean
+          cargo build --release --target x86_64-unknown-linux-gnu
 
       - name: Package self-extracting installer
         run: |
