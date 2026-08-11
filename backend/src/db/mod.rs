@@ -78,6 +78,10 @@ pub async fn run_migrations(pool: &DbPool) -> Result<(), AppError> {
             "012_metal_provisioning.sql",
             include_str!("migrations/012_metal_provisioning.sql"),
         ),
+        (
+            "013_desired_machine_config.sql",
+            include_str!("migrations/013_desired_machine_config.sql"),
+        ),
     ];
 
     for (name, sql) in migrations {

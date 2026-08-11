@@ -40,6 +40,27 @@
   let editClusterId = $state('');
   let clusters = $state<Array<{ id: string; name: string }>>([]);
 
+  // Machine config editor
+  let configYaml = $state('');
+  let configBusy = $state(false);
+  let liveReachable = $state(false);
+  let hasDesired = $state(false);
+  let installImageHelper = $state('');
+  let networkYamlHelper = $state(`# interfaces:
+#   - interface: eth0
+#     dhcp: true
+`);
+  let mountsYamlHelper = $state(`# - destination: /var/mnt/data
+#   type: bind
+#   source: /var/mnt/data
+#   options:
+#     - bind
+#     - rshared
+#     - rw
+`);
+  let applyReboot = $state(false);
+  let applyMergeLive = $state(false);
+
   onMount(async () => {
     try {
       machine = (await client.get(`/machines/${$page.params.id}`)) as Machine;
@@ -63,12 +84,109 @@
       } catch {
         /* optional */
       }
+      await loadDesiredConfig();
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Failed to load machine';
     } finally {
       loading = false;
     }
   });
+
+  async function loadDesiredConfig() {
+    try {
+      const res = (await client.get(`/machines/${$page.params.id}/config`)) as {
+        desiredConfig?: string | null;
+        hasDesired?: boolean;
+        liveReachable?: boolean;
+      };
+      hasDesired = !!res.hasDesired;
+      liveReachable = !!res.liveReachable;
+      if (res.desiredConfig) {
+        configYaml = res.desiredConfig;
+      }
+    } catch {
+      /* optional until cluster talosconfig set */
+    }
+  }
+
+  async function loadLiveConfig() {
+    configBusy = true;
+    try {
+      const res = (await client.get(`/machines/${$page.params.id}/config/live`)) as {
+        configYaml: string;
+      };
+      configYaml = res.configYaml || '';
+      liveReachable = true;
+      success('Loaded live machine config from node');
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Failed to load live config');
+    } finally {
+      configBusy = false;
+    }
+  }
+
+  async function saveDesiredConfig() {
+    if (!configYaml.trim()) {
+      notifyError('Config YAML is empty');
+      return;
+    }
+    configBusy = true;
+    try {
+      await client.put(`/machines/${$page.params.id}/config`, {
+        configYaml,
+      });
+      hasDesired = true;
+      success('Desired config saved (not applied to node yet)');
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Save failed');
+    } finally {
+      configBusy = false;
+    }
+  }
+
+  async function applyConfig(dryRun: boolean) {
+    configBusy = true;
+    try {
+      const res = (await client.post(`/machines/${$page.params.id}/config/apply`, {
+        configYaml: configYaml || undefined,
+        dryRun,
+        reboot: applyReboot,
+        mergeWithLive: applyMergeLive,
+      })) as { ok?: boolean; bytes?: number };
+      success(
+        dryRun
+          ? `Dry-run OK (${res.bytes ?? 0} bytes)`
+          : `Config applied${applyReboot ? ' (reboot requested)' : ''}`
+      );
+      if (!dryRun) hasDesired = true;
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Apply failed');
+    } finally {
+      configBusy = false;
+    }
+  }
+
+  async function applyHelpers() {
+    configBusy = true;
+    try {
+      const res = (await client.post(`/machines/${$page.params.id}/config/helpers`, {
+        installImage: installImageHelper.trim() || undefined,
+        networkYaml: networkYamlHelper.trim() || undefined,
+        extraMountsYaml: mountsYamlHelper.trim() || undefined,
+        hostname: editHostname.trim() || undefined,
+        baseFromLive: true,
+      })) as { desiredConfig?: string };
+      if (res.desiredConfig) {
+        configYaml = res.desiredConfig;
+        hasDesired = true;
+      }
+      success('Helpers merged into desired config — review YAML then Apply');
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Helper merge failed');
+    } finally {
+      configBusy = false;
+    }
+  }
 
   async function probeVersion() {
     actionBusy = true;
@@ -341,8 +459,8 @@
           <Button variant="secondary" size="sm" onclick={upgrade} disabled={actionBusy}>Upgrade</Button>
         </div>
         <p class="muted-hint">
-          Network and other machine config for an existing cluster: open the cluster →
-          <strong>Config</strong> tab and apply path patches (e.g. <code>/machine/network</code>), then reboot if needed.
+          Per-node network, mounts, and install image: use the <strong>Machine config</strong>
+          section below. Cluster-wide path patches remain under Cluster → Config.
         </p>
       </div>
 
@@ -385,6 +503,82 @@
         </div>
       </div>
     </div>
+
+    <section class="config-editor">
+      <h2>Machine config</h2>
+      <p class="muted-hint">
+        Edit the full Talos machine config for this node (network, mounts, install image for
+        factory/kernel modules, etc.). Save as desired copy, dry-run, then apply. Requires
+        cluster talosconfig and a reachable machine address for live/apply.
+        {#if hasDesired}<span class="badge">desired saved</span>{/if}
+        {#if liveReachable}<span class="badge ok">node reachable</span>{:else}<span class="badge">live unknown</span>{/if}
+      </p>
+
+      <div class="helper-grid">
+        <div class="info-section">
+          <h3>Helpers (merge into desired)</h3>
+          <label>
+            Install image (factory / custom installer)
+            <input
+              type="text"
+              bind:value={installImageHelper}
+              placeholder="factory.talos.dev/metal-installer/<schematic-id>:v1.13.7"
+            />
+          </label>
+          <label>
+            Network YAML (merged under machine.network)
+            <textarea bind:value={networkYamlHelper} rows="6" spellcheck="false"></textarea>
+          </label>
+          <label>
+            Extra mounts (kubelet.extraMounts list)
+            <textarea bind:value={mountsYamlHelper} rows="6" spellcheck="false"></textarea>
+          </label>
+          <Button variant="secondary" size="sm" onclick={applyHelpers} disabled={configBusy}>
+            Merge helpers into editor
+          </Button>
+        </div>
+        <div class="info-section full">
+          <div class="config-toolbar">
+            <Button variant="secondary" size="sm" onclick={loadLiveConfig} disabled={configBusy}
+              >Load live from node</Button
+            >
+            <Button variant="secondary" size="sm" onclick={loadDesiredConfig} disabled={configBusy}
+              >Reload desired</Button
+            >
+            <Button variant="secondary" size="sm" onclick={saveDesiredConfig} disabled={configBusy}
+              >Save desired</Button
+            >
+            <label class="check"
+              ><input type="checkbox" bind:checked={applyMergeLive} /> Merge with live on apply</label
+            >
+            <label class="check"
+              ><input type="checkbox" bind:checked={applyReboot} /> Reboot after apply</label
+            >
+            <Button variant="ghost" size="sm" onclick={() => applyConfig(true)} disabled={configBusy}
+              >Dry-run</Button
+            >
+            <Button variant="primary" size="sm" onclick={() => applyConfig(false)} disabled={configBusy}
+              >Apply to node</Button
+            >
+          </div>
+          <textarea
+            class="config-yaml"
+            bind:value={configYaml}
+            rows="22"
+            spellcheck="false"
+            placeholder="version: v1alpha1
+machine:
+  type: ...
+  network: ...
+  install:
+    image: ...
+    disk: ...
+cluster:
+  ..."
+          ></textarea>
+        </div>
+      </div>
+    </section>
 
     {#if servicesError}
       <div class="error">{servicesError}</div>
@@ -482,6 +676,53 @@
     margin: 0.75rem 0 0;
     line-height: 1.4;
   }
+  .config-editor {
+    margin: 1.5rem 0;
+  }
+  .config-editor h2 { margin: 0 0 0.5rem; }
+  .helper-grid {
+    display: grid;
+    grid-template-columns: minmax(240px, 1fr) 2fr;
+    gap: 1rem;
+  }
+  @media (max-width: 900px) {
+    .helper-grid { grid-template-columns: 1fr; }
+  }
+  .info-section.full { min-width: 0; }
+  .config-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    margin-bottom: 0.5rem;
+  }
+  .config-toolbar .check {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+  }
+  .config-yaml, .info-section textarea {
+    width: 100%;
+    font-family: ui-monospace, monospace;
+    font-size: 0.75rem;
+    padding: 0.5rem;
+    border-radius: 6px;
+    border: 1px solid var(--tcs-border);
+    background: var(--tcs-background);
+    color: var(--tcs-text);
+    box-sizing: border-box;
+  }
+  .info-section h3 { margin: 0 0 0.5rem; font-size: 0.95rem; }
+  .badge {
+    display: inline-block;
+    margin-left: 0.35rem;
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
+    border: 1px solid var(--tcs-border);
+    font-size: 0.7rem;
+  }
+  .badge.ok { color: #4ade80; border-color: #4ade80; }
   .status-badge, .type-badge {
     font-size: 0.75rem;
     padding: 0.2rem 0.5rem;

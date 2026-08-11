@@ -26,6 +26,11 @@ pub struct Machine {
     pub address: String,
     #[sqlx(rename = "install_disk")]
     pub install_disk: String,
+    /// Desired Talos machine config YAML (operator-edited working copy).
+    /// Not included in normal machine list JSON (use GET /machines/:id/config).
+    #[sqlx(rename = "desired_config")]
+    #[serde(skip_serializing)]
+    pub desired_config: Option<String>,
     #[sqlx(rename = "mac_address")]
     pub mac_address: String,
     #[sqlx(rename = "hostname")]
@@ -69,6 +74,7 @@ impl Machine {
             siderolink_connected: false,
             address: String::new(),
             install_disk: String::new(),
+            desired_config: None,
             mac_address: String::new(),
             hostname: String::new(),
             bmc_address: String::new(),

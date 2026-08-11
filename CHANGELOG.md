@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-08-11
+
+### Added
+- **Per-machine Talos config editor** — load live config, save desired YAML, helpers for install image / network / extra mounts, dry-run and apply (optional reboot)
+- APIs: `GET/PUT /machines/:id/config`, `GET .../config/live`, `POST .../config/apply`, `POST .../config/helpers`
+- Cluster config patches accept optional `machineId` for node-scoped patches
+
 ## [0.4.1] — 2026-08-10
 
 ### Added

@@ -64,13 +64,15 @@ Open **Machines → (row)** or **Cluster → Machines → (row)**.
 
 Editable: hostname, role, cluster, MAC, address, install disk, BMC credentials/power.
 
-## Network config on an existing managed cluster
+## Network / mounts / install image on a single node
 
-1. Ensure each machine has a reachable **address** and the cluster has **talosconfig**.
-2. **Cluster → Config**: add a patch path such as `/machine/network` with a YAML value.
-3. Dry-run → Apply (COSI merge, NoReboot). Reboot nodes if the change requires it.
+1. Open **Machines → (node)** → **Machine config**.
+2. **Load live from node** (needs talosconfig + address) or paste full YAML.
+3. Use **helpers** for install image (factory schematic with kernel modules), network
+   YAML, and kubelet extra mounts — or edit the full YAML directly.
+4. **Save desired** (DB only), **Dry-run**, then **Apply to node** (optional reboot).
 
-There is no MAAS-style network wizard yet.
+Cluster-wide path patches still work under **Cluster → Config** (`machineId` optional).
 
 ## MAAS (later)
 
