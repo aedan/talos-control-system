@@ -163,6 +163,7 @@ impl RedfishClient {
             .patch(self.system_url())
             .basic_auth(&self.username, Some(&self.password))
             .header(CONTENT_TYPE, "application/json")
+            .header("OData-Version", "4.0")
             .json(&body)
             .send()
             .await
