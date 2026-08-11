@@ -290,12 +290,28 @@ impl ClusterController {
         cluster: &Cluster,
         machine: &Machine,
     ) -> Result<TalosClient, AppError> {
+        self.client_for_machine_at(cluster, machine, None).await
+    }
+
+    /// Like [`Self::client_for_machine`] but with an explicit endpoint
+    /// override (used during PXE/installer phase when the machine only has
+    /// its DHCP lease address, not its post-install static one).
+    async fn client_for_machine_at(
+        &self,
+        cluster: &Cluster,
+        machine: &Machine,
+        endpoint_override: Option<&str>,
+    ) -> Result<TalosClient, AppError> {
         let creds = self.load_creds(cluster)?;
-        let addr = if machine.address.is_empty() {
-            None
-        } else {
-            Some(machine.address.as_str())
-        };
+        let addr = endpoint_override
+            .filter(|a| !a.is_empty())
+            .or_else(|| {
+                if machine.address.is_empty() {
+                    None
+                } else {
+                    Some(machine.address.as_str())
+                }
+            });
         TalosClient::for_machine(addr, &creds)
     }
 
@@ -544,9 +560,15 @@ impl ClusterController {
     }
 
     /// List disks available on a machine via the Talos Storage service.
-    pub async fn list_disks(&self, machine_id: Uuid) -> Result<Vec<serde_json::Value>, AppError> {
+    pub async fn list_disks(
+        &self,
+        machine_id: Uuid,
+        endpoint_override: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, AppError> {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
-        let client = self.client_for_machine(&cluster, &machine).await?;
+        let client = self
+            .client_for_machine_at(&cluster, &machine, endpoint_override)
+            .await?;
         let disks = client.list_disks().await?;
         Ok(disks.into_iter().map(|d| serde_json::json!({
             "deviceName": d.device_name,
@@ -577,6 +599,7 @@ impl ClusterController {
         &self,
         machine_id: Uuid,
         config_yaml: &str,
+        endpoint_override: Option<&str>,
     ) -> Result<(), AppError> {
         let (cluster, mut machine) = self.cluster_and_machine(machine_id).await?;
 
@@ -590,7 +613,9 @@ impl ClusterController {
         machine.updated_at = chrono::Utc::now();
         crate::db::repos::machine::update(&self.pool, &machine).await?;
 
-        let client = self.client_for_machine(&cluster, &machine).await?;
+        let client = self
+            .client_for_machine_at(&cluster, &machine, endpoint_override)
+            .await?;
         client
             .apply_config_with_options(&config_yaml, false, true)
             .await?;

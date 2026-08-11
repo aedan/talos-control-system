@@ -174,23 +174,30 @@ async fn run_job(
             save_progress(pool, job.id, "waiting_installer", &payload).await?;
         }
         "wait_installer" => {
-            // Prefer address; else DHCP lease
-            if machine.address.is_empty() {
-                if !machine.mac_address.is_empty() {
-                    if let Ok(Some(lease)) =
-                        repos::dhcp_lease::get_by_mac(pool, &machine.mac_address).await
-                    {
-                        machine.address = lease.ip.clone();
-                        machine.updated_at = Utc::now();
-                        let _ = repos::machine::update(pool, &machine).await;
-                        log(
-                            &mut payload,
-                            &format!("bound address from DHCP {}", lease.ip),
-                        );
-                    }
+            // During PXE boot the machine only has its DHCP lease address
+            // (installer lives on the provision network, e.g. eno1/192.168.1.x).
+            // Prefer the lease; fall back to the static post-install address.
+            let lease_ip = if !machine.mac_address.is_empty() {
+                repos::dhcp_lease::get_by_mac(pool, &machine.mac_address)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|l| l.ip)
+                    .filter(|ip| !ip.is_empty())
+            } else {
+                None
+            };
+            let boot_addr = lease_ip.clone().unwrap_or_else(|| machine.address.clone());
+            let endpoint: Option<String> = lease_ip;
+            if let Some(ref ip) = endpoint {
+                if machine.address.is_empty() || machine.address != *ip {
+                    log(
+                        &mut payload,
+                        &format!("installer at DHCP lease {ip} (static {})", machine.address),
+                    );
                 }
             }
-            if machine.address.is_empty() {
+            if boot_addr.is_empty() {
                 log(&mut payload, "waiting for machine address / DHCP lease");
                 save_progress(pool, job.id, "waiting_installer", &payload).await?;
                 return Ok(());
@@ -200,7 +207,7 @@ async fn run_job(
                 sqlite_path.to_string(),
                 jwt_secret.to_string(),
             );
-            match ctrl.list_disks(machine_id).await {
+            match ctrl.list_disks(machine_id, endpoint.as_deref()).await {
                 Ok(disks) => {
                     log(
                         &mut payload,
@@ -240,8 +247,22 @@ async fn run_job(
                 sqlite_path.to_string(),
                 jwt_secret.to_string(),
             );
+            // Installer still runs from PXE RAM: connect via DHCP lease if known.
+            let lease_ip = if !machine.mac_address.is_empty() {
+                repos::dhcp_lease::get_by_mac(pool, &machine.mac_address)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|l| l.ip)
+                    .filter(|ip| !ip.is_empty())
+            } else {
+                None
+            };
             let yaml = load_config_yaml(pool, &machine, &payload).await?;
-            match ctrl.install_machine(machine_id, &yaml).await {
+            match ctrl
+                .install_machine(machine_id, &yaml, lease_ip.as_deref())
+                .await
+            {
                 Ok(()) => {
                     log(&mut payload, "install applied (reboot)");
                     payload.step = "wait_post_install".into();

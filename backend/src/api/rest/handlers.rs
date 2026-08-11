@@ -1044,7 +1044,7 @@ pub async fn list_machine_disks(
     Path(id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let controller = controller_for(&state);
-    match controller.list_disks(id).await {
+    match controller.list_disks(id, None).await {
         Ok(disks) => Ok(Json(serde_json::json!({ "disks": disks }))),
         Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
     }
@@ -1103,7 +1103,7 @@ pub async fn install_machine(
     }
     let controller = controller_for(&state);
     controller
-        .install_machine(id, &payload.config_yaml)
+        .install_machine(id, &payload.config_yaml, None)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     crate::utils::audit::log_action(
