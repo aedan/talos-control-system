@@ -664,7 +664,7 @@
           </div>
           <div class="summary-row">
             <span class="label">Install:</span>
-            <span class="value" class:text-error>Wipe: YES (fresh install)</span>
+            <span class="value text-error">Wipe: YES (fresh install)</span>
           </div>
         </div>
 
