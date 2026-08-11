@@ -680,7 +680,8 @@ fn build_talosconfig_yaml(
     endpoint: &str,
 ) -> String {
     format!(
-        "context: {name}\ncontexts:\n  {name}:\n    endpoints:\n      - https://{{ep}}:6443\n    ca: |\n{ca}\n    crt: |\n{crt}\n    key: |\n{key}\n",
+        "context: {name}\ncontexts:\n  {name}:\n    endpoints:\n      - https://{ep}:6443\n    ca: |\n{ca}\n    crt: |\n{crt}\n    key: |\n{key}\n",
+        name = name,
         ep = endpoint,
         ca = "    ".to_string() + &machine_ca_crt.replace("\n", "\n    "),
         crt = "    ".to_string() + &api_cert.replace("\n", "\n    "),
