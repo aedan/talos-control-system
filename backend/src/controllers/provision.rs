@@ -679,13 +679,14 @@ fn build_talosconfig_yaml(
     machine_ca_key: &str,
     endpoint: &str,
 ) -> String {
+    let indent = "        "; // 8 spaces — must exceed `ca:` key indentation (4)
+    let ca = indent.to_string() + &machine_ca_crt.replace("\n", &format!("\n{indent}"));
+    let crt = indent.to_string() + &api_cert.replace("\n", &format!("\n{indent}"));
+    let key = indent.to_string() + &machine_ca_key.replace("\n", &format!("\n{indent}"));
     format!(
         "context: {name}\ncontexts:\n  {name}:\n    endpoints:\n      - https://{ep}:6443\n    ca: |\n{ca}\n    crt: |\n{crt}\n    key: |\n{key}\n",
         name = name,
         ep = endpoint,
-        ca = "    ".to_string() + &machine_ca_crt.replace("\n", "\n    "),
-        crt = "    ".to_string() + &api_cert.replace("\n", "\n    "),
-        key = "    ".to_string() + &machine_ca_key.replace("\n", "\n    "),
     )
 }
 
