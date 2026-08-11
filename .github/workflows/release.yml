@@ -75,7 +75,7 @@ jobs:
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
           else
-            echo "version=0.1.0-dev" >> "$GITHUB_OUTPUT"
+            echo "version=$(grep -m1 '^version = ' backend/Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build frontend
