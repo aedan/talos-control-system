@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::config::MetalConfig;
 use crate::controllers::cluster::ClusterController;
+use crate::controllers::provision::ProvisionController;
 use crate::db::pool::DbPool;
 use crate::db::repos::{self, provision_job::ProvisionJob};
 use crate::integration::bmc::{BootTarget, BmcCredentials, BmcSession};
@@ -258,7 +259,7 @@ async fn run_job(
             } else {
                 None
             };
-            let yaml = load_config_yaml(pool, &machine, &payload).await?;
+            let yaml = load_config_yaml(pool, &jwt_secret, &machine, &payload).await?;
             match ctrl
                 .install_machine(machine_id, &yaml, lease_ip.as_deref())
                 .await
@@ -368,12 +369,58 @@ async fn open_bmc(
 
 async fn load_config_yaml(
     pool: &DbPool,
+    jwt_secret: &str,
     machine: &crate::db::models::machine::Machine,
     payload: &MetalJobPayload,
 ) -> Result<String, AppError> {
-    let artifact_id = payload
-        .artifact_id
-        .ok_or_else(|| AppError::InvalidInput("artifact_id required for install".into()))?;
+    let artifact_id = match payload.artifact_id {
+        Some(id) => id,
+        None => {
+            // Auto-generate config artifact when not provided
+            let cluster_id = machine.cluster_id.ok_or_else(|| {
+                AppError::InvalidInput("artifact_id not provided and machine has no cluster_id".into())
+            })?;
+            let cluster = repos::cluster::get(pool, cluster_id)
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("cluster {cluster_id}")))?;
+
+            let prov_ctrl = ProvisionController::new(pool.clone(), jwt_secret.to_string());
+            let endpoint = if machine.address.is_empty() {
+                // Use cluster name as fallback; IP will be patched below
+                cluster.name.clone()
+            } else {
+                machine.address.strip_suffix(":6443").unwrap_or(&machine.address).to_string()
+            };
+
+            let install_disk = if machine.install_disk.is_empty() {
+                "/dev/sda"
+            } else {
+                &machine.install_disk
+            };
+            let art = prov_ctrl
+                .generate_config(
+                    &cluster.name,
+                    &format!("https://{}:6443", endpoint),
+                    &cluster.talos_version,
+                    &cluster.control_plane_version,
+                    Some(cluster_id),
+                    None, // network config from metadata
+                    install_disk,
+                    true,
+                    &[endpoint.clone()],
+                    "cluster.local",
+                )
+                .await?;
+
+            info!(
+                artifact_id = %art.id,
+                cluster_id = %cluster_id,
+                "Auto-generated Talos config artifact for metal provisioning"
+            );
+            art.id
+        }
+    };
+
     let art = repos::provision::get(pool, artifact_id)
         .await?
         .ok_or_else(|| AppError::NotFound("provision artifact".into()))?;
