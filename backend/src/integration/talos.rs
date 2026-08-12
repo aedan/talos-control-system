@@ -106,6 +106,7 @@ pub struct TalosClient {
     ca: Vec<u8>,
     crt: Vec<u8>,
     key: Vec<u8>,
+    insecure: bool,
 }
 
 impl TalosClient {
@@ -115,6 +116,19 @@ impl TalosClient {
             ca,
             crt,
             key,
+            insecure: false,
+        }
+    }
+
+    /// Create an insecure client for maintenance-mode installer connections.
+    /// Skips TLS verification (like `talosctl --insecure`).
+    pub fn for_maintenance(node_address: &str) -> Self {
+        Self {
+            endpoint: normalize_endpoint(node_address),
+            ca: Vec::new(),
+            crt: Vec::new(),
+            key: Vec::new(),
+            insecure: true,
         }
     }
 
@@ -153,6 +167,21 @@ impl TalosClient {
     }
 
     async fn connect(&self) -> Result<MachineServiceClient<talos_rust_client::Channel>, AppError> {
+        if self.insecure {
+            let channel = TalosConnector::new(&self.endpoint)
+                .insecure()
+                .connect()
+                .await
+                .map_err(|e| {
+                    AppError::Network(format!(
+                        "Failed to connect to Talos API at {}: {}",
+                        self.endpoint, e
+                    ))
+                })?;
+            return Ok(MachineServiceClient::new(channel)
+                .max_decoding_message_size(64 * 1024 * 1024));
+        }
+
         // rustls Identity::from_pem rejects OpenSSL "BEGIN ED25519 PRIVATE KEY"
         // (common in talosconfig). Convert to PKCS#8 labels first.
         let key = ensure_pkcs8_pem(&self.key)?;

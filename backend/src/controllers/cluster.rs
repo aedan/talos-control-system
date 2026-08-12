@@ -302,16 +302,16 @@ impl ClusterController {
         machine: &Machine,
         endpoint_override: Option<&str>,
     ) -> Result<TalosClient, AppError> {
+        if let Some(addr) = endpoint_override.filter(|a| !a.is_empty()) {
+            // Installer mode: connect insecurely (maintenance-mode cert)
+            return Ok(TalosClient::for_maintenance(addr));
+        }
         let creds = self.load_creds(cluster)?;
-        let addr = endpoint_override
-            .filter(|a| !a.is_empty())
-            .or_else(|| {
-                if machine.address.is_empty() {
-                    None
-                } else {
-                    Some(machine.address.as_str())
-                }
-            });
+        let addr = if machine.address.is_empty() {
+            None
+        } else {
+            Some(machine.address.as_str())
+        };
         TalosClient::for_machine(addr, &creds)
     }
 
