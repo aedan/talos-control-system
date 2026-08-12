@@ -4,13 +4,7 @@ use crate::error::{Error, Result};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use std::sync::Arc;
-use std::io::{Read, Write};
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
-use hyper_util::rt::TokioIo;
-use hyper_util::rt::is_http2::IsConnectionHttp2;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tracing::{debug, info, instrument};
 
 /// Connection builder for Talos gRPC API
@@ -89,17 +83,36 @@ impl TalosConnector {
         self
     }
 
-    /// Build a rustls ClientConfig with AcceptAnyCert verifier, no client auth, and ALPN h2.
+    /// Fetch the server's self-signed certificate via raw TLS handshake.
+    /// Returns the DER-encoded certificate bytes.
+    async fn fetch_server_cert(host: &str, port: u16) -> std::result::Result<Vec<u8>, Error> {
+        let tls_config = Self::build_insecure_rustls_config();
+        let addr = format!("{}:{}", host, port);
+        let stream = tokio::net::TcpStream::connect(&addr).await
+            .map_err(|e| Error::Other(format!("TCP connect failed: {}", e)))?;
+
+        let server_name: ServerName<'static> =
+            ServerName::try_from(host.to_string())
+                .map_err(|_| Error::Other("invalid server name".to_string()))?;
+
+        let connector = tokio_rustls::TlsConnector::from(tls_config);
+        let tls_stream = connector.connect(server_name, stream).await
+            .map_err(|e| Error::Other(format!("TLS handshake failed: {}", e)))?;
+
+        let der = tls_stream.socket().peer_certificate()
+            .ok_or_else(|| Error::Other("server did not present a certificate".to_string()))?;
+        Ok(der.to_vec())
+    }
+
+    /// Build a rustls ClientConfig with AcceptAnyCert verifier and no client auth.
     fn build_insecure_rustls_config() -> rustls::ClientConfig {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let mut config = rustls::ClientConfig::builder_with_provider(provider)
+        rustls::ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .expect("safe defaults")
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
-            .with_no_client_auth();
-        config.alpn_protocols = vec![b"h2".to_vec()];
-        config
+            .with_no_client_auth()
     }
 
     /// Connect to the Talos API
@@ -108,32 +121,41 @@ impl TalosConnector {
         debug!("Connecting to Talos API at {} (insecure={})", self.endpoint, self.insecure);
 
         let channel = if self.insecure {
-            // Match talosctl WithMaintenanceMode: InsecureSkipVerify, no client cert,
-            // custom HTTP/2 window sizes (same as talosctl's makeConnection).
             info!(endpoint = %self.endpoint, "using insecure maintenance TLS (InsecureSkipVerify)");
 
             let parsed = url::Url::parse(&self.endpoint)
                 .map_err(|e| Error::Other(format!("invalid endpoint: {}", e)))?;
             let host = parsed.host_str()
                 .ok_or_else(|| Error::Other("no host in endpoint".to_string()))?;
+            let port = parsed.port().unwrap_or(443);
 
-            // Build rustls config: AcceptAnyCert, no client auth (InsecureSkipVerify)
+            // Fetch the server's self-signed cert at runtime (it changes on each boot)
+            debug!(%host, port, "fetching server certificate");
+            let server_cert_der = Self::fetch_server_cert(host, port).await?;
+
+            // Encode the DER cert as PEM for tonic's Certificate
+            let server_cert_pem = der_to_pem(&server_cert_der);
+
+            let ca = Certificate::from_pem(server_cert_pem.into_bytes());
+
+            let tls_config = ClientTlsConfig::new()
+                .ca_certificate(ca)
+                .domain_name(host)
+                .assume_http2(true);
+
             let endpoint = Endpoint::from_shared(self.endpoint.clone())
                 .map_err(|e| Error::Other(format!("invalid endpoint: {}", e)))?;
 
-            // Use custom connector: TCP + rustls with AcceptAnyCert
-            let connector = InsecureConnector::new(Self::build_insecure_rustls_config());
-
-            // Match talosctl's window sizes (applied via tower service if available)
             let channel = endpoint
-                .connect_with_connector(connector)
+                .tls_config(tls_config)
+                .map_err(|e| Error::TlsConfig(format!("Failed to set TLS config: {}", e)))?
+                .connect()
                 .await
                 .map_err(|e| Error::TlsConfig(format!("connection failed: {}", e)))?;
 
             info!(%host, "connected with InsecureSkipVerify");
             channel
         } else {
-            // Standard mTLS path
             debug!("Using mTLS connector");
             let ca_cert = self.ca_cert.ok_or_else(|| Error::MissingConfig("CA certificate".into()))?;
             let client_cert = self.client_cert.ok_or_else(|| Error::MissingConfig("Client certificate".into()))?;
@@ -169,105 +191,50 @@ impl TalosConnector {
     }
 }
 
-/// Tower service that wraps TCP in rustls with AcceptAnyCert (InsecureSkipVerify).
-struct InsecureConnector {
-    tls_config: Arc<rustls::ClientConfig>,
+/// Encode DER bytes as a PEM certificate string.
+fn der_to_pem(der: &[u8]) -> String {
+    let b64 = base64_encode(der);
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    for chunk in b64.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(chunk).unwrap_or(""));
+        pem.push('\n');
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    pem
 }
 
-impl InsecureConnector {
-    fn new(tls_config: rustls::ClientConfig) -> Self {
-        Self {
-            tls_config: Arc::new(tls_config),
+/// Encode bytes as base64 string (no newlines).
+fn base64_encode(data: &[u8]) -> String {
+    let mut result = Vec::with_capacity((data.len() + 2) / 3 * 4);
+    let table = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let i = data.as_ptr();
+    let mut j = 0;
+    let len = data.len();
+    while j + 2 < len {
+        let b0 = unsafe { *i.add(j) };
+        let b1 = unsafe { *i.add(j + 1) };
+        let b2 = unsafe { *i.add(j + 2) };
+        result.push(table[((b0 >> 2) & 0x3F) as usize] as char);
+        result.push(table[((b0 << 4 | b1 >> 4) & 0x3F) as usize] as char);
+        result.push(table[((b1 << 2 | b2 >> 6) & 0x3F) as usize] as char);
+        result.push(table[(b2 & 0x3F) as usize] as char);
+        j += 3;
+    }
+    if j < len {
+        let b0 = unsafe { *i.add(j) };
+        result.push(table[((b0 >> 2) & 0x3F) as usize] as char);
+        if j + 1 < len {
+            let b1 = unsafe { *i.add(j + 1) };
+            result.push(table[((b0 << 4 | b1 >> 4) & 0x3F) as usize] as char);
+            result.push(table[((b1 << 2) & 0x3F) as usize] as char);
+            result.push('=');
+        } else {
+            result.push(table[((b0 << 4) & 0x3F) as usize] as char);
+            result.push('=');
+            result.push('=');
         }
     }
-}
-
-/// Wrapper around TLS stream that signals HTTP/2 to hyper via `IsConnectionHttp2`.
-struct Http2TlsStream(tokio_rustls::client::TlsStream<tokio::net::TcpStream>);
-
-impl Read for Http2TlsStream {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        Pin::new(&mut self.0).read(buf)
-    }
-}
-
-impl Write for Http2TlsStream {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        Pin::new(&mut self.0).write(buf)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Pin::new(&mut self.0).flush()
-    }
-}
-
-impl AsyncRead for Http2TlsStream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.0).poll_read(cx, buf)
-    }
-}
-
-impl AsyncWrite for Http2TlsStream {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.0).poll_write(cx, buf)
-    }
-
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.0).poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.0).poll_shutdown(cx)
-    }
-}
-
-impl IsConnectionHttp2 for Http2TlsStream {
-    fn is_http2(&self) -> bool {
-        true
-    }
-}
-
-impl tower::Service<http::Uri> for InsecureConnector {
-    type Response = TokioIo<Http2TlsStream>;
-    type Error = std::io::Error;
-    type Future = std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(
-        &mut self,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, req: http::Uri) -> Self::Future {
-        let tls_config = self.tls_config.clone();
-        let host = req.host().unwrap_or("").to_string();
-        let port = req.port_u16().unwrap_or(443);
-        Box::pin(async move {
-            let addr = format!("{}:{}", host, port);
-            let stream = tokio::net::TcpStream::connect(&addr).await?;
-            let server_name: ServerName<'static> =
-                ServerName::try_from(host).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid server name"))?;
-            let connector = tokio_rustls::TlsConnector::from(tls_config);
-            let tls_stream = connector.connect(server_name, stream).await
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionAborted, e.to_string()))?;
-            Ok(TokioIo::new(Http2TlsStream(tls_stream)))
-        })
-    }
+    result.into_iter().collect()
 }
 
 /// No-op server cert verifier for insecure maintenance mode connections.
@@ -288,7 +255,6 @@ impl ServerCertVerifier for AcceptAnyCert {
     }
 
     fn verify_tls12_signature(
-        &self,
         message: &[u8],
         cert: &CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
@@ -300,7 +266,6 @@ impl ServerCertVerifier for AcceptAnyCert {
     }
 
     fn verify_tls13_signature(
-        &self,
         message: &[u8],
         cert: &CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
