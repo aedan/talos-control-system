@@ -5,7 +5,6 @@
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use socket2::{Domain, Protocol, Socket, Type};
@@ -49,7 +48,6 @@ async fn run_tftp_loop(asset_dir: &str) -> Result<(), AppError> {
 
     info!("TFTP server listening on UDP/{TFTP_PORT} (asset dir {asset_dir})");
 
-    let sock = Arc::new(sock);
     let mut buf = vec![0u8; 1024];
     loop {
         let (n, src) = match tokio::time::timeout(Duration::from_secs(5), sock.recv_from(&mut buf))
@@ -86,10 +84,9 @@ async fn run_tftp_loop(asset_dir: &str) -> Result<(), AppError> {
             }
         };
 
-        let sock2 = Arc::clone(&sock);
         let filename = req.filename.clone();
         tokio::spawn(async move {
-            if let Err(e) = serve_file(&sock2, src, &data).await {
+            if let Err(e) = serve_file(src, &data).await {
                 debug!(file = %filename, %src, error = %e, "TFTP transfer aborted");
             }
         });
@@ -117,7 +114,14 @@ struct Rrq {
 }
 
 /// Send file in 512-byte DATA blocks, waiting for ACK per block (RFC 1350).
-async fn serve_file(sock: &UdpSocket, src: SocketAddr, data: &[u8]) -> Result<(), AppError> {
+///
+/// Uses a dedicated ephemeral-port socket so ACKs are never stolen by the
+/// main receive loop (UDP sockets have no per-connection demultiplexing).
+async fn serve_file(client: SocketAddr, data: &[u8]) -> Result<(), AppError> {
+    let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .await
+        .map_err(|e| AppError::Network(format!("TFTP transfer socket: {e}")))?;
+
     let mut block: u16 = 1;
     let mut offset = 0usize;
     loop {
@@ -127,7 +131,7 @@ async fn serve_file(sock: &UdpSocket, src: SocketAddr, data: &[u8]) -> Result<()
         pkt.push(3); // DATA
         pkt.extend_from_slice(&block.to_be_bytes());
         pkt.extend_from_slice(&data[offset..end]);
-        sock.send_to(&pkt, src)
+        sock.send_to(&pkt, client)
             .await
             .map_err(|e| AppError::Network(format!("TFTP send: {e}")))?;
 
@@ -135,18 +139,17 @@ async fn serve_file(sock: &UdpSocket, src: SocketAddr, data: &[u8]) -> Result<()
         let mut acked = false;
         for _ in 0..3 {
             let mut buf = [0u8; 64];
-            match tokio::time::timeout(Duration::from_secs(2), recv_from_addr(sock, src, &mut buf))
-                .await
+            match tokio::time::timeout(Duration::from_secs(2), sock.recv_from(&mut buf)).await
             {
-                Ok(Some(n)) if n >= 4 && buf[0] == 0 && buf[1] == 4 => {
+                Ok(Ok((n, src))) if src == client && n >= 4 && buf[0] == 0 && buf[1] == 4 => {
                     let ack_block = u16::from_be_bytes([buf[2], buf[3]]);
                     if ack_block == block {
                         acked = true;
                         break;
                     }
                 }
-                Ok(Some(_)) => continue, // ignore stray packets
-                Ok(None) | Err(_) => continue,
+                Ok(Ok(_)) => continue, // ignore stray packets
+                Ok(Err(_)) | Err(_) => continue,
             }
         }
         if !acked {
@@ -162,28 +165,19 @@ async fn serve_file(sock: &UdpSocket, src: SocketAddr, data: &[u8]) -> Result<()
             let mut final_pkt = vec![0u8; 4];
             final_pkt[2..4].copy_from_slice(&block.wrapping_add(1).to_be_bytes());
             final_pkt[1] = 3;
-            sock.send_to(&final_pkt, src)
+            sock.send_to(&final_pkt, client)
                 .await
                 .map_err(|e| AppError::Network(format!("TFTP send: {e}")))?;
-            let _ = tokio::time::timeout(Duration::from_secs(2), recv_from_addr(sock, src, &mut [0u8; 64])).await;
+            let _ = tokio::time::timeout(
+                Duration::from_secs(2),
+                sock.recv_from(&mut [0u8; 64]),
+            )
+            .await;
             return Ok(());
         }
 
         block = block.wrapping_add(1);
         offset = end;
-    }
-}
-
-async fn recv_from_addr(
-    sock: &UdpSocket,
-    addr: SocketAddr,
-    buf: &mut [u8],
-) -> Option<usize> {
-    loop {
-        let (n, src) = sock.recv_from(buf).await.ok()?;
-        if src == addr {
-            return Some(n);
-        }
     }
 }
 
