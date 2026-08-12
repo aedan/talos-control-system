@@ -87,13 +87,14 @@ impl TalosConnector {
     /// Build a rustls ClientConfig with AcceptAnyCert verifier, no client auth, and ALPN h2.
     fn build_insecure_rustls_config() -> rustls::ClientConfig {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        rustls::ClientConfig::builder_with_provider(provider)
+        let mut config = rustls::ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .expect("safe defaults")
-            .with_alpn_protocols(&[b"h2"])
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
-            .with_no_client_auth()
+            .with_no_client_auth();
+        config.alpn_protocols = vec![b"h2".to_vec()];
+        config
     }
 
     /// Connect to the Talos API
