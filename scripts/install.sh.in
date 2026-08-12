@@ -107,6 +107,45 @@ install -d -m 0755 "$(dirname "$TCS_BIN")"
 install -m 0755 "${EXTRACT_DIR}/tcs" "$TCS_BIN"
 info "Installed binary → ${TCS_BIN}"
 
+# ─── Install / update talosctl ───────────────────────────────────────
+TALOSCTL_VERSION="1.13.8"
+TALOSCTL_BIN="/usr/local/bin/talosctl"
+
+install_talosctl() {
+  local need_install=1
+  if [ -x "$TALOSCTL_BIN" ]; then
+    local existing_ver
+    existing_ver="$($TALOSCTL_BIN version --client -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('talosversion',''))" 2>/dev/null || true)"
+    if [ "$existing_ver" = "v${TALOSCTL_VERSION}" ]; then
+      info "talosctl v${TALOSCTL_VERSION} already installed at ${TALOSCTL_BIN}"
+      need_install=0
+    fi
+  fi
+
+  if [ "$need_install" = "1" ]; then
+    info "Installing talosctl v${TALOSCTL_VERSION}..."
+    local tbin
+    case "$ARCH" in
+      x86_64)   tbin="talosctl_${TALOSCTL_VERSION}_Linux_x86_64.tar.gz" ;;
+      aarch64)  tbin="talosctl_${TALOSCTL_VERSION}_Linux_aarch64.tar.gz" ;;
+    esac
+    local turl="https://github.com/siderolabs/talos/releases/download/v${TALOSCTL_VERSION}/${tbin}"
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL -o "${EXTRACT_DIR}/talosctl.tar.gz" "$turl"
+    elif command -v wget >/dev/null 2>&1; then
+      wget -q -O "${EXTRACT_DIR}/talosctl.tar.gz" "$turl"
+    else
+      warn "Cannot install talosctl: no curl or wget. Install manually from GitHub releases."
+      return
+    fi
+    tar -xzf "${EXTRACT_DIR}/talosctl.tar.gz" -C "${EXTRACT_DIR}" talosctl
+    install -m 0755 "${EXTRACT_DIR}/talosctl" "$TALOSCTL_BIN"
+    info "Installed talosctl → ${TALOSCTL_BIN}"
+  fi
+}
+
+install_talosctl
+
 install -d -m 0755 "$TCS_CONFIG_DIR" "$TCS_DATA" "${TCS_DATA}/certs" "${TCS_DATA}/backups"
 
 if [ ! -f "$TCS_CONFIG" ]; then

@@ -11,6 +11,7 @@ use crate::integration::talos::{
     backup_root_from_sqlite_path, build_patch_documents, pick_control_plane_address, TalosClient,
     TalosCredentials,
 };
+use crate::integration::talosctl::TalosctlClient;
 use crate::utils::secrets;
 use crate::AppError;
 
@@ -303,9 +304,10 @@ impl ClusterController {
         endpoint_override: Option<&str>,
     ) -> Result<TalosClient, AppError> {
         if let Some(addr) = endpoint_override.filter(|a| !a.is_empty()) {
-            // Installer mode: connect insecurely (maintenance-mode cert)
-            tracing::info!(?addr, "using insecure maintenance client for installer");
-            return Ok(TalosClient::for_maintenance(addr));
+            return Err(AppError::InvalidInput(format!(
+                "endpoint_override ({}) requires talosctl; use list_disks/install_machine directly",
+                addr
+            )));
         }
         tracing::info!("using standard mTLS client for installed node");
         let creds = self.load_creds(cluster)?;
@@ -567,20 +569,23 @@ impl ClusterController {
         machine_id: Uuid,
         endpoint_override: Option<&str>,
     ) -> Result<Vec<serde_json::Value>, AppError> {
-        let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
-        let client = self
-            .client_for_machine_at(&cluster, &machine, endpoint_override)
-            .await?;
-        let disks = client.list_disks().await?;
-        Ok(disks.into_iter().map(|d| serde_json::json!({
-            "deviceName": d.device_name,
-            "name": d.name,
-            "serial": d.serial,
-            "size": d.size,
-            "type": d.r#type,
-            "model": d.model,
-            "systemDisk": d.system_disk,
-        })).collect())
+        if let Some(endpoint) = endpoint_override.filter(|e| !e.is_empty()) {
+            TalosctlClient::list_disks(endpoint).await
+        } else {
+            let (_cluster, _machine) = self.cluster_and_machine(machine_id).await?;
+            let (_cluster, machine) = self.cluster_and_machine(machine_id).await?;
+            let client = self.client_for_machine(&_cluster, &machine).await?;
+            let disks = client.list_disks().await?;
+            Ok(disks.into_iter().map(|d| serde_json::json!({
+                "deviceName": d.device_name,
+                "name": d.name,
+                "serial": d.serial,
+                "size": d.size,
+                "type": d.r#type,
+                "model": d.model,
+                "systemDisk": d.system_disk,
+            })).collect())
+        }
     }
 
     /// Set the install disk for a machine (DB-only, no Talos API call).
@@ -615,12 +620,14 @@ impl ClusterController {
         machine.updated_at = chrono::Utc::now();
         crate::db::repos::machine::update(&self.pool, &machine).await?;
 
-        let client = self
-            .client_for_machine_at(&cluster, &machine, endpoint_override)
-            .await?;
-        client
-            .apply_config_with_options(&config_yaml, false, true)
-            .await?;
+        if let Some(endpoint) = endpoint_override.filter(|e| !e.is_empty()) {
+            TalosctlClient::apply_config(endpoint, &config_yaml, true).await?;
+        } else {
+            let client = self.client_for_machine(&cluster, &machine).await?;
+            client
+                .apply_config_with_options(&config_yaml, false, true)
+                .await?;
+        }
 
         machine.status = "booting".to_string();
         machine.updated_at = chrono::Utc::now();

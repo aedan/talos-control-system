@@ -113,28 +113,12 @@ features = [
     "rt-multi-thread",
 ]
 
-[dependencies.tokio-rustls]
-version = "0.26"
-
 [dependencies.tonic]
 version = "0.12"
 features = [
     "tls",
     "tls-roots",
 ]
-
-[dependencies.tower]
-version = "0.4"
-
-[dependencies.http]
-version = "1"
-
-[dependencies.hyper-util]
-version = "0.1"
-features = ["tokio"]
-
-[dependencies.tower-service]
-version = "0.3"
 
 [dependencies.tracing]
 version = "0.1"

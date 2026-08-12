@@ -106,7 +106,6 @@ pub struct TalosClient {
     ca: Vec<u8>,
     crt: Vec<u8>,
     key: Vec<u8>,
-    insecure: bool,
 }
 
 impl TalosClient {
@@ -116,19 +115,6 @@ impl TalosClient {
             ca,
             crt,
             key,
-            insecure: false,
-        }
-    }
-
-    /// Create an insecure client for maintenance-mode installer connections.
-    /// Skips TLS verification (like `talosctl --insecure`).
-    pub fn for_maintenance(node_address: &str) -> Self {
-        Self {
-            endpoint: normalize_endpoint(node_address),
-            ca: Vec::new(),
-            crt: Vec::new(),
-            key: Vec::new(),
-            insecure: true,
         }
     }
 
@@ -167,30 +153,10 @@ impl TalosClient {
     }
 
     async fn connect(&self) -> Result<MachineServiceClient<talos_rust_client::Channel>, AppError> {
-        tracing::info!(insecure=self.insecure, endpoint=%self.endpoint, "TalosClient::connect starting");
-        if self.insecure {
-            tracing::info!(endpoint=%self.endpoint, "taking insecure connector path");
-            let channel = TalosConnector::new(&self.endpoint)
-                .insecure()
-                .connect()
-                .await
-                .map_err(|e| {
-                    AppError::Network(format!(
-                        "Failed to connect to Talos API at {}: {}",
-                        self.endpoint, e
-                    ))
-                })?;
-            return Ok(MachineServiceClient::new(channel)
-                .max_decoding_message_size(64 * 1024 * 1024));
-        }
-
         // rustls Identity::from_pem rejects OpenSSL "BEGIN ED25519 PRIVATE KEY"
         // (common in talosconfig). Convert to PKCS#8 labels first.
         let key = ensure_pkcs8_pem(&self.key)?;
 
-        // Dial by IP is normal for Talos. Node server certs include IP SANs, so
-        // leave server_name unset and let TalosConnector use the URL host (IP).
-        // Do NOT force "localhost" — that fails SAN verification.
         let channel = TalosConnector::new(&self.endpoint)
             .ca_pem(self.ca.clone())
             .cert_pem(self.crt.clone())
@@ -706,19 +672,6 @@ impl TalosClient {
     }
 
     async fn connect_channel(&self) -> Result<tonic::transport::Channel, AppError> {
-        if self.insecure {
-            return TalosConnector::new(&self.endpoint)
-                .insecure()
-                .connect()
-                .await
-                .map_err(|e| {
-                    AppError::Network(format!(
-                        "Failed to connect to Talos API at {}: {}",
-                        self.endpoint, e
-                    ))
-                });
-        }
-
         let key = ensure_pkcs8_pem(&self.key)?;
         TalosConnector::new(&self.endpoint)
             .ca_pem(self.ca.clone())
