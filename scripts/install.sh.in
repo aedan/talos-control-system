@@ -126,19 +126,19 @@ install_talosctl() {
     info "Installing talosctl v${TALOSCTL_VERSION}..."
     local tbin
     case "$ARCH" in
-      x86_64)   tbin="talosctl_${TALOSCTL_VERSION}_Linux_x86_64.tar.gz" ;;
-      aarch64)  tbin="talosctl_${TALOSCTL_VERSION}_Linux_aarch64.tar.gz" ;;
+      x86_64)   tbin="talosctl-linux-amd64" ;;
+      aarch64)  tbin="talosctl-linux-arm64" ;;
     esac
     local turl="https://github.com/siderolabs/talos/releases/download/v${TALOSCTL_VERSION}/${tbin}"
     if command -v curl >/dev/null 2>&1; then
-      curl -fsSL -o "${EXTRACT_DIR}/talosctl.tar.gz" "$turl"
+      curl -fsSL -o "${EXTRACT_DIR}/talosctl" "$turl"
     elif command -v wget >/dev/null 2>&1; then
-      wget -q -O "${EXTRACT_DIR}/talosctl.tar.gz" "$turl"
+      wget -q -O "${EXTRACT_DIR}/talosctl" "$turl"
     else
       warn "Cannot install talosctl: no curl or wget. Install manually from GitHub releases."
       return
     fi
-    tar -xzf "${EXTRACT_DIR}/talosctl.tar.gz" -C "${EXTRACT_DIR}" talosctl
+    chmod +x "${EXTRACT_DIR}/talosctl"
     install -m 0755 "${EXTRACT_DIR}/talosctl" "$TALOSCTL_BIN"
     info "Installed talosctl → ${TALOSCTL_BIN}"
   fi
