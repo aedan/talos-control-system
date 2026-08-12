@@ -93,6 +93,7 @@ impl TalosConnector {
         let config = rustls::ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .expect("safe defaults")
+            .dangerous()
             .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
             .with_no_client_auth();
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
@@ -179,7 +180,8 @@ impl TalosConnector {
 /// Base64-encode bytes with 64-char line wrapping (standard PEM encoding).
 fn base64_encode(data: &[u8]) -> String {
     const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = Vec::with_capacity((data.len() + 2) * 4 / 3);
+    let len = data.len();
+    let mut out = Vec::with_capacity((len + 2) * 4 / 3);
     for chunk in data.chunks(3) {
         let a = chunk[0] as u32;
         let b = chunk.get(1).copied().unwrap_or(0) as u32;
@@ -190,17 +192,28 @@ fn base64_encode(data: &[u8]) -> String {
         out.push(TABLE[((triple >> 6) & 0x3F) as usize]);
         out.push(TABLE[(triple & 0x3F) as usize]);
     }
-    match data.len() % 3 {
-        1 => { out[out.len()-2..].copy_from_slice(b"=="); }
-        2 => { out[out.len()-1..].copy_from_slice(b"="); }
+    let total = out.len();
+    match len % 3 {
+        1 => {
+            out[total - 2] = b'=';
+            out[total - 1] = b'=';
+        }
+        2 => {
+            out[total - 1] = b'=';
+        }
         _ => {}
     }
     let s = String::from_utf8(out).unwrap();
-    s.chars().collect::<Vec<_>>()
-        .chunks(64)
-        .map(|c| c.iter().collect::<String>())
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut result = String::with_capacity(s.len() + s.len() / 64);
+    for (i, line) in s.as_bytes().chunks(64).enumerate() {
+        if i > 0 {
+            result.push('\n');
+        }
+        for &b in line {
+            result.push(b as char);
+        }
+    }
+    result
 }
 
 /// No-op server cert verifier for fetching the installer's self-signed cert.
