@@ -86,7 +86,7 @@ impl TalosConnector {
     /// Fetch the server's self-signed certificate via raw TLS handshake.
     /// Returns the DER-encoded certificate bytes.
     async fn fetch_server_cert(host: &str, port: u16) -> std::result::Result<Vec<u8>, Error> {
-        let tls_config = Self::build_insecure_rustls_config();
+        let tls_config = Arc::new(Self::build_insecure_rustls_config());
         let addr = format!("{}:{}", host, port);
         let stream = tokio::net::TcpStream::connect(&addr).await
             .map_err(|e| Error::Other(format!("TCP connect failed: {}", e)))?;
@@ -99,7 +99,8 @@ impl TalosConnector {
         let tls_stream = connector.connect(server_name, stream).await
             .map_err(|e| Error::Other(format!("TLS handshake failed: {}", e)))?;
 
-        let der = tls_stream.socket().peer_certificate()
+        let der = tls_stream.get_ref().1.peer_certificate()
+            .cloned()
             .ok_or_else(|| Error::Other("server did not present a certificate".to_string()))?;
         Ok(der.to_vec())
     }
@@ -255,6 +256,7 @@ impl ServerCertVerifier for AcceptAnyCert {
     }
 
     fn verify_tls12_signature(
+        &self,
         message: &[u8],
         cert: &CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
@@ -266,6 +268,7 @@ impl ServerCertVerifier for AcceptAnyCert {
     }
 
     fn verify_tls13_signature(
+        &self,
         message: &[u8],
         cert: &CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
