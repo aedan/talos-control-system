@@ -195,11 +195,11 @@ impl TalosConnector {
         let channel = if self.insecure {
             debug!("Using insecure TLS connector");
             let connector = InsecureTlsConnector::new()?;
-            let ch = Endpoint::from_shared(self.endpoint.clone())
+            Endpoint::from_shared(self.endpoint.clone())
                 .map_err(|e| Error::Other(format!("Invalid endpoint: {e}")))?
                 .connect_with_connector(connector)
                 .await
-                .map_err(|e| Error::TlsConfig(format!("Failed to connect: {e}")))?;
+                .map_err(|e| Error::TlsConfig(format!("Failed to connect: {e}")))?
         } else {
             debug!("Using mTLS connector");
             let ca_cert = self
