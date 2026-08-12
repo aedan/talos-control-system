@@ -95,7 +95,7 @@ impl Service<http::Uri> for InsecureTlsConnector {
     }
 
     fn call(&mut self, req: http::Uri) -> Self::Future {
-        let mut tls_config = self.tls_config.clone();
+        let tls_config = self.tls_config.clone();
         let host = req.host().unwrap_or("localhost").to_string();
         let port = req.port_u16().unwrap_or(443);
         Box::pin(async move {
@@ -195,12 +195,11 @@ impl TalosConnector {
         let channel = if self.insecure {
             debug!("Using insecure TLS connector");
             let connector = InsecureTlsConnector::new()?;
-            let ep = Endpoint::from_shared(self.endpoint.clone())
-                .map_err(|e| Error::Other(format!("Invalid endpoint: {e}")))?;
-            let ch = ep.connect_with_connector(connector)
-                .map_err(|e| Error::TlsConfig(format!("connect_with_connector failed: {e}")))?;
-            ch.connect().await
-                .map_err(|e| Error::TlsConfig(format!("Failed to connect: {e}")))?
+            let ch = Endpoint::from_shared(self.endpoint.clone())
+                .map_err(|e| Error::Other(format!("Invalid endpoint: {e}")))?
+                .connect_with_connector(connector)
+                .await
+                .map_err(|e| Error::TlsConfig(format!("Failed to connect: {e}")))?;
         } else {
             debug!("Using mTLS connector");
             let ca_cert = self
