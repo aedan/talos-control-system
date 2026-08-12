@@ -85,7 +85,8 @@ impl TalosConnector {
 
     /// Fetch the server's TLS cert via raw TCP, return PEM bytes.
     async fn fetch_server_cert(host: &str, port: u16) -> Result<Vec<u8>> {
-        let addr_str = format!("{}:{}", host, port);
+        let host_owned = host.to_string();
+        let addr_str = format!("{}:{}", host_owned, port);
         let stream = tokio::net::TcpStream::connect(&addr_str).await
             .map_err(|e| Error::TlsConfig(format!("connect to {}: {}", addr_str, e)))?;
 
@@ -98,8 +99,8 @@ impl TalosConnector {
             .with_no_client_auth();
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
 
-        let server_name = ServerName::try_from(host)
-            .map_err(|e| Error::TlsConfig(format!("invalid server name {}: {}", host, e)))?;
+        let server_name: ServerName<'static> = ServerName::try_from(host_owned.clone())
+            .map_err(|e| Error::TlsConfig(format!("invalid server name: {}", e)))?;
         let tls_stream = connector.connect(server_name, stream).await
             .map_err(|e| Error::TlsConfig(format!("TLS handshake to {}: {}", addr_str, e)))?;
 
