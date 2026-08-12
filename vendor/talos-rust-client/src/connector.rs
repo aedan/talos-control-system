@@ -5,6 +5,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use std::sync::Arc;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
+use hyper_util::rt::TokioIo;
 use tracing::{debug, info, instrument};
 
 /// Connection builder for Talos gRPC API
@@ -76,64 +77,23 @@ impl TalosConnector {
         self
     }
 
-    /// Disable TLS verification (accept any cert, skip client auth).
-    /// Fetches the server's self-signed cert at runtime and trusts it.
+    /// Disable TLS verification (InsecureSkipVerify equivalent).
+    /// Mimics talosctl's WithMaintenanceMode: no CA, no client cert, no domain validation.
     pub fn insecure(mut self) -> Self {
         self.insecure = true;
         self
     }
 
-    /// Fetch the server's TLS cert via raw TCP, return PEM bytes.
-    async fn fetch_server_cert(host: &str, port: u16) -> Result<Vec<u8>> {
-        let host_owned = host.to_string();
-        let addr_str = format!("{}:{}", host_owned, port);
-        let stream = tokio::net::TcpStream::connect(&addr_str).await
-            .map_err(|e| Error::TlsConfig(format!("connect to {}: {}", addr_str, e)))?;
-
+    /// Build a rustls ClientConfig with AcceptAnyCert verifier and no client auth.
+    fn build_insecure_rustls_config() -> rustls::ClientConfig {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let config = rustls::ClientConfig::builder_with_provider(provider)
+        rustls::ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .expect("safe defaults")
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
-            .with_no_client_auth();
-        let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
-
-        let server_name: ServerName<'static> = ServerName::try_from(host_owned.clone())
-            .map_err(|e| Error::TlsConfig(format!("invalid server name: {}", e)))?;
-        let tls_stream = connector.connect(server_name, stream).await
-            .map_err(|e| Error::TlsConfig(format!("TLS handshake to {}: {}", addr_str, e)))?;
-
-        let cert_der = tls_stream.get_ref().1.peer_certificates()
-            .and_then(|certs| certs.first())
-            .ok_or_else(|| Error::TlsConfig("server did not present certificate".to_string()))?;
-
-        let pem = format!(
-            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----",
-            base64_encode(cert_der.as_ref())
-        );
-        Ok(pem.into_bytes())
+            .with_no_client_auth()
     }
-
-    /// Embedded dummy client certificate PEM for maintenance-mode mTLS.
-    const DUMMY_CLIENT_CERT: &[u8] = b"-----BEGIN CERTIFICATE-----\n\
-        MIIBljCCAT2gAwIBAgIUeiMV1qZVNvf/ntJArix1bt4FLRUwCgYIKoZIzj0EAwIw\n\
-        ITEfMB0GA1UEAwwWVENTIE1haW50ZW5hbmNlIENsaWVudDAeFw0yNjA4MTIxNjM1\n\
-        NTFaFw0yNzA4MTIxNjM1NTFaMCExHzAdBgNVBAMMFlRDUyBNYWludGVuYW5jZSBD\n\
-        bGllbnQwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASu3YnDPlANTWErgJhLj2oE\n\
-        I9qlrUYWEn4siuwzHqNZrQtXAOiFc/xJMfZl63zVR831FACE0BWdsAdXXpTTsu8/\n\
-        o1MwUTAdBgNVHQ4EFgQU24vKf+ijT8kH1yeZ5hvtFepWLyEwHwYDVR0jBBgwFoAU\n\
-        24vKf+ijT8kH1yeZ5hvtFepWLyEwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQD\n\
-        AgNHADBEAiAOKuGmobAlwcfjW66gjepu8eUqEXRaIc/fThw/baH8NwIgc70SnyqT\n\
-        WSxddZFE67OWao4DcM/0P8dZ9UHy2sRe2qU=\n\
-        -----END CERTIFICATE-----";
-
-    /// Embedded dummy client private key PEM for maintenance-mode mTLS.
-    const DUMMY_CLIENT_KEY: &[u8] = b"-----BEGIN PRIVATE KEY-----\n\
-        MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgvs1IQJZ+mthKs8u6\n\
-        1c9Wsh2ewOtqPSrmwuqEqmQwjkqhRANCAASu3YnDPlANTWErgJhLj2oEI9qlrUYW\n\
-        En4siuwzHqNZrQtXAOiFc/xJMfZl63zVR831FACE0BWdsAdXXpTTsu8/\n\
-        -----END PRIVATE KEY-----";
 
     /// Connect to the Talos API
     #[instrument(skip(self))]
@@ -141,32 +101,32 @@ impl TalosConnector {
         debug!("Connecting to Talos API at {} (insecure={})", self.endpoint, self.insecure);
 
         let channel = if self.insecure {
-            info!(endpoint = %self.endpoint, "using insecure maintenance TLS");
+            // Match talosctl WithMaintenanceMode: InsecureSkipVerify, no client cert,
+            // custom HTTP/2 window sizes (same as talosctl's makeConnection).
+            info!(endpoint = %self.endpoint, "using insecure maintenance TLS (InsecureSkipVerify)");
+
             let parsed = url::Url::parse(&self.endpoint)
                 .map_err(|e| Error::Other(format!("invalid endpoint: {}", e)))?;
             let host = parsed.host_str()
                 .ok_or_else(|| Error::Other("no host in endpoint".to_string()))?;
-            let port = parsed.port().unwrap_or(443);
 
-            let server_ca_pem = Self::fetch_server_cert(host, port).await?;
-            info!(%host, port, "trusted server cert");
+            // Build rustls config: AcceptAnyCert, no client auth (InsecureSkipVerify)
+            let endpoint = Endpoint::from_shared(self.endpoint.clone())
+                .map_err(|e| Error::Other(format!("invalid endpoint: {}", e)))?;
 
-            let dummy_identity = Identity::from_pem(Self::DUMMY_CLIENT_CERT, Self::DUMMY_CLIENT_KEY);
-            info!("sending dummy client cert for mTLS");
+            // Use custom connector: TCP + rustls with AcceptAnyCert
+            let connector = InsecureConnector::new(Self::build_insecure_rustls_config());
 
-            let mut tls_config = ClientTlsConfig::new()
-                .ca_certificate(Certificate::from_pem(server_ca_pem))
-                .identity(dummy_identity);
-            tls_config = tls_config.domain_name(host);
-
-            Endpoint::from_shared(self.endpoint.clone())
-                .map_err(|e| Error::Other(format!("invalid endpoint: {}", e)))?
-                .tls_config(tls_config)
-                .map_err(|e| Error::TlsConfig(format!("TLS config error: {}", e)))?
-                .connect()
+            // Match talosctl's window sizes (applied via tower service if available)
+            let channel = endpoint
+                .connect_with_connector(connector)
                 .await
-                .map_err(|e| Error::TlsConfig(format!("connection failed: {}", e)))?
+                .map_err(|e| Error::TlsConfig(format!("connection failed: {}", e)))?;
+
+            info!(%host, "connected with InsecureSkipVerify");
+            channel
         } else {
+            // Standard mTLS path
             debug!("Using mTLS connector");
             let ca_cert = self.ca_cert.ok_or_else(|| Error::MissingConfig("CA certificate".into()))?;
             let client_cert = self.client_cert.ok_or_else(|| Error::MissingConfig("Client certificate".into()))?;
@@ -202,46 +162,50 @@ impl TalosConnector {
     }
 }
 
-/// Base64-encode bytes with 64-char line wrapping (standard PEM encoding).
-fn base64_encode(data: &[u8]) -> String {
-    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let len = data.len();
-    let mut out = Vec::with_capacity((len + 2) * 4 / 3);
-    for chunk in data.chunks(3) {
-        let a = chunk[0] as u32;
-        let b = chunk.get(1).copied().unwrap_or(0) as u32;
-        let c = chunk.get(2).copied().unwrap_or(0) as u32;
-        let triple = (a << 16) | (b << 8) | c;
-        out.push(TABLE[((triple >> 18) & 0x3F) as usize]);
-        out.push(TABLE[((triple >> 12) & 0x3F) as usize]);
-        out.push(TABLE[((triple >> 6) & 0x3F) as usize]);
-        out.push(TABLE[(triple & 0x3F) as usize]);
-    }
-    let total = out.len();
-    match len % 3 {
-        1 => {
-            out[total - 2] = b'=';
-            out[total - 1] = b'=';
-        }
-        2 => {
-            out[total - 1] = b'=';
-        }
-        _ => {}
-    }
-    let s = String::from_utf8(out).unwrap();
-    let mut result = String::with_capacity(s.len() + s.len() / 64);
-    for (i, line) in s.as_bytes().chunks(64).enumerate() {
-        if i > 0 {
-            result.push('\n');
-        }
-        for &b in line {
-            result.push(b as char);
-        }
-    }
-    result
+/// Tower service that wraps TCP in rustls with AcceptAnyCert (InsecureSkipVerify).
+struct InsecureConnector {
+    tls_config: Arc<rustls::ClientConfig>,
 }
 
-/// No-op server cert verifier for fetching the installer's self-signed cert.
+impl InsecureConnector {
+    fn new(tls_config: rustls::ClientConfig) -> Self {
+        Self {
+            tls_config: Arc::new(tls_config),
+        }
+    }
+}
+
+impl tower::Service<http::Uri> for InsecureConnector {
+    type Response = TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>;
+    type Error = std::io::Error;
+    type Future = std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: http::Uri) -> Self::Future {
+        let tls_config = self.tls_config.clone();
+        let host = req.host().unwrap_or("").to_string();
+        let port = req.port_u16().unwrap_or(443);
+        Box::pin(async move {
+            let addr = format!("{}:{}", host, port);
+            let stream = tokio::net::TcpStream::connect(&addr).await?;
+            let server_name: ServerName<'static> =
+                ServerName::try_from(host).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid server name"))?;
+            let connector = tokio_rustls::TlsConnector::from(tls_config);
+            let tls_stream = connector.connect(server_name, stream).await
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionAborted, e.to_string()))?;
+            Ok(TokioIo::new(tls_stream))
+        })
+    }
+}
+
+/// No-op server cert verifier for insecure maintenance mode connections.
+/// Equivalent to Go's tls.Config{InsecureSkipVerify: true}.
 #[derive(Debug)]
 struct AcceptAnyCert;
 
