@@ -99,7 +99,7 @@ impl TalosConnector {
         let tls_stream = connector.connect(server_name, stream).await
             .map_err(|e| Error::Other(format!("TLS handshake failed: {}", e)))?;
 
-        let der = tls_stream.get_ref().1.peer_certificate()
+        let der = tls_stream.get_ref().0.peer_cert()
             .cloned()
             .ok_or_else(|| Error::Other("server did not present a certificate".to_string()))?;
         Ok(der.to_vec())
