@@ -107,11 +107,13 @@ support_url = ""
 # [metal.pxe]
 # enabled = true
 # http_port = 6969
-# tftp_enabled = false
+# tftp_enabled = false   # serve iPXE chainloaders (undionly.kpxe/snponly.efi) over TFTP for legacy PXE
 # asset_dir = "/var/lib/tcs/pxe"
 # default_talos_version = "v1.13.7"
 # mirror_base = "https://github.com/siderolabs/talos/releases/download"
 # extra_cmdline = ""
+# ipxe_bios_file = "undionly.kpxe"
+# ipxe_uefi_file = "snponly.efi"
 # [metal.bmc]
 # connect_timeout_secs = 15
 # prefer_redfish = true

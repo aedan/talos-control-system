@@ -69,6 +69,10 @@ pub struct MetalPxeConfig {
     pub mirror_base: String,
     /// Extra kernel cmdline appended to metal boots.
     pub extra_cmdline: String,
+    /// iPXE binary filename served over TFTP for legacy BIOS PXE clients.
+    pub ipxe_bios_file: String,
+    /// iPXE binary filename served over TFTP for UEFI PXE clients.
+    pub ipxe_uefi_file: String,
 }
 
 impl Default for MetalPxeConfig {
@@ -81,6 +85,8 @@ impl Default for MetalPxeConfig {
             default_talos_version: "v1.13.7".into(),
             mirror_base: "https://github.com/siderolabs/talos/releases/download".into(),
             extra_cmdline: String::new(),
+            ipxe_bios_file: "undionly.kpxe".into(),
+            ipxe_uefi_file: "snponly.efi".into(),
         }
     }
 }

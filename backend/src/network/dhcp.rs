@@ -112,6 +112,12 @@ pub struct DhcpServerConfig {
     pub http_boot_base: String,
     /// Filename for legacy PXE (iPXE script URL or undionly)
     pub boot_file: String,
+    /// Serve iPXE binaries over TFTP for legacy PXE clients
+    pub tftp_enabled: bool,
+    /// iPXE binary filename (legacy BIOS)
+    pub ipxe_bios_file: String,
+    /// iPXE binary filename (UEFI)
+    pub ipxe_uefi_file: String,
 }
 
 /// Spawn DHCP server when metal.dhcp.enabled.
@@ -334,27 +340,43 @@ async fn run_dhcp_loop(pool: DbPool, cfg: DhcpServerConfig) -> Result<(), AppErr
         if !dns.is_empty() {
             reply.opts_mut().insert(DhcpOption::DomainNameServer(dns.clone()));
         }
-        // bootfile — iPXE chain via HTTP if client supports, else filename
-        let bootfile = if cfg.boot_file.is_empty() {
-            format!(
-                "{}/pxe/ipxe/{}",
-                cfg.http_boot_base.trim_end_matches('/'),
-                mac_n
-            )
-        } else {
+        // bootfile — iPXE chain via HTTP when client is iPXE or HTTP-capable;
+        // legacy PXE (BIOS/UEFI firmware) gets the iPXE binary name via TFTP.
+        let script_url = format!(
+            "{}/pxe/ipxe/{}",
+            cfg.http_boot_base.trim_end_matches('/'),
+            mac_n
+        );
+        let is_ipxe = matches!(
+            msg.opts().get(OptionCode::ClassIdentifier),
+            Some(DhcpOption::ClassIdentifier(v)) if String::from_utf8_lossy(v).contains("iPXE")
+        );
+        let is_uefi = matches!(
+            msg.opts().get(OptionCode::ClientSystemArchitecture),
+            Some(DhcpOption::ClientSystemArchitecture(a)) if arch_is_uefi(*a)
+        );
+        let bootfile: String = if cfg.tftp_enabled && !is_ipxe && !cfg.boot_file.is_empty() {
             cfg.boot_file.clone()
+        } else if cfg.tftp_enabled && !is_ipxe {
+            if is_uefi {
+                cfg.ipxe_uefi_file.clone()
+            } else {
+                cfg.ipxe_bios_file.clone()
+            }
+        } else if !cfg.boot_file.is_empty() {
+            cfg.boot_file.clone()
+        } else {
+            script_url.clone()
         };
         reply
             .opts_mut()
             .insert(DhcpOption::BootfileName(bootfile.clone().into_bytes()));
 
-        // option 66/67 style also via siaddr + file field
+        // option 66/67 style also via siaddr + file field. Legacy PXE clients
+        // use the sname/file fields for TFTP; iPXE clients consume option 67
+        // (the URL above). sname always holds the TFTP server for compatibility.
         reply.set_sname_str(cfg.next_server.to_string());
-        reply.set_fname_str(format!(
-            "{}/pxe/ipxe/{}",
-            cfg.http_boot_base.trim_end_matches('/'),
-            mac_n
-        ));
+        reply.set_fname_str(&bootfile);
 
         let mut out = Vec::new();
         if let Err(e) = reply.encode(&mut Encoder::new(&mut out)) {
@@ -424,4 +446,9 @@ fn parse_subnet_mask(cidr: &str) -> Result<Ipv4Addr, AppError> {
         // assume already a mask
         parse_ip(cidr)
     }
+}
+
+/// True when the DHCP client architecture indicates UEFI (any EFI flavor).
+fn arch_is_uefi(arch: dhcproto::v4::Architecture) -> bool {
+    !matches!(arch, dhcproto::v4::Architecture::Intelx86PC)
 }

@@ -4,6 +4,7 @@ pub mod dns;
 pub mod proxy;
 pub mod pxe;
 pub mod dhcp;
+pub mod tftp;
 pub mod metal_runtime;
 
 pub use siderolink::SideroLinkManager;

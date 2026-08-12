@@ -13,6 +13,7 @@ use crate::config::{MetalConfig, MetalDhcpConfig, MetalPxeConfig};
 use crate::db::pool::DbPool;
 use crate::network::dhcp::{self, DhcpServerConfig};
 use crate::network::pxe;
+use crate::network::tftp;
 use crate::AppError;
 
 /// Runtime metal subsystem: mutable config + service handles.
@@ -22,6 +23,7 @@ pub struct MetalRuntime {
     data_dir: PathBuf,
     dhcp_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     pxe_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    tftp_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
 impl MetalRuntime {
@@ -62,6 +64,7 @@ impl MetalRuntime {
             data_dir,
             dhcp_handle: tokio::sync::Mutex::new(None),
             pxe_handle: tokio::sync::Mutex::new(None),
+            tftp_handle: tokio::sync::Mutex::new(None),
         });
         // spawn initial services
         let rt2 = Arc::clone(&rt);
@@ -114,6 +117,13 @@ impl MetalRuntime {
                 info!("Stopped previous PXE HTTP server task");
             }
         }
+        {
+            let mut h = self.tftp_handle.lock().await;
+            if let Some(handle) = h.take() {
+                handle.abort();
+                info!("Stopped previous TFTP server task");
+            }
+        }
 
         // PXE
         if cfg.pxe.enabled || (cfg.enabled && cfg.pxe.enabled) {
@@ -126,6 +136,16 @@ impl MetalRuntime {
             &next_server.to_string(),
         ) {
             *self.pxe_handle.lock().await = Some(handle);
+        }
+
+        // TFTP (legacy PXE chainloader)
+        if cfg.pxe.tftp_enabled {
+            if let Some(handle) = tftp::spawn_tftp_server(
+                self.pool.clone(),
+                cfg.pxe.asset_dir.clone(),
+            ) {
+                *self.tftp_handle.lock().await = Some(handle);
+            }
         }
 
         // DHCP
@@ -141,6 +161,9 @@ impl MetalRuntime {
                 next_server,
                 http_boot_base,
                 boot_file: String::new(),
+                tftp_enabled: cfg.pxe.tftp_enabled,
+                ipxe_bios_file: cfg.pxe.ipxe_bios_file.clone(),
+                ipxe_uefi_file: cfg.pxe.ipxe_uefi_file.clone(),
             },
         ) {
             *self.dhcp_handle.lock().await = Some(handle);
@@ -154,6 +177,9 @@ impl MetalRuntime {
         }
         if cfg.pxe.enabled {
             info!(port = cfg.pxe.http_port, "Metal PXE HTTP (re)started");
+        }
+        if cfg.pxe.tftp_enabled {
+            info!("Metal TFTP (re)started");
         }
         Ok(())
     }
