@@ -37,58 +37,24 @@ impl TalosctlClient {
             )));
         }
 
-        // talosctl outputs NDJSON — one JSON object per disk
+        // talosctl outputs pretty-printed JSON objects, one per disk.
+        // Each object starts with '{' at column 0.
         let mut disks = Vec::new();
+        let mut current = String::new();
         for line in stdout.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
+            if line.trim_start().starts_with('{') && !current.is_empty() {
+                let obj: serde_json::Value = serde_json::from_str(&current)
+                    .map_err(|e| AppError::Network(format!("Failed to parse disk JSON: {e}")))?;
+                disks.push(extract_disk(&obj));
+                current.clear();
             }
-            let obj: serde_json::Value = serde_json::from_str(line)
+            current.push_str(line);
+            current.push('\n');
+        }
+        if !current.trim().is_empty() {
+            let obj: serde_json::Value = serde_json::from_str(&current)
                 .map_err(|e| AppError::Network(format!("Failed to parse disk JSON: {e}")))?;
-
-            let name = obj["metadata"]["id"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            let dev_path = obj["spec"]["dev_path"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            let size = obj["spec"]["size"].as_u64().unwrap_or(0);
-            let model = obj["spec"]["model"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            let transport = obj["spec"]["transport"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            let wwid = obj["spec"]["wwid"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            let readonly = obj["spec"]["readonly"].as_bool().unwrap_or(false);
-            let cdrom = obj["spec"]["cdrom"].as_bool().unwrap_or(false);
-            let pretty_size = obj["spec"]["pretty_size"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            let sector_size = obj["spec"]["sector_size"].as_u64().unwrap_or(512);
-
-            disks.push(serde_json::json!({
-                "deviceName": dev_path,
-                "name": name,
-                "serial": wwid,
-                "size": size,
-                "type": transport,
-                "model": model,
-                "systemDisk": false,
-                "readonly": readonly,
-                "cdrom": cdrom,
-                "prettySize": pretty_size,
-                "sectorSize": sector_size,
-            }));
+            disks.push(extract_disk(&obj));
         }
 
         info!(endpoint, disk_count = disks.len(), "talosctl list_disks");
@@ -151,4 +117,49 @@ impl TalosctlClient {
             )),
         }
     }
+}
+
+fn extract_disk(obj: &serde_json::Value) -> serde_json::Value {
+    let name = obj["metadata"]["id"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let dev_path = obj["spec"]["dev_path"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let size = obj["spec"]["size"].as_u64().unwrap_or(0);
+    let model = obj["spec"]["model"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let transport = obj["spec"]["transport"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let wwid = obj["spec"]["wwid"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let readonly = obj["spec"]["readonly"].as_bool().unwrap_or(false);
+    let cdrom = obj["spec"]["cdrom"].as_bool().unwrap_or(false);
+    let pretty_size = obj["spec"]["pretty_size"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let sector_size = obj["spec"]["sector_size"].as_u64().unwrap_or(512);
+
+    serde_json::json!({
+        "deviceName": dev_path,
+        "name": name,
+        "serial": wwid,
+        "size": size,
+        "type": transport,
+        "model": model,
+        "systemDisk": false,
+        "readonly": readonly,
+        "cdrom": cdrom,
+        "prettySize": pretty_size,
+        "sectorSize": sector_size,
+    })
 }
