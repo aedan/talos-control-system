@@ -167,7 +167,9 @@ impl TalosClient {
     }
 
     async fn connect(&self) -> Result<MachineServiceClient<talos_rust_client::Channel>, AppError> {
+        tracing::info!(insecure=self.insecure, endpoint=%self.endpoint, "TalosClient::connect starting");
         if self.insecure {
+            tracing::info!(endpoint=%self.endpoint, "taking insecure connector path");
             let channel = TalosConnector::new(&self.endpoint)
                 .insecure()
                 .connect()
