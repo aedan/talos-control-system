@@ -304,8 +304,10 @@ impl ClusterController {
     ) -> Result<TalosClient, AppError> {
         if let Some(addr) = endpoint_override.filter(|a| !a.is_empty()) {
             // Installer mode: connect insecurely (maintenance-mode cert)
+            tracing::info!(?addr, "using insecure maintenance client for installer");
             return Ok(TalosClient::for_maintenance(addr));
         }
+        tracing::info!("using standard mTLS client for installed node");
         let creds = self.load_creds(cluster)?;
         let addr = if machine.address.is_empty() {
             None
