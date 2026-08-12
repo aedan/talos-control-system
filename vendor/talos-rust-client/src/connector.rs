@@ -5,6 +5,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use std::sync::Arc;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
+use hyper_util::rt::TokioIo;
 use tracing::{debug, info, instrument};
 
 /// Connection builder for Talos gRPC API
@@ -86,7 +87,7 @@ impl TalosConnector {
     /// Fetch the server's self-signed certificate via raw TLS handshake.
     /// Returns the DER-encoded certificate bytes.
     async fn fetch_server_cert(host: &str, port: u16) -> std::result::Result<Vec<u8>, Error> {
-        let tls_config = Arc::new(Self::build_insecure_rustls_config());
+        let tls_config = Self::build_insecure_rustls_config();
         let addr = format!("{}:{}", host, port);
         let stream = tokio::net::TcpStream::connect(&addr).await
             .map_err(|e| Error::Other(format!("TCP connect failed: {}", e)))?;
@@ -95,14 +96,18 @@ impl TalosConnector {
             ServerName::try_from(host.to_string())
                 .map_err(|_| Error::Other("invalid server name".to_string()))?;
 
-        let connector = tokio_rustls::TlsConnector::from(tls_config);
-        let tls_stream = connector.connect(server_name, stream).await
+        // Use raw rustls ClientConnection to get access to peer cert
+        let mut conn = rustls::ClientConnection::new(tls_config, server_name)
+            .map_err(|e| Error::Other(format!("rustls connection init failed: {}", e)))?;
+
+        let mut io = TokioIo::new(stream);
+        conn.complete_io(&mut io).await
             .map_err(|e| Error::Other(format!("TLS handshake failed: {}", e)))?;
 
-        let der = tls_stream.get_ref().0.peer_cert()
+        conn.peer_cert()
             .cloned()
-            .ok_or_else(|| Error::Other("server did not present a certificate".to_string()))?;
-        Ok(der.to_vec())
+            .ok_or_else(|| Error::Other("server did not present a certificate".to_string()))?
+            .into()
     }
 
     /// Build a rustls ClientConfig with AcceptAnyCert verifier and no client auth.
