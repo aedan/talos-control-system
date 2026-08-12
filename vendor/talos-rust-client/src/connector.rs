@@ -115,6 +115,26 @@ impl TalosConnector {
         Ok(pem.into_bytes())
     }
 
+    /// Embedded dummy client certificate PEM for maintenance-mode mTLS.
+    const DUMMY_CLIENT_CERT: &[u8] = b"-----BEGIN CERTIFICATE-----\n\
+        MIIBljCCAT2gAwIBAgIUeiMV1qZVNvf/ntJArix1bt4FLRUwCgYIKoZIzj0EAwIw\n\
+        ITEfMB0GA1UEAwwWVENTIE1haW50ZW5hbmNlIENsaWVudDAeFw0yNjA4MTIxNjM1\n\
+        NTFaFw0yNzA4MTIxNjM1NTFaMCExHzAdBgNVBAMMFlRDUyBNYWludGVuYW5jZSBD\n\
+        bGllbnQwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASu3YnDPlANTWErgJhLj2oE\n\
+        I9qlrUYWEn4siuwzHqNZrQtXAOiFc/xJMfZl63zVR831FACE0BWdsAdXXpTTsu8/\n\
+        o1MwUTAdBgNVHQ4EFgQU24vKf+ijT8kH1yeZ5hvtFepWLyEwHwYDVR0jBBgwFoAU\n\
+        24vKf+ijT8kH1yeZ5hvtFepWLyEwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQD\n\
+        AgNHADBEAiAOKuGmobAlwcfjW66gjepu8eUqEXRaIc/fThw/baH8NwIgc70SnyqT\n\
+        WSxddZFE67OWao4DcM/0P8dZ9UHy2sRe2qU=\n\
+        -----END CERTIFICATE-----";
+
+    /// Embedded dummy client private key PEM for maintenance-mode mTLS.
+    const DUMMY_CLIENT_KEY: &[u8] = b"-----BEGIN PRIVATE KEY-----\n\
+        MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgvs1IQJZ+mthKs8u6\n\
+        1c9Wsh2ewOtqPSrmwuqEqmQwjkqhRANCAASu3YnDPlANTWErgJhLj2oEI9qlrUYW\n\
+        En4siuwzHqNZrQtXAOiFc/xJMfZl63zVR831FACE0BWdsAdXXpTTsu8/\n\
+        -----END PRIVATE KEY-----";
+
     /// Connect to the Talos API
     #[instrument(skip(self))]
     pub async fn connect(self) -> Result<Channel> {
@@ -131,8 +151,12 @@ impl TalosConnector {
             let server_ca_pem = Self::fetch_server_cert(host, port).await?;
             info!(%host, port, "trusted server cert");
 
+            let dummy_identity = Identity::from_pem(Self::DUMMY_CLIENT_CERT, Self::DUMMY_CLIENT_KEY);
+            info!("sending dummy client cert for mTLS");
+
             let mut tls_config = ClientTlsConfig::new()
-                .ca_certificate(Certificate::from_pem(server_ca_pem));
+                .ca_certificate(Certificate::from_pem(server_ca_pem))
+                .identity(dummy_identity);
             tls_config = tls_config.domain_name(host);
 
             Endpoint::from_shared(self.endpoint.clone())
