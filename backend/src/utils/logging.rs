@@ -2,7 +2,7 @@ use tracing_subscriber::EnvFilter;
 
 pub fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("talos_control_system=info,tower_http=debug,talos_rust_client=info"));
+        .unwrap_or_else(|_| EnvFilter::new("talos_control_system=info,tower_http=debug,talos_rust_client=info,hyper=debug,h3=debug,h2=debug,rustls=debug"));
 
     let use_json = std::env::var("TCS_LOG_JSON").is_ok();
 
