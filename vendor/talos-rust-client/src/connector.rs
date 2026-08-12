@@ -4,8 +4,13 @@ use crate::error::{Error, Result};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use std::sync::Arc;
+use std::io::{Read, Write};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use hyper_util::rt::TokioIo;
+use hyper_util::rt::is_http2::IsConnectionHttp2;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tracing::{debug, info, instrument};
 
 /// Connection builder for Talos gRPC API
@@ -177,8 +182,67 @@ impl InsecureConnector {
     }
 }
 
+/// Wrapper around TLS stream that signals HTTP/2 to hyper via `IsConnectionHttp2`.
+struct Http2TlsStream(tokio_rustls::client::TlsStream<tokio::net::TcpStream>);
+
+impl Read for Http2TlsStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        Pin::new(&mut self.0).read(buf)
+    }
+}
+
+impl Write for Http2TlsStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        Pin::new(&mut self.0).write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Pin::new(&mut self.0).flush()
+    }
+}
+
+impl AsyncRead for Http2TlsStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for Http2TlsStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.0).poll_shutdown(cx)
+    }
+}
+
+impl IsConnectionHttp2 for Http2TlsStream {
+    fn is_http2(&self) -> bool {
+        true
+    }
+}
+
 impl tower::Service<http::Uri> for InsecureConnector {
-    type Response = TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>;
+    type Response = TokioIo<Http2TlsStream>;
     type Error = std::io::Error;
     type Future = std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
 
@@ -201,7 +265,7 @@ impl tower::Service<http::Uri> for InsecureConnector {
             let connector = tokio_rustls::TlsConnector::from(tls_config);
             let tls_stream = connector.connect(server_name, stream).await
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionAborted, e.to_string()))?;
-            Ok(TokioIo::new(tls_stream))
+            Ok(TokioIo::new(Http2TlsStream(tls_stream)))
         })
     }
 }
