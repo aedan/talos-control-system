@@ -340,8 +340,8 @@ async fn run_dhcp_loop(pool: DbPool, cfg: DhcpServerConfig) -> Result<(), AppErr
         if !dns.is_empty() {
             reply.opts_mut().insert(DhcpOption::DomainNameServer(dns.clone()));
         }
-        // bootfile — iPXE chain via HTTP when client is iPXE or HTTP-capable;
-        // legacy PXE (BIOS/UEFI firmware) gets the iPXE binary name via TFTP.
+        // bootfile — iPXE chain via HTTP when client is iPXE; legacy PXE
+        // (BIOS/UEFI firmware) gets the iPXE binary name via TFTP.
         let script_url = format!(
             "{}/pxe/ipxe/{}",
             cfg.http_boot_base.trim_end_matches('/'),
@@ -355,9 +355,11 @@ async fn run_dhcp_loop(pool: DbPool, cfg: DhcpServerConfig) -> Result<(), AppErr
             msg.opts().get(OptionCode::ClientSystemArchitecture),
             Some(DhcpOption::ClientSystemArchitecture(a)) if arch_is_uefi(*a)
         );
-        let bootfile: String = if cfg.tftp_enabled && !is_ipxe && !cfg.boot_file.is_empty() {
+        let bootfile: String = if is_ipxe {
+            script_url.clone()
+        } else if cfg.tftp_enabled && !cfg.boot_file.is_empty() {
             cfg.boot_file.clone()
-        } else if cfg.tftp_enabled && !is_ipxe {
+        } else if cfg.tftp_enabled {
             if is_uefi {
                 cfg.ipxe_uefi_file.clone()
             } else {
