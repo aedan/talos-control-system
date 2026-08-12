@@ -191,9 +191,10 @@ impl TalosConnector {
     #[instrument(skip(self))]
     pub async fn connect(self) -> Result<Channel> {
         debug!("Connecting to Talos API at {} (insecure={})", self.endpoint, self.insecure);
+        tracing::info!(insecure=self.insecure, endpoint=%self.endpoint, "TalosConnector::connect");
 
         let channel = if self.insecure {
-            debug!("Using insecure TLS connector");
+            tracing::info!("Using insecure TLS connector for maintenance mode");
             let connector = InsecureTlsConnector::new()?;
             Endpoint::from_shared(self.endpoint.clone())
                 .map_err(|e| Error::Other(format!("Invalid endpoint: {e}")))?
