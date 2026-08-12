@@ -706,6 +706,19 @@ impl TalosClient {
     }
 
     async fn connect_channel(&self) -> Result<tonic::transport::Channel, AppError> {
+        if self.insecure {
+            return TalosConnector::new(&self.endpoint)
+                .insecure()
+                .connect()
+                .await
+                .map_err(|e| {
+                    AppError::Network(format!(
+                        "Failed to connect to Talos API at {}: {}",
+                        self.endpoint, e
+                    ))
+                });
+        }
+
         let key = ensure_pkcs8_pem(&self.key)?;
         TalosConnector::new(&self.endpoint)
             .ca_pem(self.ca.clone())
