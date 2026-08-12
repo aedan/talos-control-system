@@ -1,12 +1,11 @@
 //! Connection builder for Talos gRPC API with mTLS support
 
 use crate::error::{Error, Result};
-use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::CertificateDer;
-use std::net::ToSocketAddrs;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use std::sync::Arc;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
-use tracing::{debug, instrument, info};
+use tracing::{debug, info, instrument};
 
 /// Connection builder for Talos gRPC API
 #[derive(Debug, Clone)]
@@ -78,45 +77,39 @@ impl TalosConnector {
     }
 
     /// Disable TLS verification (accept any cert, skip client auth).
-    /// Use this for maintenance-mode connections where the installer
-    /// serves a self-signed certificate.
+    /// Fetches the server's self-signed cert at runtime and trusts it.
     pub fn insecure(mut self) -> Self {
         self.insecure = true;
         self
     }
 
-    /// Fetch the server's TLS certificate by connecting via raw TCP.
-    async fn fetch_server_cert(addr: &str, port: u16) -> Result<Vec<u8>> {
-        info!(%addr, port, "fetching server TLS cert for insecure connection");
-        let addr_str = format!("{}:{}", addr, port);
-        let socket = tokio::net::TcpStream::connect(addr_str.as_str())
-            .await
-            .map_err(|e| Error::TlsConfig(format!("Failed to connect to {}: {}", addr_str, e)))?;
+    /// Fetch the server's TLS cert via raw TCP, return PEM bytes.
+    async fn fetch_server_cert(host: &str, port: u16) -> Result<Vec<u8>> {
+        let addr_str = format!("{}:{}", host, port);
+        let stream = tokio::net::TcpStream::connect(&addr_str).await
+            .map_err(|e| Error::TlsConfig(format!("connect to {}: {}", addr_str, e)))?;
 
-        // Wrap with TLS using a permissive config
-        let config = tokio_rustls::TlsConnector::from(Arc::new(
-            rustls::ClientConfig::builder()
-                .with_safe_defaults()
-                .with_custom_certificate_verifier(Arc::new(NoVerifier))
-                .with_no_client_auth(),
-        ));
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("safe defaults")
+            .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
 
-        let server_name = rustls::pki_types::ServerName::try_from(addr)
-            .map_err(|e| Error::TlsConfig(format!("Invalid server name: {}", e)))?;
+        let server_name = ServerName::try_from(host)
+            .map_err(|e| Error::TlsConfig(format!("invalid server name {}: {}", host, e)))?;
+        let tls_stream = connector.connect(server_name, stream).await
+            .map_err(|e| Error::TlsConfig(format!("TLS handshake to {}: {}", addr_str, e)))?;
 
-        let mut tls_stream = config.connect(server_name, socket)
-            .await
-            .map_err(|e| Error::TlsConfig(format!("TLS handshake failed: {}", e)))?;
+        let cert_der = tls_stream.get_ref().1.peer_certificates()
+            .and_then(|certs| certs.first())
+            .ok_or_else(|| Error::TlsConfig("server did not present certificate".to_string()))?;
 
-        // Read the server cert from the TLS connection
-        let cert = tls_stream
-            .peer_certificate()
-            .ok_or_else(|| Error::TlsConfig("Server did not present a certificate".to_string()))?
-            .clone();
-
-        // Convert DER to PEM using rustls-pki-types
-        let pem = cert.to_pem()
-            .map_err(|e| Error::TlsConfig(format!("PEM encode failed: {}", e)))?;
+        let pem = format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----",
+            base64_encode(cert_der.as_ref())
+        );
         Ok(pem.into_bytes())
     }
 
@@ -126,42 +119,32 @@ impl TalosConnector {
         debug!("Connecting to Talos API at {} (insecure={})", self.endpoint, self.insecure);
 
         let channel = if self.insecure {
-            info!(endpoint=%self.endpoint, "using insecure maintenance TLS");
-            // Parse host and port from endpoint URL
+            info!(endpoint = %self.endpoint, "using insecure maintenance TLS");
             let parsed = url::Url::parse(&self.endpoint)
-                .map_err(|e| Error::Other(format!("Invalid endpoint: {}", e)))?;
+                .map_err(|e| Error::Other(format!("invalid endpoint: {}", e)))?;
             let host = parsed.host_str()
-                .ok_or_else(|| Error::Other("No host in endpoint".to_string()))?;
+                .ok_or_else(|| Error::Other("no host in endpoint".to_string()))?;
             let port = parsed.port().unwrap_or(443);
 
-            // Fetch the server's self-signed cert and trust it
-            let server_ca_pem = Self::fetch_server_cert(host, port).await
-                .map_err(|e| Error::TlsConfig(format!("Failed to fetch server cert: {}", e)))?;
-            let server_ca = Certificate::from_pem(server_ca_pem);
+            let server_ca_pem = Self::fetch_server_cert(host, port).await?;
+            info!(%host, port, "trusted server cert");
 
             let mut tls_config = ClientTlsConfig::new()
-                .ca_certificate(server_ca);
-
+                .ca_certificate(Certificate::from_pem(server_ca_pem));
             tls_config = tls_config.domain_name(host);
 
             Endpoint::from_shared(self.endpoint.clone())
-                .map_err(|e| Error::Other(format!("Invalid endpoint: {}", e)))?
+                .map_err(|e| Error::Other(format!("invalid endpoint: {}", e)))?
                 .tls_config(tls_config)
-                .map_err(|e| Error::TlsConfig(format!("Failed to configure TLS: {}", e)))?
+                .map_err(|e| Error::TlsConfig(format!("TLS config error: {}", e)))?
                 .connect()
                 .await
-                .map_err(|e| Error::TlsConfig(format!("Failed to connect: {}", e)))?
+                .map_err(|e| Error::TlsConfig(format!("connection failed: {}", e)))?
         } else {
             debug!("Using mTLS connector");
-            let ca_cert = self
-                .ca_cert
-                .ok_or_else(|| Error::MissingConfig("CA certificate".to_string()))?;
-            let client_cert = self
-                .client_cert
-                .ok_or_else(|| Error::MissingConfig("Client certificate".to_string()))?;
-            let client_key = self
-                .client_key
-                .ok_or_else(|| Error::MissingConfig("Client key".to_string()))?;
+            let ca_cert = self.ca_cert.ok_or_else(|| Error::MissingConfig("CA certificate".into()))?;
+            let client_cert = self.client_cert.ok_or_else(|| Error::MissingConfig("Client certificate".into()))?;
+            let client_key = self.client_key.ok_or_else(|| Error::MissingConfig("Client key".into()))?;
 
             let ca = Certificate::from_pem(ca_cert);
             let identity = Identity::from_pem(client_cert, client_key);
@@ -181,7 +164,7 @@ impl TalosConnector {
             }
 
             Endpoint::from_shared(self.endpoint.clone())
-                .map_err(|e| Error::Other(format!("Invalid endpoint: {}", e)))?
+                .map_err(|e| Error::Other(format!("invalid endpoint: {}", e)))?
                 .tls_config(tls_config)
                 .map_err(|e| Error::TlsConfig(format!("Failed to set TLS config: {}", e)))?
                 .connect()
@@ -193,32 +176,57 @@ impl TalosConnector {
     }
 }
 
-/// No-op certificate verifier for fetching the server cert
-#[derive(Debug)]
-struct NoVerifier;
+/// Base64-encode bytes with 64-char line wrapping (standard PEM encoding).
+fn base64_encode(data: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::with_capacity((data.len() + 2) * 4 / 3);
+    for chunk in data.chunks(3) {
+        let a = chunk[0] as u32;
+        let b = chunk.get(1).copied().unwrap_or(0) as u32;
+        let c = chunk.get(2).copied().unwrap_or(0) as u32;
+        let triple = (a << 16) | (b << 8) | c;
+        out.push(TABLE[((triple >> 18) & 0x3F) as usize]);
+        out.push(TABLE[((triple >> 12) & 0x3F) as usize]);
+        out.push(TABLE[((triple >> 6) & 0x3F) as usize]);
+        out.push(TABLE[(triple & 0x3F) as usize]);
+    }
+    match data.len() % 3 {
+        1 => { out[out.len()-2..].copy_from_slice(b"=="); }
+        2 => { out[out.len()-1..].copy_from_slice(b"="); }
+        _ => {}
+    }
+    let s = String::from_utf8(out).unwrap();
+    s.chars().collect::<Vec<_>>()
+        .chunks(64)
+        .map(|c| c.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
-impl rustls::client::danger::ServerCertVerifier for NoVerifier {
+/// No-op server cert verifier for fetching the installer's self-signed cert.
+#[derive(Debug)]
+struct AcceptAnyCert;
+
+impl ServerCertVerifier for AcceptAnyCert {
     fn verify_server_cert(
         &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
+        _now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
         &self,
         message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
+        cert: &CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
         rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
+            message, cert, dss,
             &rustls::crypto::ring::default_provider().signature_verification_algorithms,
         )
     }
@@ -226,13 +234,11 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
     fn verify_tls13_signature(
         &self,
         message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
+        cert: &CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
         rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
+            message, cert, dss,
             &rustls::crypto::ring::default_provider().signature_verification_algorithms,
         )
     }
