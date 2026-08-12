@@ -5,7 +5,6 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use std::sync::Arc;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
-use hyper_util::rt::TokioIo;
 use tracing::{debug, info, instrument};
 
 /// Connection builder for Talos gRPC API
@@ -85,9 +84,9 @@ impl TalosConnector {
     }
 
     /// Fetch the server's self-signed certificate via raw TLS handshake.
-    /// Returns the DER-encoded certificate bytes.
+    /// Returns the PEM-encoded certificate bytes.
     async fn fetch_server_cert(host: &str, port: u16) -> std::result::Result<Vec<u8>, Error> {
-        let tls_config = Self::build_insecure_rustls_config();
+        let tls_config = Arc::new(Self::build_insecure_rustls_config());
         let addr = format!("{}:{}", host, port);
         let stream = tokio::net::TcpStream::connect(&addr).await
             .map_err(|e| Error::Other(format!("TCP connect failed: {}", e)))?;
@@ -96,18 +95,17 @@ impl TalosConnector {
             ServerName::try_from(host.to_string())
                 .map_err(|_| Error::Other("invalid server name".to_string()))?;
 
-        // Use raw rustls ClientConnection to get access to peer cert
-        let mut conn = rustls::ClientConnection::new(tls_config, server_name)
-            .map_err(|e| Error::Other(format!("rustls connection init failed: {}", e)))?;
-
-        let mut io = TokioIo::new(stream);
-        conn.complete_io(&mut io).await
+        let connector = tokio_rustls::TlsConnector::from(tls_config);
+        let tls_stream = connector.connect(server_name, stream).await
             .map_err(|e| Error::Other(format!("TLS handshake failed: {}", e)))?;
 
-        conn.peer_cert()
-            .cloned()
-            .ok_or_else(|| Error::Other("server did not present a certificate".to_string()))?
-            .into()
+        let conn = tls_stream.get_ref().0;
+        let der = conn
+            .peer_certificates()
+            .and_then(|certs| certs.first())
+            .ok_or_else(|| Error::Other("server did not present a certificate".to_string()))?;
+
+        Ok(der_to_pem(der).into_bytes())
     }
 
     /// Build a rustls ClientConfig with AcceptAnyCert verifier and no client auth.
@@ -137,12 +135,9 @@ impl TalosConnector {
 
             // Fetch the server's self-signed cert at runtime (it changes on each boot)
             debug!(%host, port, "fetching server certificate");
-            let server_cert_der = Self::fetch_server_cert(host, port).await?;
+            let server_cert_pem = Self::fetch_server_cert(host, port).await?;
 
-            // Encode the DER cert as PEM for tonic's Certificate
-            let server_cert_pem = der_to_pem(&server_cert_der);
-
-            let ca = Certificate::from_pem(server_cert_pem.into_bytes());
+            let ca = Certificate::from_pem(server_cert_pem);
 
             let tls_config = ClientTlsConfig::new()
                 .ca_certificate(ca)
