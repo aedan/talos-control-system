@@ -190,16 +190,19 @@ impl TalosConnector {
     /// Connect to the Talos API
     #[instrument(skip(self))]
     pub async fn connect(self) -> Result<Channel> {
-        debug!("Connecting to Talos API at {}", self.endpoint);
+        debug!("Connecting to Talos API at {} (insecure={})", self.endpoint, self.insecure);
 
         let channel = if self.insecure {
+            debug!("Using insecure TLS connector");
             let connector = InsecureTlsConnector::new()?;
-            Endpoint::from_shared(self.endpoint.clone())
-                .map_err(|e| Error::Other(format!("Invalid endpoint: {e}")))?
-                .connect_with_connector(connector)
-                .await
+            let ep = Endpoint::from_shared(self.endpoint.clone())
+                .map_err(|e| Error::Other(format!("Invalid endpoint: {e}")))?;
+            let ch = ep.connect_with_connector(connector)
+                .map_err(|e| Error::TlsConfig(format!("connect_with_connector failed: {e}")))?;
+            ch.connect().await
                 .map_err(|e| Error::TlsConfig(format!("Failed to connect: {e}")))?
         } else {
+            debug!("Using mTLS connector");
             let ca_cert = self
                 .ca_cert
                 .ok_or_else(|| Error::MissingConfig("CA certificate".to_string()))?;
