@@ -108,7 +108,9 @@ pub fn build_ipxe_script(
     let base = http_base.trim_end_matches('/');
     let kernel = format!("{base}/pxe/assets/{version}/{arch}/vmlinuz-{arch}");
     let initrd = format!("{base}/pxe/assets/{version}/{arch}/initramfs-{arch}.xz");
-    let mut cmdline = format!("initrd=initramfs-{arch}.xz talos.platform=metal");
+    let mut cmdline = format!(
+        "initrd=initramfs-{arch}.xz talos.platform=metal slab_nomerge pti=on"
+    );
     if !profile_cmdline.is_empty() {
         cmdline.push(' ');
         cmdline.push_str(profile_cmdline);
