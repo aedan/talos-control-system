@@ -3480,6 +3480,8 @@ pub struct GenerateConfigRequest {
     pub cert_sans: Vec<String>,
     #[serde(default)]
     pub cluster_domain: String,
+    #[serde(default)]
+    pub system_extensions: Option<Vec<String>>,
 }
 
 fn default_talos_ver() -> String { "v1.13.7".into() }
@@ -3523,6 +3525,7 @@ pub async fn generate_cluster_config(
             payload.wipe,
             &payload.cert_sans,
             if payload.cluster_domain.is_empty() { "cluster.local" } else { &payload.cluster_domain },
+            payload.system_extensions,
         )
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
