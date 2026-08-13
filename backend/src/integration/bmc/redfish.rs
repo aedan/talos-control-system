@@ -79,9 +79,9 @@ impl RedfishClient {
 
     fn system_url(&self) -> String {
         if self.system_path.starts_with("http") {
-            self.system_path.clone()
+            self.system_path.trim_end_matches('/').to_string()
         } else {
-            format!("{}{}", self.base, self.system_path)
+            format!("{}{}", self.base, self.system_path.trim_end_matches('/'))
         }
     }
 
