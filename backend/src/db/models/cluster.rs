@@ -39,6 +39,9 @@ pub struct Cluster {
     pub created_at: DateTime<Utc>,
     #[sqlx(rename = "updated_at")]
     pub updated_at: DateTime<Utc>,
+    /// JSON blob of network config (NetworkConfigParams) for auto-generation.
+    #[sqlx(rename = "network_config")]
+    pub network_config: Option<String>,
 }
 
 impl Cluster {
@@ -58,6 +61,7 @@ impl Cluster {
             last_auto_backup_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            network_config: None,
         }
     }
 

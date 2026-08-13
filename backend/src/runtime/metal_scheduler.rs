@@ -275,12 +275,30 @@ async fn run_job(
             }
         }
         "wait_post_install" => {
+            let lease_ip = if !machine.mac_address.is_empty() {
+                repos::dhcp_lease::get_by_mac(pool, &machine.mac_address)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|l| l.ip)
+                    .filter(|ip| !ip.is_empty())
+            } else {
+                None
+            };
+            let endpoint = lease_ip.or_else(|| {
+                if !machine.address.is_empty() {
+                    Some(machine.address.clone())
+                } else {
+                    None
+                }
+            });
+            let boot_addr = endpoint.as_deref().unwrap_or("");
             let ctrl = ClusterController::with_context(
                 pool.clone(),
                 sqlite_path.to_string(),
                 jwt_secret.to_string(),
             );
-            match ctrl.machine_version(machine_id).await {
+            match ctrl.machine_version_with_endpoint(machine_id, Some(boot_addr)).await {
                 Ok(v) => {
                     log(&mut payload, &format!("post-install version {v}"));
                     if payload.auto_bootstrap {
@@ -392,6 +410,11 @@ async fn load_config_yaml(
                 machine.address.strip_suffix(":6443").unwrap_or(&machine.address).to_string()
             };
 
+            // Restore network config from cluster metadata (persisted by generate_config)
+            let nc = cluster.network_config.as_ref().and_then(|j| {
+                serde_json::from_str::<crate::controllers::provision::NetworkConfigParams>(j).ok()
+            });
+
             let install_disk = if machine.install_disk.is_empty() {
                 "/dev/sda"
             } else {
@@ -404,11 +427,12 @@ async fn load_config_yaml(
                     &cluster.talos_version,
                     &cluster.control_plane_version,
                     Some(cluster_id),
-                    None, // network config from metadata
+                    nc,
                     install_disk,
                     true,
                     &[endpoint.clone()],
                     "cluster.local",
+                    None, // uses DEFAULT_SYSTEM_EXTENSIONS
                 )
                 .await?;
 

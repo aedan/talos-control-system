@@ -101,6 +101,34 @@ impl TalosctlClient {
         Ok(())
     }
 
+    /// Probe a node via talosctl maintenance mode (get disks works universally).
+    /// Returns the server version string from the warning or "reachable".
+    pub async fn probe_maintenance(endpoint: &str) -> Result<String, AppError> {
+        Self::ensure_installed().await?;
+
+        let out = Command::new("talosctl")
+            .args(["get", "disks", "-i", "-e", endpoint, "-n", endpoint, "-o", "json"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| AppError::Network(format!("talosctl spawn: {e}")))?;
+
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+
+        if !out.status.success() {
+            return Err(AppError::Network(format!(
+                "talosctl probe failed: {} {}",
+                stdout.trim(),
+                stderr.trim()
+            )));
+        }
+
+        info!(endpoint, "talosctl probe_maintenance successful");
+        Ok("reachable".to_string())
+    }
+
     async fn ensure_installed() -> Result<(), AppError> {
         // Best-effort check — if command is on PATH, proceed.
         match Command::new("talosctl")

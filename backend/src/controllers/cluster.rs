@@ -95,6 +95,7 @@ impl ClusterController {
             last_auto_backup_at: None,
             created_at: now,
             updated_at: now,
+            network_config: None,
         };
 
         let cluster = crate::db::repos::cluster::create(&self.pool, &cluster).await?;
@@ -839,6 +840,21 @@ impl ClusterController {
         m.updated_at = chrono::Utc::now();
         let _ = crate::db::repos::machine::update(&self.pool, &m).await;
         Ok(version)
+    }
+
+    /// Like [`Self::machine_version`] but connects via an explicit endpoint
+    /// using talosctl maintenance mode (used during post-install when the node
+    /// may only have its DHCP lease address and no valid machine certs yet).
+    pub async fn machine_version_with_endpoint(
+        &self,
+        _machine_id: Uuid,
+        endpoint: Option<&str>,
+    ) -> Result<String, AppError> {
+        if let Some(addr) = endpoint.filter(|a| !a.is_empty()) {
+            crate::integration::talosctl::TalosctlClient::probe_maintenance(addr).await
+        } else {
+            Err(AppError::InvalidInput("no endpoint provided".into()))
+        }
     }
 
     pub async fn machine_services(

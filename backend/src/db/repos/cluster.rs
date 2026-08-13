@@ -170,6 +170,27 @@ pub async fn mark_auto_backup(pool: &DbPool, id: uuid::Uuid) -> Result<(), AppEr
     Ok(())
 }
 
+pub async fn set_network_config(
+    pool: &DbPool,
+    id: uuid::Uuid,
+    network_config: &str,
+) -> Result<(), AppError> {
+    let n = pool
+        .execute(
+            "UPDATE clusters SET network_config = ?, updated_at = ? WHERE id = ?",
+            &[
+                SqlVal::text(network_config),
+                SqlVal::DateTime(chrono::Utc::now()),
+                SqlVal::Uuid(id),
+            ],
+        )
+        .await?;
+    if n == 0 {
+        return Err(AppError::NotFound(format!("Cluster {} not found", id)));
+    }
+    Ok(())
+}
+
 pub async fn list_with_backup_schedule(pool: &DbPool) -> Result<Vec<Cluster>, AppError> {
     pool.fetch_all_as(
         "SELECT * FROM clusters
