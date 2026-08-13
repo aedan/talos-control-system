@@ -75,11 +75,12 @@ impl IpmiClient {
             .map_err(|e| AppError::Network(format!("ipmitool spawn: {e}")))?;
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        if !out.status.success() {
+        let stderr_trimmed = stderr.trim();
+        if !out.status.success() || stderr_trimmed.to_lowercase().starts_with("error:") {
             return Err(AppError::Network(format!(
                 "ipmitool failed: {} {}",
                 stdout.trim(),
-                stderr.trim()
+                stderr_trimmed
             )));
         }
         Ok(stdout)
