@@ -291,11 +291,9 @@ impl RedfishClient {
         };
         let enabled = if once { "Once" } else { "Continuous" };
         let body = serde_json::json!({
-            "Boot": {
-                "BootSourceOverrideTarget": boot_target,
-                "BootSourceOverrideEnabled": enabled,
-                "BootSourceOverrideMode": "Uefi"
-            }
+            "BootSourceOverrideTarget": boot_target,
+            "BootSourceOverrideEnabled": enabled,
+            "BootSourceOverrideMode": "Legacy"
         });
         let resp = self
             .http
