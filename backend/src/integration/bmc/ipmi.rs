@@ -114,12 +114,9 @@ impl IpmiClient {
     }
 
     pub async fn set_boot(&self, target: BootTarget, _once: bool) -> Result<(), AppError> {
-        // options=efiboot helps UEFI PXE on many servers
         match target {
             BootTarget::Pxe => {
-                let _ = self
-                    .run(&["chassis", "bootdev", "pxe", "options=efiboot"])
-                    .await?;
+                let _ = self.run(&["chassis", "bootdev", "pxe"]).await?;
             }
             BootTarget::Disk => {
                 let _ = self.run(&["chassis", "bootdev", "disk"]).await?;
