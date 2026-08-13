@@ -143,6 +143,7 @@ impl MetalRuntime {
             if let Some(handle) = tftp::spawn_tftp_server(
                 self.pool.clone(),
                 cfg.pxe.asset_dir.clone(),
+                cfg.dhcp.interface.clone(),
             ) {
                 *self.tftp_handle.lock().await = Some(handle);
             }

@@ -258,7 +258,7 @@ pub fn spawn_pxe_server(
         config: config.clone(),
         http_base: http_base.clone(),
     };
-    let addr: SocketAddr = format!("0.0.0.0:{port}").parse().ok()?;
+    let addr: SocketAddr = format!("{host}:{port}").parse().ok()?;
     Some(tokio::spawn(async move {
         let app = pxe_router(st);
         match tokio::net::TcpListener::bind(addr).await {

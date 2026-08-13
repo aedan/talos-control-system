@@ -440,14 +440,13 @@ fn render_network_yaml(nc: &NetworkConfigParams) -> String {
     yaml.push_str(&lacp_yaml);
     yaml.push_str("          interfaces:\n");
     yaml.push_str(&interfaces_list);
-    yaml.push_str("\n");
+    yaml.push_str(&ignore_yaml);
     yaml.push_str("    vlans:\n");
     yaml.push_str(&format!("      - vlanId: {}\n", nc.vlan_id));
     yaml.push_str(&vlan_mtu);
     yaml.push_str("        addresses:\n");
     yaml.push_str(&format!("          - __IP__/{subnet_cidr}\n"));
     yaml.push_str(&routes_yaml);
-    yaml.push_str(&ignore_yaml);
     yaml.push_str(&dns_yaml);
 
     yaml
@@ -726,7 +725,7 @@ fn render_extensions_yaml(extensions: &[&str]) -> String {
     }
     format!("    extensions:\n{}", extensions
         .iter()
-        .map(|e| format!("      - name: {e}"))
+        .map(|e| format!("      - {e}"))
         .collect::<Vec<_>>()
         .join("\n"))
 }

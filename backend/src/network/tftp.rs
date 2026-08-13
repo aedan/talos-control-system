@@ -24,20 +24,26 @@ const MAX_BLOCK_SIZE: usize = 1468;
 pub fn spawn_tftp_server(
     _pool: DbPool,
     asset_dir: String,
+    bind_interface: String,
 ) -> Option<JoinHandle<()>> {
     Some(tokio::spawn(async move {
-        if let Err(e) = run_tftp_loop(&asset_dir).await {
+        if let Err(e) = run_tftp_loop(&asset_dir, &bind_interface).await {
             warn!(error = %e, "TFTP server stopped");
         }
     }))
 }
 
-async fn run_tftp_loop(asset_dir: &str) -> Result<(), AppError> {
+async fn run_tftp_loop(asset_dir: &str, bind_interface: &str) -> Result<(), AppError> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
         .map_err(|e| AppError::Network(format!("TFTP socket: {e}")))?;
     socket
         .set_reuse_address(true)
         .map_err(|e| AppError::Network(format!("TFTP reuse: {e}")))?;
+    if !bind_interface.is_empty() {
+        if let Err(e) = socket.bind_device(Some(bind_interface.as_bytes())) {
+            warn!(interface = bind_interface, error = %e, "TFTP: failed to bind to interface");
+        }
+    }
     socket
         .bind(&SocketAddr::from(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, TFTP_PORT)).into())
         .map_err(|e| AppError::Network(format!("TFTP bind :{TFTP_PORT}: {e}")))?;
@@ -48,7 +54,7 @@ async fn run_tftp_loop(asset_dir: &str) -> Result<(), AppError> {
     let sock = UdpSocket::from_std(std_sock)
         .map_err(|e| AppError::Network(format!("TFTP tokio socket: {e}")))?;
 
-    info!("TFTP server listening on UDP/{TFTP_PORT} (asset dir {asset_dir})");
+    info!(interface = bind_interface, "TFTP server listening on UDP/{TFTP_PORT} (asset dir {asset_dir})");
 
     let mut buf = vec![0u8; 1024];
     loop {
