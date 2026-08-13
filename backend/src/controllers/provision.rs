@@ -26,7 +26,7 @@ pub struct ProvisionController {
     jwt_secret: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NetworkConfigParams {
     pub bond_name: String,
     pub bond_interfaces: Vec<String>,
@@ -41,6 +41,13 @@ pub struct NetworkConfigParams {
     pub dns: Vec<String>,
     pub mtu: Option<u32>,
 }
+
+/// Default kernel module extensions for metal provisioning.
+pub const DEFAULT_SYSTEM_EXTENSIONS: &[&str] = &[
+    "siderolabs/bnx2-bnx2x",
+    "siderolabs/iscsi-tools",
+    "siderolabs/util-linux-tools",
+];
 
 impl ProvisionController {
     pub fn new(pool: DbPool, jwt_secret: String) -> Self {
@@ -60,6 +67,7 @@ impl ProvisionController {
         wipe: bool,
         cert_sans: &[String],
         cluster_domain: &str,
+        system_extensions: Option<Vec<String>>,
     ) -> Result<ProvisionArtifact, AppError> {
         if name.trim().is_empty() || endpoint.trim().is_empty() {
             return Err(AppError::InvalidInput(
@@ -67,6 +75,10 @@ impl ProvisionController {
             ));
         }
 
+        let ext_refs: Vec<String> = system_extensions
+            .clone()
+            .unwrap_or_else(|| DEFAULT_SYSTEM_EXTENSIONS.iter().map(|s| (*s).to_owned()).collect());
+        let ext_slice: Vec<&str> = ext_refs.iter().map(|s| s.as_str()).collect();
         let secrets = generate_talos_secrets(
             name,
             endpoint,
@@ -77,6 +89,7 @@ impl ProvisionController {
             wipe,
             cert_sans,
             cluster_domain,
+            &ext_slice,
         )?;
 
         let secrets_enc = secrets::encrypt(&self.jwt_secret, &secrets.talosconfig_yaml)?;
@@ -92,6 +105,15 @@ impl ProvisionController {
             created_at: Utc::now(),
         };
         provision::create(&self.pool, &art).await?;
+
+        // Persist network config on the cluster so metal provisioning can reuse it
+        if let Some(cid) = cluster_id {
+            if let Some(ref nc) = network_config {
+                if let Ok(json) = serde_json::to_string(nc) {
+                    let _ = crate::db::repos::cluster::set_network_config(&self.pool, cid, &json).await;
+                }
+            }
+        }
 
         // Auto-attach generated talosconfig to the cluster when cluster_id is set
         if let (Some(cid), Some(ref enc)) = (cluster_id, &art.secrets_enc) {
@@ -154,6 +176,7 @@ fn generate_talos_secrets(
     wipe: bool,
     cert_sans: &[String],
     cluster_domain: &str,
+    system_extensions: &[&str],
 ) -> Result<GeneratedSecrets, AppError> {
     let ep = endpoint
         .trim_start_matches("https://")
@@ -217,6 +240,7 @@ fn generate_talos_secrets(
         wipe,
         &cert_san_list,
         cluster_domain,
+        system_extensions,
     );
 
     let worker_yaml = build_worker_yaml(
@@ -232,6 +256,7 @@ fn generate_talos_secrets(
         wipe,
         &cert_san_list,
         cluster_domain,
+        system_extensions,
     );
 
     let talosconfig_yaml = build_talosconfig_yaml(
@@ -346,71 +371,90 @@ fn bootstrap_token() -> String {
 // ── Network YAML helpers ─────────────────────────────────────────────────
 
 fn render_network_yaml(nc: &NetworkConfigParams) -> String {
-    let mut yaml = String::from("  network:\n    interfaces:\n");
+    let mut yaml = String::from("  network:\n");
 
-    // Physical NICs (bare, no IP)
-    for iface in &nc.bond_interfaces {
-        yaml.push_str(&format!("      - deviceSelector:\n          hardwareMac: {{}}\n        dhcp: false\n        name: {iface}\n"));
-    }
-
-    // Bond interface
     let bond_mode_name = match nc.bond_mode.as_str() {
         "802.3ad" | "lacp" => "802.3ad",
         "active-backup" => "active-backup",
         _ => "802.3ad",
     };
 
-    yaml.push_str(&format!(
-        "      - interfaces:\n{}",
-        nc.bond_interfaces.iter()
-            .map(|i| format!("          - {i}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    ));
-
-    yaml.push_str(&format!(
-        "        bond:\n          mode: {bond_mode}\n          miimon: {miimon}",
-        bond_mode = bond_mode_name,
-        miimon = nc.bond_miimon,
-    ));
-
-    if nc.bond_lacp_rate.is_empty() {
-        yaml.push('\n');
+    let lacp_yaml = if nc.bond_lacp_rate.is_empty() {
+        String::new()
     } else {
-        yaml.push_str(&format!("\n          lacpRate: {}", nc.bond_lacp_rate));
-    }
+        format!("            lacpRate: {}\n", nc.bond_lacp_rate)
+    };
 
-    yaml.push_str(&format!(
-        "\n        name: {bond_name}\n",
-        bond_name = nc.bond_name,
-    ));
+    // MTU on bond
+    let bond_mtu_yaml = if let Some(m) = nc.mtu {
+        format!("        mtu: {}\n", m)
+    } else {
+        String::new()
+    };
 
-    if let Some(m) = nc.mtu {
-        yaml.push_str(&format!("        mtu: {m}\n"));
-    }
+    // Routes for default gateway
+    let routes_yaml = if !nc.gateway.is_empty() {
+        format!(
+            "            routes:\n              - network: 0.0.0.0/0\n                gateway: {}\n",
+            nc.gateway
+        )
+    } else {
+        String::new()
+    };
 
-    // VLAN interface (no IP yet, just the VLAN)
-    yaml.push_str(&format!(
-        "      - interface: {bond_name}\n        vlan:\n          id: {vlan_id}\n        name: {vlan_name}\n",
-        bond_name = nc.bond_name,
-        vlan_id = nc.vlan_id,
-        vlan_name = nc.vlan_name,
-    ));
+    // DNS
+    let dns_yaml = if !nc.dns.is_empty() {
+        let dns_entries: String = nc.dns.iter()
+            .map(|d| format!("        - {d}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("      nameservers:\n{dns_entries}\n", dns_entries = dns_entries)
+    } else {
+        String::new()
+    };
 
-    // IP config on the VLAN interface
-    let dns_entries: String = nc.dns.iter()
-        .map(|d| format!("          - {d}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Ignore non-bonded interfaces (eno1-eno4 management NICs)
+    let ignore_yaml = [
+        "      - interface: eno1\n        ignore: true\n",
+        "      - interface: eno2\n        ignore: true\n",
+        "      - interface: eno3\n        ignore: true\n",
+        "      - interface: eno4\n        ignore: true\n",
+    ].join("");
 
     let subnet_cidr = nc.subnet.rfind('/').and_then(|idx| nc.subnet[idx+1..].parse::<u32>().ok()).unwrap_or(26);
 
     yaml.push_str(&format!(
-        "      - deviceSelector:\n          hardwareMac: {{}}\n        name: {vlan_name}\n        dhcp: false\n        addresses:\n          - __IP__/{subnet_cidr}\n        routes:\n          - network: 0.0.0.0/0\n            gateway: {gateway}\n        dns:\n          servers:\n{dns}\n",
-        vlan_name = nc.vlan_name,
-        subnet_cidr = subnet_cidr,
-        gateway = nc.gateway,
-        dns = dns_entries,
+        "    interfaces:\n\
+        - interface: {bond_name}\n\
+        {bond_mtu}bond:\n\
+            mode: {bond_mode}\n\
+            miimon: {miimon}\n\
+            {lacp}interfaces:\n\
+        {interfaces}\n\
+        vlans:\n\
+        - vlanId: {vlan_id}\n\
+          {vlan_mtu}addresses:\n\
+          - __IP__/{subnet_cidr}\n\
+          {routes}
+{ignore}{dns}",
+        bond_name = nc.bond_name,
+        bond_mtu = bond_mtu_yaml,
+        bond_mode = bond_mode_name,
+        miimon = nc.bond_miimon,
+        lacp = lacp_yaml,
+        interfaces = nc.bond_interfaces.iter()
+            .map(|i| format!("            - {i}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        vlan_id = nc.vlan_id,
+        vlan_mtu = if let Some(m) = nc.mtu {
+            format!("mtu: {}\n", m)
+        } else {
+            String::new()
+        },
+        routes = routes_yaml,
+        ignore = ignore_yaml,
+        dns = dns_yaml,
     ));
 
     yaml
@@ -442,9 +486,12 @@ fn build_controlplane_yaml(
     wipe: bool,
     cert_sans: &[String],
     cluster_domain: &str,
+    system_extensions: &[&str],
 ) -> String {
     let k8s_ver = k8s_version.strip_prefix('v').unwrap_or(k8s_version);
     let sa_key_b64 = base64::engine::general_purpose::STANDARD.encode(sa_key.as_bytes());
+
+    let extensions_yaml = render_extensions_yaml(system_extensions);
 
     let cert_sans_yaml = if cert_sans.is_empty() {
         "  certSANs: []".to_string()
@@ -481,6 +528,7 @@ machine:
     wipe: {wipe}
     disk: {install_disk}
     image: {install_image}
+{extensions_yaml}
   features:
     diskQuotaSupport: true
     kubePrism:
@@ -575,6 +623,7 @@ cluster:
         install_disk = install_disk,
         wipe = wipe,
         cert_sans = cert_sans_yaml,
+        extensions_yaml = extensions_yaml,
         cluster_domain = cluster_domain,
         network_yaml = network_yaml,
     )
@@ -593,6 +642,7 @@ fn build_worker_yaml(
     wipe: bool,
     cert_sans: &[String],
     cluster_domain: &str,
+    system_extensions: &[&str],
 ) -> String {
     let cert_sans_yaml = if cert_sans.is_empty() {
         "  certSANs: []".to_string()
@@ -603,6 +653,8 @@ fn build_worker_yaml(
             .join("\n");
         format!("  certSANs:\n{entries}")
     };
+
+    let extensions_yaml = render_extensions_yaml(system_extensions);
 
     let network_yaml = if let Some(nc) = network_config {
         render_network_yaml(nc)
@@ -626,6 +678,7 @@ machine:
     wipe: {wipe}
     disk: {install_disk}
     image: {install_image}
+{extensions_yaml}
   features:
     diskQuotaSupport: true
     kubePrism:
@@ -667,9 +720,27 @@ cluster:
         install_disk = install_disk,
         wipe = wipe,
         cert_sans = cert_sans_yaml,
+        extensions_yaml = extensions_yaml,
         cluster_domain = cluster_domain,
         network_yaml = network_yaml,
     )
+}
+
+/// Render system extensions YAML lines for the install block.
+fn render_extensions_yaml(extensions: &[&str]) -> String {
+    if extensions.is_empty() {
+        return String::new();
+    }
+    let entries: String = extensions
+        .iter()
+        .map(|e| format!("    extensions:\n      - {e}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("    extensions:\n{}", extensions
+        .iter()
+        .map(|e| format!("      - {e}"))
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 fn build_talosconfig_yaml(
