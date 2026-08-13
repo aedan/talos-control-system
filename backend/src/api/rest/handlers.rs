@@ -3989,6 +3989,115 @@ pub async fn machine_boot_device(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IsoMountRequest {
+    pub iso_url: String,
+    #[serde(default = "default_cd")]
+    pub media: String,
+}
+
+fn default_cd() -> String { "CD".to_string() }
+
+pub async fn machine_mount_iso(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<IsoMountRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    let m = repos::machine::get(&state.db_pool, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Machine not found".into()))?;
+    if !m.has_bmc() {
+        return Err((StatusCode::BAD_REQUEST, "BMC not configured".into()));
+    }
+    let plain = crate::utils::secrets::decrypt(
+        &state.config.auth.jwt_secret,
+        m.bmc_password_enc.as_ref().unwrap(),
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let creds = crate::integration::bmc::BmcCredentials::from_machine(
+        &m,
+        &plain,
+        state.config.metal.bmc.connect_timeout_secs,
+        &state.config.metal.bmc.ipmi_interface,
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let sess = crate::integration::bmc::BmcSession::connect(&creds)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    sess.mount_iso(&payload.iso_url, &payload.media)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "bmc_mount_iso",
+        &id.to_string(),
+        &payload.iso_url,
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "ok": true, "iso_url": payload.iso_url, "media": payload.media })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IsoUnmountRequest {
+    #[serde(default = "default_cd")]
+    pub media: String,
+}
+
+pub async fn machine_unmount_iso(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<IsoUnmountRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    let m = repos::machine::get(&state.db_pool, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Machine not found".into()))?;
+    if !m.has_bmc() {
+        return Err((StatusCode::BAD_REQUEST, "BMC not configured".into()));
+    }
+    let plain = crate::utils::secrets::decrypt(
+        &state.config.auth.jwt_secret,
+        m.bmc_password_enc.as_ref().unwrap(),
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let creds = crate::integration::bmc::BmcCredentials::from_machine(
+        &m,
+        &plain,
+        state.config.metal.bmc.connect_timeout_secs,
+        &state.config.metal.bmc.ipmi_interface,
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let sess = crate::integration::bmc::BmcSession::connect(&creds)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    sess.unmount_iso(&payload.media)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "bmc_unmount_iso",
+        &id.to_string(),
+        &payload.media,
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "ok": true, "media": payload.media })))
+}
+
 pub async fn metal_status(
     State(state): State<AppState>,
     headers: HeaderMap,

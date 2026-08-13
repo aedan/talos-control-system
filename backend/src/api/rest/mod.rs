@@ -160,6 +160,8 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route("/machines/:id/bmc", get(handlers::get_machine_bmc).put(handlers::put_machine_bmc))
         .route("/machines/:id/power", post(handlers::machine_power))
         .route("/machines/:id/boot-device", post(handlers::machine_boot_device))
+        .route("/machines/:id/mount-iso", post(handlers::machine_mount_iso))
+        .route("/machines/:id/unmount-iso", post(handlers::machine_unmount_iso))
         .route("/metal/status", get(handlers::metal_status))
         .route(
             "/settings/metal/config",

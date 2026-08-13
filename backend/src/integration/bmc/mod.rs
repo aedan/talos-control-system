@@ -182,4 +182,18 @@ impl BmcSession {
         }
         Err(AppError::Internal("No BMC client".into()))
     }
+
+    pub async fn mount_iso(&self, iso_url: &str, media: &str) -> Result<(), AppError> {
+        if let Some(rf) = &self.redfish {
+            return rf.mount_iso(iso_url, media).await;
+        }
+        Err(AppError::Internal("ISO mount only supported via Redfish".into()))
+    }
+
+    pub async fn unmount_iso(&self, media: &str) -> Result<(), AppError> {
+        if let Some(rf) = &self.redfish {
+            return rf.unmount_iso(media).await;
+        }
+        Err(AppError::Internal("ISO unmount only supported via Redfish".into()))
+    }
 }

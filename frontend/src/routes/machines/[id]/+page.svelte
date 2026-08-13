@@ -60,6 +60,8 @@
 `);
   let applyReboot = $state(false);
   let applyMergeLive = $state(false);
+  let isoUrl = $state('');
+  let isoMedia = $state('CD');
 
   onMount(async () => {
     try {
@@ -360,6 +362,39 @@
     }
   }
 
+  async function mountIso() {
+    if (!isoUrl.trim()) {
+      notifyError('ISO URL is empty');
+      return;
+    }
+    actionBusy = true;
+    try {
+      await client.post(`/machines/${$page.params.id}/mount-iso`, {
+        isoUrl: isoUrl.trim(),
+        media: isoMedia,
+      });
+      success(`ISO mounted to ${isoMedia}`);
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Mount ISO failed');
+    } finally {
+      actionBusy = false;
+    }
+  }
+
+  async function unmountIso() {
+    actionBusy = true;
+    try {
+      await client.post(`/machines/${$page.params.id}/unmount-iso`, {
+        media: isoMedia,
+      });
+      success(`ISO unmounted from ${isoMedia}`);
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Unmount ISO failed');
+    } finally {
+      actionBusy = false;
+    }
+  }
+
   async function resetMachine() {
     if (
       !confirm(
@@ -500,6 +535,20 @@
           <Button variant="secondary" size="sm" onclick={() => powerAction('off')} disabled={actionBusy}>Off</Button>
           <Button variant="secondary" size="sm" onclick={() => powerAction('cycle')} disabled={actionBusy}>Cycle</Button>
           <Button variant="secondary" size="sm" onclick={bootPxe} disabled={actionBusy}>PXE once</Button>
+        </div>
+        <div class="form-row" style="margin-top:0.75rem; padding-top:0.75rem; border-top:1px solid var(--tcs-border)">
+          <label>ISO URL
+            <input type="text" bind:value={isoUrl} placeholder="http://localhost:6969/iso/talos-amd64.iso" />
+          </label>
+          <label>Media
+            <select bind:value={isoMedia}>
+              <option value="CD">CD</option>
+              <option value="DVD">DVD</option>
+              <option value="Floppy">Floppy</option>
+            </select>
+          </label>
+          <Button variant="secondary" size="sm" onclick={mountIso} disabled={actionBusy}>Mount ISO</Button>
+          <Button variant="secondary" size="sm" onclick={unmountIso} disabled={actionBusy}>Unmount</Button>
         </div>
       </div>
     </div>
