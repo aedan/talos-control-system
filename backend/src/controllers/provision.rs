@@ -382,7 +382,7 @@ fn render_network_yaml(nc: &NetworkConfigParams) -> String {
     let lacp_yaml = if nc.bond_lacp_rate.is_empty() {
         String::new()
     } else {
-        format!("            lacpRate: {}\n", nc.bond_lacp_rate)
+        format!("          lacpRate: {}\n", nc.bond_lacp_rate)
     };
 
     let bond_mtu_yaml = if let Some(m) = nc.mtu {
@@ -393,7 +393,7 @@ fn render_network_yaml(nc: &NetworkConfigParams) -> String {
 
     let routes_yaml = if !nc.gateway.is_empty() {
         format!(
-            "            routes:\n              - network: 0.0.0.0/0\n                gateway: {}\n",
+            "        routes:\n          - network: 0.0.0.0/0\n            gateway: {}\n",
             nc.gateway
         )
     } else {
@@ -402,10 +402,10 @@ fn render_network_yaml(nc: &NetworkConfigParams) -> String {
 
     let dns_yaml = if !nc.dns.is_empty() {
         let dns_entries: String = nc.dns.iter()
-            .map(|d| format!("        - {d}"))
+            .map(|d| format!("      - {d}"))
             .collect::<Vec<_>>()
             .join("\n");
-        format!("      nameservers:\n{dns_entries}\n", dns_entries = dns_entries)
+        format!("    nameservers:\n{dns_entries}\n", dns_entries = dns_entries)
     } else {
         String::new()
     };
@@ -434,11 +434,11 @@ fn render_network_yaml(nc: &NetworkConfigParams) -> String {
     yaml.push_str("    interfaces:\n");
     yaml.push_str(&format!("      - interface: {}\n", nc.bond_name));
     yaml.push_str(&bond_mtu_yaml);
-    yaml.push_str("      bond:\n");
-    yaml.push_str(&format!("        mode: {}\n", bond_mode_name));
-    yaml.push_str(&format!("        miimon: {}\n", nc.bond_miimon));
+    yaml.push_str("        bond:\n");
+    yaml.push_str(&format!("          mode: {}\n", bond_mode_name));
+    yaml.push_str(&format!("          miimon: {}\n", nc.bond_miimon));
     yaml.push_str(&lacp_yaml);
-    yaml.push_str("        interfaces:\n");
+    yaml.push_str("          interfaces:\n");
     yaml.push_str(&interfaces_list);
     yaml.push_str("\n");
     yaml.push_str("    vlans:\n");
