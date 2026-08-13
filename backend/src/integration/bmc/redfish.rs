@@ -155,7 +155,8 @@ impl RedfishClient {
         let body = serde_json::json!({
             "Boot": {
                 "BootSourceOverrideTarget": boot_target,
-                "BootSourceOverrideEnabled": enabled
+                "BootSourceOverrideEnabled": enabled,
+                "BootSourceOverrideMode": "Legacy"
             }
         });
         let resp = self
