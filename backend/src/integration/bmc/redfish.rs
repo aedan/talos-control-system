@@ -294,7 +294,7 @@ impl RedfishClient {
             "Boot": {
                 "BootSourceOverrideTarget": boot_target,
                 "BootSourceOverrideEnabled": enabled,
-                "BootSourceOverrideMode": "Legacy"
+                "BootSourceOverrideMode": "Uefi"
             }
         });
         let resp = self

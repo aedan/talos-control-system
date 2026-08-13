@@ -1128,6 +1128,10 @@ pub struct UpdateMachineRequest {
     pub mac_address: Option<String>,
     pub hostname: Option<String>,
     pub install_disk: Option<String>,
+    pub bmc_type: Option<String>,
+    pub bmc_address: Option<String>,
+    pub bmc_username: Option<String>,
+    pub bmc_password: Option<String>,
 }
 
 pub async fn update_machine(
@@ -1165,6 +1169,22 @@ pub async fn update_machine(
     }
     if let Some(d) = payload.install_disk {
         m.install_disk = d;
+        changed = true;
+    }
+    if let Some(bt) = payload.bmc_type {
+        m.bmc_type = bt;
+        changed = true;
+    }
+    if let Some(ba) = payload.bmc_address {
+        m.bmc_address = ba;
+        changed = true;
+    }
+    if let Some(bu) = payload.bmc_username {
+        m.bmc_username = bu;
+        changed = true;
+    }
+    if let Some(bp) = payload.bmc_password {
+        m.bmc_password_enc = Some(bp);
         changed = true;
     }
     if !changed {
