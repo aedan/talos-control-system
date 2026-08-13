@@ -371,7 +371,7 @@ fn bootstrap_token() -> String {
 // ── Network YAML helpers ─────────────────────────────────────────────────
 
 fn render_network_yaml(nc: &NetworkConfigParams) -> String {
-    let mut yaml = String::from("  network:\n");
+    let mut yaml = String::new();
 
     let bond_mode_name = match nc.bond_mode.as_str() {
         "802.3ad" | "lacp" => "802.3ad",
@@ -385,14 +385,12 @@ fn render_network_yaml(nc: &NetworkConfigParams) -> String {
         format!("            lacpRate: {}\n", nc.bond_lacp_rate)
     };
 
-    // MTU on bond
     let bond_mtu_yaml = if let Some(m) = nc.mtu {
         format!("        mtu: {}\n", m)
     } else {
         String::new()
     };
 
-    // Routes for default gateway
     let routes_yaml = if !nc.gateway.is_empty() {
         format!(
             "            routes:\n              - network: 0.0.0.0/0\n                gateway: {}\n",
@@ -402,7 +400,6 @@ fn render_network_yaml(nc: &NetworkConfigParams) -> String {
         String::new()
     };
 
-    // DNS
     let dns_yaml = if !nc.dns.is_empty() {
         let dns_entries: String = nc.dns.iter()
             .map(|d| format!("        - {d}"))
@@ -413,7 +410,6 @@ fn render_network_yaml(nc: &NetworkConfigParams) -> String {
         String::new()
     };
 
-    // Ignore non-bonded interfaces (eno1-eno4 management NICs)
     let ignore_yaml = [
         "      - interface: eno1\n        ignore: true\n",
         "      - interface: eno2\n        ignore: true\n",
@@ -423,39 +419,36 @@ fn render_network_yaml(nc: &NetworkConfigParams) -> String {
 
     let subnet_cidr = nc.subnet.rfind('/').and_then(|idx| nc.subnet[idx+1..].parse::<u32>().ok()).unwrap_or(26);
 
-    yaml.push_str(&format!(
-        "    interfaces:\n\
-        - interface: {bond_name}\n\
-        {bond_mtu}bond:\n\
-            mode: {bond_mode}\n\
-            miimon: {miimon}\n\
-            {lacp}interfaces:\n\
-        {interfaces}\n\
-        vlans:\n\
-        - vlanId: {vlan_id}\n\
-          {vlan_mtu}addresses:\n\
-          - __IP__/{subnet_cidr}\n\
-          {routes}
-{ignore}{dns}",
-        bond_name = nc.bond_name,
-        bond_mtu = bond_mtu_yaml,
-        bond_mode = bond_mode_name,
-        miimon = nc.bond_miimon,
-        lacp = lacp_yaml,
-        interfaces = nc.bond_interfaces.iter()
-            .map(|i| format!("            - {i}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        vlan_id = nc.vlan_id,
-        vlan_mtu = if let Some(m) = nc.mtu {
-            format!("mtu: {}\n", m)
-        } else {
-            String::new()
-        },
-        routes = routes_yaml,
-        ignore = ignore_yaml,
-        dns = dns_yaml,
-    ));
+    let interfaces_list = nc.bond_interfaces.iter()
+        .map(|i| format!("            - {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let vlan_mtu = if let Some(m) = nc.mtu {
+        format!("        mtu: {}\n", m)
+    } else {
+        String::new()
+    };
+
+    yaml.push_str("  network:\n");
+    yaml.push_str("    interfaces:\n");
+    yaml.push_str(&format!("      - interface: {}\n", nc.bond_name));
+    yaml.push_str(&bond_mtu_yaml);
+    yaml.push_str("      bond:\n");
+    yaml.push_str(&format!("        mode: {}\n", bond_mode_name));
+    yaml.push_str(&format!("        miimon: {}\n", nc.bond_miimon));
+    yaml.push_str(&lacp_yaml);
+    yaml.push_str("        interfaces:\n");
+    yaml.push_str(&interfaces_list);
+    yaml.push_str("\n");
+    yaml.push_str("    vlans:\n");
+    yaml.push_str(&format!("      - vlanId: {}\n", nc.vlan_id));
+    yaml.push_str(&vlan_mtu);
+    yaml.push_str("        addresses:\n");
+    yaml.push_str(&format!("          - __IP__/{subnet_cidr}\n"));
+    yaml.push_str(&routes_yaml);
+    yaml.push_str(&ignore_yaml);
+    yaml.push_str(&dns_yaml);
 
     yaml
 }
