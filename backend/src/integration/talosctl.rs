@@ -564,6 +564,39 @@ impl TalosctlClient {
         info!(endpoint, "talosctl probe_maintenance successful");
         Ok("reachable".to_string())
     }
+
+    /// Probe a running Talos node (post-install) using talosconfig auth.
+    pub async fn probe_node(endpoint: &str, talosconfig: Option<&str>) -> Result<String, AppError> {
+        Self::ensure_installed().await?;
+
+        let mut args: Vec<String> = vec![
+            "get".into(), "version".into(), "-e".into(), endpoint.into(),
+            "-n".into(), endpoint.into(), "-o".into(), "json".into(),
+        ];
+        args.extend(Self::talosconfig_args(talosconfig));
+
+        let out = Command::new("talosctl")
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| AppError::Network(format!("talosctl spawn: {e}")))?;
+
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+
+        if !out.status.success() {
+            return Err(AppError::Network(format!(
+                "talosctl probe node failed: {} {}",
+                stdout.trim(),
+                stderr.trim()
+            )));
+        }
+
+        info!(endpoint, "talosctl probe_node successful");
+        Ok("reachable".to_string())
+    }
 }
 
 fn extract_disk(obj: &serde_json::Value) -> serde_json::Value {

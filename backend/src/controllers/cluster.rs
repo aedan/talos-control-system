@@ -796,16 +796,24 @@ impl ClusterController {
         Ok(version)
     }
 
-    /// Like [`Self::machine_version`] but connects via an explicit endpoint
-    /// using talosctl maintenance mode (used during post-install when the node
-    /// may only have its DHCP lease address and no valid machine certs yet).
+    /// Like [`Self::machine_version`] but connects via an explicit endpoint.
+    /// Tries maintenance mode first (installer), then falls back to talosconfig
+    /// auth (installed Talos).
     pub async fn machine_version_with_endpoint(
         &self,
-        _machine_id: Uuid,
+        machine_id: Uuid,
         endpoint: Option<&str>,
     ) -> Result<String, AppError> {
         if let Some(addr) = endpoint.filter(|a| !a.is_empty()) {
-            TalosctlClient::probe_maintenance(addr).await
+            // Try maintenance mode first (installer)
+            match TalosctlClient::probe_maintenance(addr).await {
+                Ok(v) => return Ok(v),
+                Err(_) => {}
+            }
+            // Fall back to talosconfig auth (installed Talos)
+            let cluster = self.cluster_and_machine(machine_id).await.map(|(c, _)| c)?;
+            let tc = self.talosconfig_yaml(&cluster)?;
+            TalosctlClient::probe_node(addr, tc.as_deref()).await
         } else {
             Err(AppError::InvalidInput("no endpoint provided".into()))
         }
