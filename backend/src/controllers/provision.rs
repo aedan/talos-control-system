@@ -390,17 +390,51 @@ fn render_network_yaml(nc: &NetworkConfigParams) -> String {
 
     yaml.push_str("  network:\n");
     yaml.push_str("    interfaces:\n");
-    yaml.push_str(&format!("      - interface: {}\n", nc.bond_name));
-    yaml.push_str(&format!("        mtu: {}\n", mtu_val));
-    yaml.push_str("        bond:\n");
-    yaml.push_str(&format!("          mode: {}\n", bond_mode_name));
-    yaml.push_str(&format!("          miimon: {}\n", nc.bond_miimon));
-    if !nc.bond_lacp_rate.is_empty() {
-        yaml.push_str(&format!("          lacpRate: {}\n", nc.bond_lacp_rate));
+
+    if nc.vlan_id == 0 {
+        yaml.push_str(&format!("      - interface: {}\n", nc.bond_name));
+        yaml.push_str(&format!("        mtu: {}\n", mtu_val));
+        yaml.push_str("        bond:\n");
+        yaml.push_str(&format!("          mode: {}\n", bond_mode_name));
+        yaml.push_str(&format!("          miimon: {}\n", nc.bond_miimon));
+        if !nc.bond_lacp_rate.is_empty() {
+            yaml.push_str(&format!("          lacpRate: {}\n", nc.bond_lacp_rate));
+        }
+        yaml.push_str("          interfaces:\n");
+        yaml.push_str(&interfaces_list);
+        yaml.push_str("\n");
+        yaml.push_str("        addresses:\n");
+        yaml.push_str(&format!("          - __IP__/{subnet_cidr}\n"));
+        if !nc.gateway.is_empty() {
+            yaml.push_str("        routes:\n");
+            yaml.push_str("          - network: 0.0.0.0/0\n");
+            yaml.push_str(&format!("            gateway: {}\n", nc.gateway));
+        }
+    } else {
+        yaml.push_str(&format!("      - interface: {}\n", nc.bond_name));
+        yaml.push_str(&format!("        mtu: {}\n", mtu_val));
+        yaml.push_str("        bond:\n");
+        yaml.push_str(&format!("          mode: {}\n", bond_mode_name));
+        yaml.push_str(&format!("          miimon: {}\n", nc.bond_miimon));
+        if !nc.bond_lacp_rate.is_empty() {
+            yaml.push_str(&format!("          lacpRate: {}\n", nc.bond_lacp_rate));
+        }
+        yaml.push_str("          interfaces:\n");
+        yaml.push_str(&interfaces_list);
+        yaml.push_str("\n");
+        let vlan_iface = format!("{}.{}", nc.bond_name, nc.vlan_id);
+        yaml.push_str(&format!("      - interface: {}\n", vlan_iface));
+        yaml.push_str(&format!("        mtu: {}\n", mtu_val));
+        yaml.push_str(&format!("        vlan: {}\n", nc.vlan_id));
+        yaml.push_str("        addresses:\n");
+        yaml.push_str(&format!("          - __IP__/{subnet_cidr}\n"));
+        if !nc.gateway.is_empty() {
+            yaml.push_str("        routes:\n");
+            yaml.push_str("          - network: 0.0.0.0/0\n");
+            yaml.push_str(&format!("            gateway: {}\n", nc.gateway));
+        }
     }
-    yaml.push_str("          interfaces:\n");
-    yaml.push_str(&interfaces_list);
-    yaml.push_str("\n");
+
     yaml.push_str("      - interface: eno1\n");
     yaml.push_str("        ignore: true\n");
     yaml.push_str("      - interface: eno2\n");
@@ -409,16 +443,6 @@ fn render_network_yaml(nc: &NetworkConfigParams) -> String {
     yaml.push_str("        ignore: true\n");
     yaml.push_str("      - interface: eno4\n");
     yaml.push_str("        ignore: true\n");
-    yaml.push_str("    vlans:\n");
-    yaml.push_str(&format!("      - vlanId: {}\n", nc.vlan_id));
-    yaml.push_str(&format!("        mtu: {}\n", mtu_val));
-    yaml.push_str("        addresses:\n");
-    yaml.push_str(&format!("          - __IP__/{subnet_cidr}\n"));
-    if !nc.gateway.is_empty() {
-        yaml.push_str("        routes:\n");
-        yaml.push_str("          - network: 0.0.0.0/0\n");
-        yaml.push_str(&format!("            gateway: {}\n", nc.gateway));
-    }
     if !nc.dns.is_empty() {
         yaml.push_str("    nameservers:\n");
         for d in &nc.dns {
