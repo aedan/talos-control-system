@@ -275,6 +275,13 @@ async fn run_job(
             }
         }
         "wait_post_install" => {
+            // Post-install the node is on its static (10G) address; the DHCP
+            // lease only applied to the PXE installer. Try the static address
+            // first, then fall back to the DHCP lease.
+            let mut candidates: Vec<String> = Vec::new();
+            if !machine.address.is_empty() {
+                candidates.push(machine.address.clone());
+            }
             let lease_ip = if !machine.mac_address.is_empty() {
                 repos::dhcp_lease::get_by_mac(pool, &machine.mac_address)
                     .await
@@ -285,38 +292,44 @@ async fn run_job(
             } else {
                 None
             };
-            let endpoint = lease_ip.or_else(|| {
-                if !machine.address.is_empty() {
-                    Some(machine.address.clone())
-                } else {
-                    None
+            if let Some(ip) = lease_ip {
+                if !candidates.contains(&ip) {
+                    candidates.push(ip);
                 }
-            });
-            let boot_addr = endpoint.as_deref().unwrap_or("");
+            }
             let ctrl = ClusterController::with_context(
                 pool.clone(),
                 sqlite_path.to_string(),
                 jwt_secret.to_string(),
             );
-            match ctrl.machine_version_with_endpoint(machine_id, Some(boot_addr)).await {
-                Ok(v) => {
-                    log(&mut payload, &format!("post-install version {v}"));
-                    if payload.auto_bootstrap {
-                        let t = machine.machine_type.to_ascii_lowercase();
-                        if t.contains("control") {
-                            payload.step = "bootstrap".into();
-                        } else {
-                            payload.step = "boot_disk".into();
-                        }
+            let mut ok = false;
+            let mut version = String::new();
+            for cand in &candidates {
+                match ctrl.machine_version_with_endpoint(machine_id, Some(cand)).await {
+                    Ok(v) => {
+                        ok = true;
+                        version = v;
+                        break;
+                    }
+                    Err(_) => continue,
+                }
+            }
+            if ok {
+                log(&mut payload, &format!("post-install version {version}"));
+                if payload.auto_bootstrap {
+                    let t = machine.machine_type.to_ascii_lowercase();
+                    if t.contains("control") {
+                        payload.step = "bootstrap".into();
                     } else {
                         payload.step = "boot_disk".into();
                     }
-                    save_progress(pool, job.id, "running", &payload).await?;
+                } else {
+                    payload.step = "boot_disk".into();
                 }
-                Err(_) => {
-                    log(&mut payload, "waiting for node after install reboot");
-                    save_progress(pool, job.id, "bootstrapping", &payload).await?;
-                }
+                save_progress(pool, job.id, "running", &payload).await?;
+            } else {
+                log(&mut payload, "waiting for node after install reboot");
+                save_progress(pool, job.id, "bootstrapping", &payload).await?;
             }
         }
         "bootstrap" => {
