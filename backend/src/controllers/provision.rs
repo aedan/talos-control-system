@@ -176,7 +176,7 @@ fn generate_talos_secrets(
     wipe: bool,
     cert_sans: &[String],
     cluster_domain: &str,
-    _system_extensions: &[    system_extensions: &[&str],str],
+    _system_extensions: &[&str],
 ) -> Result<GeneratedSecrets, AppError> {
     let ep = endpoint
         .trim_start_matches("https://")
@@ -240,7 +240,7 @@ fn generate_talos_secrets(
         wipe,
         &cert_san_list,
         cluster_domain,
-        system_extensions,
+        _system_extensions,
     );
 
     let worker_yaml = build_worker_yaml(
@@ -256,7 +256,7 @@ fn generate_talos_secrets(
         wipe,
         &cert_san_list,
         cluster_domain,
-        system_extensions,
+        _system_extensions,
     );
 
     let talosconfig_yaml = build_talosconfig_yaml(
@@ -455,7 +455,7 @@ fn build_controlplane_yaml(
     wipe: bool,
     cert_sans: &[String],
     cluster_domain: &str,
-    _system_extensions: &[    system_extensions: &[&str],str],
+    _system_extensions: &[&str],
 ) -> String {
     let k8s_ver = k8s_version.strip_prefix('v').unwrap_or(k8s_version);
     let sa_key_b64 = base64::engine::general_purpose::STANDARD.encode(sa_key.as_bytes());
@@ -608,7 +608,7 @@ fn build_worker_yaml(
     wipe: bool,
     cert_sans: &[String],
     cluster_domain: &str,
-    _system_extensions: &[    system_extensions: &[&str],str],
+    _system_extensions: &[&str],
 ) -> String {
     let cert_sans_yaml = if cert_sans.is_empty() {
         "  certSANs: []".to_string()
