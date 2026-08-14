@@ -690,6 +690,7 @@ cluster:
 }
 
 /// Render system extensions YAML lines for the install block.
+fn render_extensions_yaml(extensions: &[&str]) -> String {
     if extensions.is_empty() {
         return String::new();
     }
