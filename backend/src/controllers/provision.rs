@@ -202,6 +202,16 @@ fn generate_talos_secrets(
             cert_san_list.push(s.clone());
         }
     }
+    // Add DHCP range IPs so post-install probe (via DHCP IP) can verify TLS.
+    if let Some(nc) = network_config {
+        if let Some(range) = parse_dhcp_range(&nc.subnet) {
+            for ip in range {
+                if !cert_san_list.contains(&ip) {
+                    cert_san_list.push(ip);
+                }
+            }
+        }
+    }
     let sans_refs: Vec<&str> = cert_san_list.iter().map(|s| s.as_str()).collect();
 
     let (api_cert, _api_key) =
@@ -356,6 +366,29 @@ fn generate_rsa2048_pem() -> Result<String, AppError> {
 }
 
 // ── Random helpers ───────────────────────────────────────────────────────
+
+/// Parse a CIDR subnet into the DHCP range (first 32 to .111).
+fn parse_dhcp_range(subnet: &str) -> Option<Vec<String>> {
+    let parts: Vec<&str> = subnet.split('/').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let octets: Vec<u32> = parts[0].split('.').filter_map(|s| s.parse().ok()).collect();
+    if octets.len() != 4 {
+        return None;
+    }
+    let prefix: u32 = parts[1].parse().ok()?;
+    if prefix > 30 {
+        return None;
+    }
+    let base = ((octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3]) & !(0u32 >> prefix);
+    let mut ips = Vec::new();
+    for i in 32..=111 {
+        let ip = base + i;
+        ips.push(format!("{}.{}.{}.{}", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF));
+    }
+    Some(ips)
+}
 
 fn b64_random(n: usize) -> String {
     let mut rng = rand::thread_rng();
