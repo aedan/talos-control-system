@@ -88,7 +88,21 @@ impl TalosctlClient {
     /// Build common args: `--talosconfig <path>` if provided.
     fn talosconfig_args(talosconfig: Option<&str>) -> Vec<String> {
         match talosconfig {
-            Some(tc) => vec!["--talosconfig".to_string(), tc.to_string()],
+            Some(tc) => {
+                // Write talosconfig to a writable temp file (systemd ProtectSystem makes /tmp read-only).
+                let tmpdir = PathBuf::from("/var/lib/tcs/talosctl-tmp");
+                if let Err(e) = std::fs::create_dir_all(&tmpdir) {
+                    warn!(error = %e, "Failed to create talosctl temp dir");
+                }
+                let tmpfile = tmpdir.join("talosconfig");
+                match std::fs::write(&tmpfile, tc) {
+                    Ok(_) => vec!["--talosconfig".to_string(), tmpfile.to_string_lossy().to_string()],
+                    Err(e) => {
+                        warn!(error = %e, "Failed to write talosconfig temp file, falling back to inline");
+                        vec!["--talosconfig".to_string(), tc.to_string()]
+                    }
+                }
+            }
             None => vec![],
         }
     }
