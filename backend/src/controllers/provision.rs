@@ -391,13 +391,15 @@ fn render_network_yaml(nc: &NetworkConfigParams) -> String {
     yaml.push_str("  network:\n");
     yaml.push_str("    interfaces:\n");
 
+    let emit_lacp = bond_mode_name == "802.3ad" && !nc.bond_lacp_rate.is_empty();
+
     if nc.vlan_id == 0 {
         yaml.push_str(&format!("      - interface: {}\n", nc.bond_name));
         yaml.push_str(&format!("        mtu: {}\n", mtu_val));
         yaml.push_str("        bond:\n");
         yaml.push_str(&format!("          mode: {}\n", bond_mode_name));
         yaml.push_str(&format!("          miimon: {}\n", nc.bond_miimon));
-        if !nc.bond_lacp_rate.is_empty() {
+        if emit_lacp {
             yaml.push_str(&format!("          lacpRate: {}\n", nc.bond_lacp_rate));
         }
         yaml.push_str("          interfaces:\n");
@@ -416,7 +418,7 @@ fn render_network_yaml(nc: &NetworkConfigParams) -> String {
         yaml.push_str("        bond:\n");
         yaml.push_str(&format!("          mode: {}\n", bond_mode_name));
         yaml.push_str(&format!("          miimon: {}\n", nc.bond_miimon));
-        if !nc.bond_lacp_rate.is_empty() {
+        if emit_lacp {
             yaml.push_str(&format!("          lacpRate: {}\n", nc.bond_lacp_rate));
         }
         yaml.push_str("          interfaces:\n");
