@@ -271,7 +271,7 @@ impl TalosctlClient {
         endpoint: &str,
         config_yaml: &str,
         reboot: bool,
-        talosconfig: Option<&str>,
+        _talosconfig: Option<&str>,
     ) -> Result<(), AppError> {
         Self::ensure_installed().await?;
 
@@ -282,12 +282,12 @@ impl TalosctlClient {
 
         let mode = if reboot { "reboot" } else { "no-reboot" };
 
-        let mut args: Vec<String> = vec![
+        // Maintenance mode is unauthenticated — do NOT pass talosconfig.
+        let args: Vec<String> = vec![
             "apply-config".into(), "-f".into(), tmpfile.clone(), "-i".into(),
             "-e".into(), endpoint.into(), "-n".into(), endpoint.into(),
             "-m".into(), mode.into(),
         ];
-        args.extend(Self::talosconfig_args(talosconfig));
 
         Self::run(&args).await?;
         let _ = tokio::fs::remove_file(&tmpfile).await;
