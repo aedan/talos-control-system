@@ -460,8 +460,6 @@ fn build_controlplane_yaml(
     let k8s_ver = k8s_version.strip_prefix('v').unwrap_or(k8s_version);
     let sa_key_b64 = base64::engine::general_purpose::STANDARD.encode(sa_key.as_bytes());
 
-    let extensions_yaml = render_extensions_yaml(system_extensions);
-
     let cert_sans_yaml = if cert_sans.is_empty() {
         "  certSANs: []".to_string()
     } else {
@@ -497,7 +495,7 @@ machine:
     wipe: {wipe}
     disk: {install_disk}
     image: {install_image}
-{extensions_yaml}
+
   features:
     diskQuotaSupport: true
     kubePrism:
@@ -592,7 +590,6 @@ cluster:
         install_disk = install_disk,
         wipe = wipe,
         cert_sans = cert_sans_yaml,
-        extensions_yaml = extensions_yaml,
         cluster_domain = cluster_domain,
         network_yaml = network_yaml,
     )
@@ -623,8 +620,6 @@ fn build_worker_yaml(
         format!("  certSANs:\n{entries}")
     };
 
-    let extensions_yaml = render_extensions_yaml(system_extensions);
-
     let network_yaml = if let Some(nc) = network_config {
         render_network_yaml(nc)
     } else {
@@ -647,7 +642,7 @@ machine:
     wipe: {wipe}
     disk: {install_disk}
     image: {install_image}
-{extensions_yaml}
+
   features:
     diskQuotaSupport: true
     kubePrism:
@@ -689,14 +684,12 @@ cluster:
         install_disk = install_disk,
         wipe = wipe,
         cert_sans = cert_sans_yaml,
-        extensions_yaml = extensions_yaml,
         cluster_domain = cluster_domain,
         network_yaml = network_yaml,
     )
 }
 
 /// Render system extensions YAML lines for the install block.
-fn render_extensions_yaml(extensions: &[&str]) -> String {
     if extensions.is_empty() {
         return String::new();
     }
