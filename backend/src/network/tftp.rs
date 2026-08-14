@@ -152,29 +152,11 @@ async fn serve_file(
     client: SocketAddr,
     data: &[u8],
     block_size: usize,
-    bind_interface: &str,
+    _bind_interface: &str,
 ) -> Result<(), AppError> {
-    let sock = if !bind_interface.is_empty() {
-        let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
-            .map_err(|e| AppError::Network(format!("TFTP transfer socket: {e}")))?;
-        s.set_reuse_address(true)
-            .map_err(|e| AppError::Network(format!("TFTP transfer reuse: {e}")))?;
-        #[cfg(target_os = "linux")]
-        if let Err(e) = s.bind_device(Some(bind_interface.as_bytes())) {
-            warn!(interface = bind_interface, error = %e, "TFTP transfer: failed to bind to interface");
-        }
-        s.bind(&SocketAddr::from(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).into())
-            .map_err(|e| AppError::Network(format!("TFTP transfer bind: {e}")))?;
-        s.set_nonblocking(true)
-            .map_err(|e| AppError::Network(format!("TFTP transfer nonblocking: {e}")))?;
-        let std_sock: std::net::UdpSocket = s.into();
-        UdpSocket::from_std(std_sock)
-            .map_err(|e| AppError::Network(format!("TFTP transfer tokio socket: {e}")))?
-    } else {
-        UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-            .await
-            .map_err(|e| AppError::Network(format!("TFTP transfer socket: {e}")))?
-    };
+    let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .await
+        .map_err(|e| AppError::Network(format!("TFTP transfer socket: {e}")))?;
 
     if block_size != DEFAULT_BLOCK_SIZE {
         let oack = format!("\x00\x06blksize\x00{block_size}\x00");
