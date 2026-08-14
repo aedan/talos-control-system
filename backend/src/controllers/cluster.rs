@@ -7,9 +7,9 @@ use crate::db::models::cluster::Cluster;
 use crate::db::models::cluster_backup::ClusterBackup;
 use crate::db::models::machine::Machine;
 use crate::integration::kubernetes::{discover_cluster_from_kubeconfig, DiscoveredCluster};
-use crate::integration::talos::{
-    backup_root_from_sqlite_path, build_patch_documents, pick_control_plane_address, TalosClient,
-    TalosCredentials,
+use crate::integration::talosctl::{
+    backup_root_from_sqlite_path, build_patch_documents, merge_patches_into_machine_config,
+    merge_yaml_docs_into_machine_config, pick_control_plane_address, TalosCredentials,
 };
 use crate::integration::talosctl::TalosctlClient;
 use crate::utils::secrets;
@@ -38,6 +38,14 @@ impl ClusterController {
 
     fn dec(&self, stored: &str) -> Result<String, AppError> {
         secrets::decrypt(&self.jwt_secret, stored)
+    }
+
+    /// Decrypt the cluster's talosconfig YAML.
+    fn talosconfig_yaml(&self, cluster: &Cluster) -> Result<Option<String>, AppError> {
+        match &cluster.talosconfig {
+            Some(enc) => Ok(Some(self.dec(enc)?)),
+            None => Ok(None),
+        }
     }
 
     pub async fn import_cluster(
@@ -203,7 +211,6 @@ impl ClusterController {
             .upsert_discovered_machines(cluster_id, &discovered, now)
             .await?;
         crate::db::repos::cluster::update_status(&self.pool, cluster_id, "running").await?;
-        // update versions on cluster row
         if let Some(mut c) = crate::db::repos::cluster::get(&self.pool, cluster_id).await? {
             c.control_plane_version = discovered.kubernetes_version;
             c.talos_version = discovered.talos_version;
@@ -222,44 +229,35 @@ impl ClusterController {
         let cluster = crate::db::repos::cluster::get(&self.pool, cluster_id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Cluster {} not found", cluster_id)))?;
-        let creds = self.load_creds(&cluster)?;
+        let tc = self.talosconfig_yaml(&cluster)?;
+        let creds = TalosCredentials::from_talosconfig_yaml(
+            tc.as_deref()
+                .ok_or_else(|| AppError::InvalidInput("No talosconfig".to_string()))?,
+        )?;
         let machines = crate::db::repos::machine::list_by_cluster(&self.pool, cluster_id).await?;
         let mut results = Vec::new();
         for m in machines {
-            let client = match self.client_for_machine(&cluster, &m).await {
-                Ok(c) => c,
-                Err(e) => {
-                    results.push(serde_json::json!({
-                        "machineId": m.id,
-                        "address": m.address,
-                        "ok": false,
-                        "error": e.to_string(),
-                    }));
-                    continue;
-                }
-            };
-            match client.get_version().await {
+            if m.address.is_empty() {
+                continue;
+            }
+            match TalosctlClient::get_version(&m.address, tc.as_deref()).await {
                 Ok(v) => results.push(serde_json::json!({
                     "machineId": m.id,
                     "address": m.address,
                     "ok": true,
                     "talosVersion": v,
-                    "endpoint": client.endpoint(),
                 })),
                 Err(e) => results.push(serde_json::json!({
                     "machineId": m.id,
                     "address": m.address,
                     "ok": false,
                     "error": e.to_string(),
-                    "endpoint": client.endpoint(),
                 })),
             }
         }
         if results.is_empty() {
-            // try endpoints from talosconfig alone
             for ep in &creds.endpoints {
-                let client = TalosClient::from_credentials(ep, &creds);
-                match client.get_version().await {
+                match TalosctlClient::get_version(ep, tc.as_deref()).await {
                     Ok(v) => results.push(serde_json::json!({
                         "address": ep,
                         "ok": true,
@@ -276,50 +274,6 @@ impl ClusterController {
         Ok(results)
     }
 
-    fn load_creds(&self, cluster: &Cluster) -> Result<TalosCredentials, AppError> {
-        let yaml = cluster.talosconfig.as_ref().ok_or_else(|| {
-            AppError::InvalidInput(
-                "Cluster has no talosconfig. Attach one via PUT /api/clusters/{id}/talosconfig."
-                    .to_string(),
-            )
-        })?;
-        let plain = self.dec(yaml)?;
-        TalosCredentials::from_talosconfig_yaml(&plain)
-    }
-
-    async fn client_for_machine(
-        &self,
-        cluster: &Cluster,
-        machine: &Machine,
-    ) -> Result<TalosClient, AppError> {
-        self.client_for_machine_at(cluster, machine, None).await
-    }
-
-    /// Like [`Self::client_for_machine`] but with an explicit endpoint
-    /// override (used during PXE/installer phase when the machine only has
-    /// its DHCP lease address, not its post-install static one).
-    async fn client_for_machine_at(
-        &self,
-        cluster: &Cluster,
-        machine: &Machine,
-        endpoint_override: Option<&str>,
-    ) -> Result<TalosClient, AppError> {
-        if let Some(addr) = endpoint_override.filter(|a| !a.is_empty()) {
-            return Err(AppError::InvalidInput(format!(
-                "endpoint_override ({}) requires talosctl; use list_disks/install_machine directly",
-                addr
-            )));
-        }
-        tracing::info!("using standard mTLS client for installed node");
-        let creds = self.load_creds(cluster)?;
-        let addr = if machine.address.is_empty() {
-            None
-        } else {
-            Some(machine.address.as_str())
-        };
-        TalosClient::for_machine(addr, &creds)
-    }
-
     pub async fn create_etcd_backup(
         &self,
         cluster_id: Uuid,
@@ -329,7 +283,11 @@ impl ClusterController {
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Cluster {} not found", cluster_id)))?;
 
-        let creds = self.load_creds(&cluster)?;
+        let tc = self.talosconfig_yaml(&cluster)?;
+        let creds = TalosCredentials::from_talosconfig_yaml(
+            tc.as_deref()
+                .ok_or_else(|| AppError::InvalidInput("No talosconfig".to_string()))?,
+        )?;
         let machines = crate::db::repos::machine::list_by_cluster(&self.pool, cluster_id).await?;
         let pairs: Vec<(String, Option<String>)> = machines
             .iter()
@@ -345,7 +303,6 @@ impl ClusterController {
             })
             .collect();
         let address = pick_control_plane_address(&pairs, &creds)?;
-        let client = TalosClient::from_credentials(&address, &creds);
 
         let mut backup = ClusterBackup::pending(cluster_id, name);
         crate::db::repos::cluster_backup::create(&self.pool, &backup).await?;
@@ -355,7 +312,7 @@ impl ClusterController {
             .join(cluster_id.to_string())
             .join(format!("{}.snapshot", backup.id));
 
-        match client.etcd_snapshot(&dest).await {
+        match TalosctlClient::etcd_snapshot(&address, dest.to_str().unwrap(), tc.as_deref()).await {
             Ok(size) => {
                 backup.status = "ready".to_string();
                 backup.file_path = Some(dest.to_string_lossy().to_string());
@@ -419,7 +376,7 @@ impl ClusterController {
         }
 
         let machines = crate::db::repos::machine::list_by_cluster(&self.pool, cluster_id).await?;
-        let creds = self.load_creds(&cluster)?;
+        let tc = self.talosconfig_yaml(&cluster)?;
 
         // Build per-machine work items first (CPU-bound YAML only).
         let mut work = Vec::new();
@@ -445,39 +402,50 @@ impl ClusterController {
         let futs: Vec<_> = work
             .into_iter()
             .map(|(machine, patch_preview)| {
-                let creds = creds.clone();
+                let tc = tc.clone();
                 async move {
                     let document = serde_json::json!({
                         "machineId": machine.id,
                         "address": machine.address,
                         "patchPreview": patch_preview,
                     });
-                    let client = match TalosClient::for_machine(
-                        if machine.address.is_empty() {
-                            None
-                        } else {
-                            Some(machine.address.as_str())
-                        },
-                        &creds,
-                    ) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            return (
-                                document,
-                                Err(format!("{}: {}", machine.system_uuid, e)),
-                            );
-                        }
-                    };
-                    match client.apply_config_patch(&patch_preview, dry_run).await {
-                        Ok(()) => {
-                            let tag = if dry_run { "dry-run" } else { "applied" };
-                            (
-                                document,
-                                Ok(format!(
-                                    "{} {} ({})",
-                                    machine.system_uuid, tag, machine.address
-                                )),
-                            )
+                    if machine.address.is_empty() {
+                        return (
+                            document,
+                            Err(format!("{}: no address", machine.system_uuid)),
+                        );
+                    }
+
+                    // Get live config, merge patch, apply
+                    match TalosctlClient::get_machine_config(&machine.address, tc.as_deref()).await {
+                        Ok(live) => {
+                            let merged = match merge_yaml_docs_into_machine_config(&live, &patch_preview) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    return (
+                                        document,
+                                        Err(format!("{}: merge failed: {}", machine.system_uuid, e)),
+                                    );
+                                }
+                            };
+                            match TalosctlClient::apply_config(
+                                &machine.address, &merged, false, tc.as_deref(),
+                            ).await {
+                                Ok(()) => {
+                                    let tag = if dry_run { "dry-run" } else { "applied" };
+                                    (
+                                        document,
+                                        Ok(format!(
+                                            "{} {} ({})",
+                                            machine.system_uuid, tag, machine.address
+                                        )),
+                                    )
+                                }
+                                Err(e) => (
+                                    document,
+                                    Err(format!("{}: {}", machine.system_uuid, e)),
+                                ),
+                            }
                         }
                         Err(e) => (
                             document,
@@ -519,8 +487,8 @@ impl ClusterController {
 
     pub async fn reboot_machine(&self, machine_id: Uuid) -> Result<(), AppError> {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
-        let client = self.client_for_machine(&cluster, &machine).await?;
-        client.reboot().await
+        let tc = self.talosconfig_yaml(&cluster)?;
+        TalosctlClient::reboot(&machine.address, tc.as_deref()).await
     }
 
     pub async fn upgrade_machine(&self, machine_id: Uuid, image: &str) -> Result<(), AppError> {
@@ -528,8 +496,8 @@ impl ClusterController {
             return Err(AppError::InvalidInput("image is required".to_string()));
         }
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
-        let client = self.client_for_machine(&cluster, &machine).await?;
-        client.upgrade(image.trim()).await
+        let tc = self.talosconfig_yaml(&cluster)?;
+        TalosctlClient::upgrade(&machine.address, image.trim(), tc.as_deref()).await
     }
 
     pub async fn reset_machine(
@@ -539,8 +507,8 @@ impl ClusterController {
         reboot: bool,
     ) -> Result<(), AppError> {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
-        let client = self.client_for_machine(&cluster, &machine).await?;
-        client.reset(graceful, reboot).await?;
+        let tc = self.talosconfig_yaml(&cluster)?;
+        TalosctlClient::reset(&machine.address, graceful, reboot, tc.as_deref()).await?;
         let mut m = machine;
         m.status = "resetting".to_string();
         m.updated_at = chrono::Utc::now();
@@ -555,8 +523,8 @@ impl ClusterController {
                 "Bootstrap is only for control-plane machines".into(),
             ));
         }
-        let client = self.client_for_machine(&cluster, &machine).await?;
-        client.bootstrap().await?;
+        let tc = self.talosconfig_yaml(&cluster)?;
+        TalosctlClient::bootstrap(&machine.address, tc.as_deref()).await?;
         let mut m = machine;
         m.status = "running".to_string();
         m.updated_at = chrono::Utc::now();
@@ -573,19 +541,9 @@ impl ClusterController {
         if let Some(endpoint) = endpoint_override.filter(|e| !e.is_empty()) {
             TalosctlClient::list_disks(endpoint).await
         } else {
-            let (_cluster, _machine) = self.cluster_and_machine(machine_id).await?;
-            let (_cluster, machine) = self.cluster_and_machine(machine_id).await?;
-            let client = self.client_for_machine(&_cluster, &machine).await?;
-            let disks = client.list_disks().await?;
-            Ok(disks.into_iter().map(|d| serde_json::json!({
-                "deviceName": d.device_name,
-                "name": d.name,
-                "serial": d.serial,
-                "size": d.size,
-                "type": d.r#type,
-                "model": d.model,
-                "systemDisk": d.system_disk,
-            })).collect())
+            let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
+            let tc = self.talosconfig_yaml(&cluster)?;
+            TalosctlClient::list_disks_postinstall(&machine.address, tc.as_deref()).await
         }
     }
 
@@ -621,13 +579,15 @@ impl ClusterController {
         machine.updated_at = chrono::Utc::now();
         crate::db::repos::machine::update(&self.pool, &machine).await?;
 
+        let tc = self.talosconfig_yaml(&cluster)?;
         if let Some(endpoint) = endpoint_override.filter(|e| !e.is_empty()) {
-            TalosctlClient::apply_config(endpoint, &config_yaml, true).await?;
+            TalosctlClient::apply_config_maintenance(
+                endpoint, &config_yaml, true, tc.as_deref(),
+            ).await?;
         } else {
-            let client = self.client_for_machine(&cluster, &machine).await?;
-            client
-                .apply_config_with_options(&config_yaml, false, true)
-                .await?;
+            TalosctlClient::apply_config(
+                &machine.address, &config_yaml, true, tc.as_deref(),
+            ).await?;
         }
 
         machine.status = "booting".to_string();
@@ -644,15 +604,15 @@ impl ClusterController {
         config_yaml: &str,
     ) -> Result<(), AppError> {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
-        let client = self.client_for_machine(&cluster, &machine).await?;
-        client.apply_config(config_yaml).await
+        let tc = self.talosconfig_yaml(&cluster)?;
+        TalosctlClient::apply_config(&machine.address, config_yaml, false, tc.as_deref()).await
     }
 
     /// Fetch live machine config from the node (requires address + talosconfig).
     pub async fn get_live_machine_config(&self, machine_id: Uuid) -> Result<String, AppError> {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
-        let client = self.client_for_machine(&cluster, &machine).await?;
-        client.get_machine_config().await
+        let tc = self.talosconfig_yaml(&cluster)?;
+        TalosctlClient::get_machine_config(&machine.address, tc.as_deref()).await
     }
 
     /// Desired (saved) config YAML for a machine, if any.
@@ -720,16 +680,14 @@ impl ClusterController {
 
         if merge_with_live {
             let (cluster, m) = self.cluster_and_machine(machine_id).await?;
-            let client = self.client_for_machine(&cluster, &m).await?;
-            let live = client.get_machine_config().await?;
-            yaml = crate::integration::talos::merge_yaml_docs_into_machine_config(&live, &yaml)?;
+            let tc = self.talosconfig_yaml(&cluster)?;
+            let live = TalosctlClient::get_machine_config(&m.address, tc.as_deref()).await?;
+            yaml = merge_yaml_docs_into_machine_config(&live, &yaml)?;
         }
 
         let (cluster, m) = self.cluster_and_machine(machine_id).await?;
-        let client = self.client_for_machine(&cluster, &m).await?;
-        client
-            .apply_config_with_options(&yaml, dry_run, reboot)
-            .await?;
+        let tc = self.talosconfig_yaml(&cluster)?;
+        TalosctlClient::apply_config(&m.address, &yaml, reboot, tc.as_deref()).await?;
 
         if !dry_run {
             // Keep desired in sync with what we applied
@@ -769,7 +727,6 @@ impl ClusterController {
 
         let mut patches: Vec<(String, String, i32)> = Vec::new();
         if let Some(img) = install_image.map(str::trim).filter(|s| !s.is_empty()) {
-            // YAML string value for image
             patches.push((
                 "/machine/install/image".into(),
                 format!("\"{img}\""),
@@ -784,16 +741,14 @@ impl ClusterController {
             ));
         }
         if let Some(net) = network_yaml.map(str::trim).filter(|s| !s.is_empty()) {
-            // Merge network document under machine.network
             let patch = if net.contains("machine:") || net.trim_start().starts_with("network:") {
                 net.to_string()
             } else {
                 format!("machine:\n  network:\n{}", indent_yaml(net, 4))
             };
-            base = crate::integration::talos::merge_yaml_docs_into_machine_config(&base, &patch)?;
+            base = merge_yaml_docs_into_machine_config(&base, &patch)?;
         }
         if let Some(mounts) = extra_mounts_yaml.map(str::trim).filter(|s| !s.is_empty()) {
-            // Expect list of extraMounts items or full kubelet.extraMounts
             let patch = if mounts.contains("extraMounts:") || mounts.contains("machine:") {
                 if mounts.contains("machine:") {
                     mounts.to_string()
@@ -801,13 +756,12 @@ impl ClusterController {
                     format!("machine:\n  kubelet:\n{}", indent_yaml(mounts, 4))
                 }
             } else {
-                // assume raw sequence of mounts
                 format!("machine:\n  kubelet:\n    extraMounts:\n{}", indent_yaml(mounts, 6))
             };
-            base = crate::integration::talos::merge_yaml_docs_into_machine_config(&base, &patch)?;
+            base = merge_yaml_docs_into_machine_config(&base, &patch)?;
         }
         if !patches.is_empty() {
-            base = crate::integration::talos::merge_patches_into_machine_config(&base, &patches)?;
+            base = merge_patches_into_machine_config(&base, &patches)?;
         }
 
         self.set_desired_machine_config(machine_id, &base).await?;
@@ -833,8 +787,8 @@ impl ClusterController {
 
     pub async fn machine_version(&self, machine_id: Uuid) -> Result<String, AppError> {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
-        let client = self.client_for_machine(&cluster, &machine).await?;
-        let version = client.get_version().await?;
+        let tc = self.talosconfig_yaml(&cluster)?;
+        let version = TalosctlClient::get_version(&machine.address, tc.as_deref()).await?;
         let mut m = machine;
         m.talos_version = version.clone();
         m.updated_at = chrono::Utc::now();
@@ -851,7 +805,7 @@ impl ClusterController {
         endpoint: Option<&str>,
     ) -> Result<String, AppError> {
         if let Some(addr) = endpoint.filter(|a| !a.is_empty()) {
-            crate::integration::talosctl::TalosctlClient::probe_maintenance(addr).await
+            TalosctlClient::probe_maintenance(addr).await
         } else {
             Err(AppError::InvalidInput("no endpoint provided".into()))
         }
@@ -862,14 +816,14 @@ impl ClusterController {
         machine_id: Uuid,
     ) -> Result<Vec<serde_json::Value>, AppError> {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
-        let client = self.client_for_machine(&cluster, &machine).await?;
-        client.service_list().await
+        let tc = self.talosconfig_yaml(&cluster)?;
+        TalosctlClient::service_list(&machine.address, tc.as_deref()).await
     }
 
     pub async fn machine_hostname(&self, machine_id: Uuid) -> Result<String, AppError> {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
-        let client = self.client_for_machine(&cluster, &machine).await?;
-        client.hostname().await
+        let tc = self.talosconfig_yaml(&cluster)?;
+        TalosctlClient::hostname(&machine.address, tc.as_deref()).await
     }
 
     pub async fn update_machine_address(
@@ -885,10 +839,6 @@ impl ClusterController {
         crate::db::repos::machine::update(&self.pool, &machine).await
     }
 
-    /// Disaster recovery: upload a stored etcd snapshot to a control-plane node,
-    /// optionally run Bootstrap with recover_etcd.
-    ///
-    /// Requires `confirm == true`. Prefer a maintenance window; this can break a healthy cluster.
     pub async fn set_backup_schedule(
         &self,
         cluster_id: Uuid,
@@ -958,7 +908,6 @@ impl ClusterController {
         })?;
         let path = PathBuf::from(path_str);
 
-        // Prevent path traversal: file must live under the backup root
         let root = backup_root_from_sqlite_path(&self.sqlite_path);
         let canon_root = root.canonicalize().unwrap_or(root.clone());
         let canon_path = path.canonicalize().map_err(|e| {
@@ -970,7 +919,11 @@ impl ClusterController {
             ));
         }
 
-        let creds = self.load_creds(&cluster)?;
+        let tc = self.talosconfig_yaml(&cluster)?;
+        let creds = TalosCredentials::from_talosconfig_yaml(
+            tc.as_deref()
+                .ok_or_else(|| AppError::InvalidInput("No talosconfig".to_string()))?,
+        )?;
         let machines = crate::db::repos::machine::list_by_cluster(&self.pool, cluster_id).await?;
 
         let address = if let Some(mid) = machine_id {
@@ -1006,13 +959,12 @@ impl ClusterController {
             pick_control_plane_address(&pairs, &creds)?
         };
 
-        let client = TalosClient::from_credentials(&address, &creds);
-        let uploaded = client.etcd_recover(&canon_path).await?;
+        let uploaded = TalosctlClient::etcd_recover(&address, canon_path.to_str().unwrap(), tc.as_deref()).await?;
 
         let mut bootstrap_ok = false;
         let mut bootstrap_error: Option<String> = None;
         if run_bootstrap {
-            match client.bootstrap_recover_etcd(skip_hash_check).await {
+            match TalosctlClient::bootstrap_recover_etcd(&address, skip_hash_check, tc.as_deref()).await {
                 Ok(()) => bootstrap_ok = true,
                 Err(e) => bootstrap_error = Some(e.to_string()),
             }
@@ -1033,7 +985,7 @@ impl ClusterController {
                     "Snapshot uploaded but Bootstrap failed — see bootstrapError"
                 }
             } else {
-                "Snapshot uploaded via EtcdRecover. Call restore again with runBootstrap=true, or bootstrap manually."
+                "Snapshot uploaded. Call restore again with runBootstrap=true, or bootstrap manually."
             },
         }))
     }
@@ -1162,6 +1114,5 @@ pub fn inject_install_disk(config_yaml: &str, disk: &str) -> String {
                 .into_owned();
         }
     }
-    // Fallback: no disk line found — leave YAML unchanged
     config_yaml.to_string()
 }
