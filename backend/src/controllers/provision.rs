@@ -702,7 +702,7 @@ fn render_extensions_yaml(extensions: &[&str]) -> String {
     }
     format!("    extensions:\n{}", extensions
         .iter()
-        .map(|e| format!("      - {e}"))
+        .map(|e| format!("      - name: {e}"))
         .collect::<Vec<_>>()
         .join("\n"))
 }
