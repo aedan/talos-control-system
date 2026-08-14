@@ -207,6 +207,10 @@ fn generate_talos_secrets(
     let (api_cert, _api_key) =
         generate_server_cert(&cabs.k8s_ca, "apiserver-kubelet-client", &sans_refs, 365)?;
 
+    // Admin client cert signed by machine CA — used by talosctl for node access.
+    let (admin_cert, admin_key) =
+        generate_server_cert(&cabs.machine_ca, "admin", &sans_refs, 365)?;
+
     let sa_key_pem = generate_rsa2048_pem()?;
 
     let cluster_id_b64 = b64_random(32);
@@ -267,8 +271,8 @@ fn generate_talos_secrets(
     let talosconfig_yaml = build_talosconfig_yaml(
         cluster_name,
         &cabs.machine_ca.pem(),
-        &api_cert,
-        &cabs.machine_ca.key().serialize_pem(),
+        &admin_cert,
+        &admin_key,
         ep,
     );
 
@@ -735,13 +739,13 @@ fn render_extensions_yaml(extensions: &[&str]) -> String {
 fn build_talosconfig_yaml(
     name: &str,
     machine_ca_crt: &str,
-    api_cert: &str,
-    machine_ca_key: &str,
+    admin_cert: &str,
+    admin_key: &str,
     endpoint: &str,
 ) -> String {
     let ca_b64 = base64::engine::general_purpose::STANDARD.encode(machine_ca_crt.as_bytes());
-    let crt_b64 = base64::engine::general_purpose::STANDARD.encode(api_cert.as_bytes());
-    let key_b64 = base64::engine::general_purpose::STANDARD.encode(machine_ca_key.as_bytes());
+    let crt_b64 = base64::engine::general_purpose::STANDARD.encode(admin_cert.as_bytes());
+    let key_b64 = base64::engine::general_purpose::STANDARD.encode(admin_key.as_bytes());
     format!(
         "context: {name}\ncontexts:\n  {name}:\n    endpoints:\n      - https://{ep}:6443\n    ca: {ca}\n    crt: {crt}\n    key: {key}\n",
         name = name,
