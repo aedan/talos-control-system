@@ -57,6 +57,7 @@ async fn run_tftp_loop(asset_dir: &str, bind_interface: &str) -> Result<(), AppE
 
     info!(interface = bind_interface, "TFTP server listening on UDP/{TFTP_PORT} (asset dir {asset_dir})");
 
+    let bind_interface = bind_interface.to_string();
     let mut buf = vec![0u8; 1024];
     loop {
         let (n, src) = match tokio::time::timeout(Duration::from_secs(5), sock.recv_from(&mut buf))
@@ -99,8 +100,9 @@ async fn run_tftp_loop(asset_dir: &str, bind_interface: &str) -> Result<(), AppE
 
         let filename = req.filename.clone();
         let block_size = req.block_size;
+        let iface = bind_interface.clone();
         tokio::spawn(async move {
-            if let Err(e) = serve_file(src, &data, block_size).await {
+            if let Err(e) = serve_file(src, &data, block_size, &iface).await {
                 debug!(file = %filename, %src, error = %e, "TFTP transfer aborted");
             }
         });
@@ -156,10 +158,29 @@ async fn serve_file(
     client: SocketAddr,
     data: &[u8],
     block_size: usize,
+    bind_interface: &str,
 ) -> Result<(), AppError> {
-    let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .await
-        .map_err(|e| AppError::Network(format!("TFTP transfer socket: {e}")))?;
+    let sock = if !bind_interface.is_empty() {
+        let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
+            .map_err(|e| AppError::Network(format!("TFTP transfer socket: {e}")))?;
+        s.set_reuse_address(true)
+            .map_err(|e| AppError::Network(format!("TFTP transfer reuse: {e}")))?;
+        #[cfg(target_os = "linux")]
+        if let Err(e) = s.bind_device(Some(bind_interface.as_bytes())) {
+            warn!(interface = bind_interface, error = %e, "TFTP transfer: failed to bind to interface");
+        }
+        s.bind(&SocketAddr::from(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).into())
+            .map_err(|e| AppError::Network(format!("TFTP transfer bind: {e}")))?;
+        s.set_nonblocking(true)
+            .map_err(|e| AppError::Network(format!("TFTP transfer nonblocking: {e}")))?;
+        let std_sock: std::net::UdpSocket = s.into();
+        UdpSocket::from_std(std_sock)
+            .map_err(|e| AppError::Network(format!("TFTP transfer tokio socket: {e}")))?
+    } else {
+        UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+            .await
+            .map_err(|e| AppError::Network(format!("TFTP transfer socket: {e}")))?
+    };
 
     if block_size != DEFAULT_BLOCK_SIZE {
         let oack = format!("\x00\x06blksize\x00{block_size}\x00");
