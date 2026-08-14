@@ -497,7 +497,6 @@ machine:
     wipe: {wipe}
     disk: {install_disk}
     image: {install_image}
-{extensions_yaml}
   features:
     diskQuotaSupport: true
     kubePrism:
@@ -506,6 +505,7 @@ machine:
     hostDNS:
       enabled: true
       forwardKubeDNSToHost: true
+{extensions_yaml}
   nodeLabels:
     node.kubernetes.io/exclude-from-external-load-balancers: ""
 {network_yaml}
@@ -647,7 +647,6 @@ machine:
     wipe: {wipe}
     disk: {install_disk}
     image: {install_image}
-{extensions_yaml}
   features:
     diskQuotaSupport: true
     kubePrism:
@@ -656,6 +655,7 @@ machine:
     hostDNS:
       enabled: true
       forwardKubeDNSToHost: true
+{extensions_yaml}
   nodeLabels:
     node.kubernetes.io/exclude-from-external-load-balancers: ""
 {network_yaml}
@@ -700,9 +700,9 @@ fn render_extensions_yaml(extensions: &[&str]) -> String {
     if extensions.is_empty() {
         return String::new();
     }
-    format!("    extensions:\n{}", extensions
+    format!("  extensions:\n{}", extensions
         .iter()
-        .map(|e| format!("      - name: {e}"))
+        .map(|e| format!("    - name: {e}"))
         .collect::<Vec<_>>()
         .join("\n"))
 }
