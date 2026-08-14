@@ -411,9 +411,15 @@ async fn load_config_yaml(
             };
 
             // Restore network config from cluster metadata (persisted by generate_config)
-            let nc = cluster.network_config.as_ref().and_then(|j| {
+            let mut nc = cluster.network_config.as_ref().and_then(|j| {
                 serde_json::from_str::<crate::controllers::provision::NetworkConfigParams>(j).ok()
             });
+
+            // Set per-machine hostname: {system_uuid_prefix}-{hostname}
+            if let Some(ref mut nc_params) = nc {
+                let uuid_prefix = machine.system_uuid.split('-').next().unwrap_or(&machine.system_uuid);
+                nc_params.hostname = format!("{}-{}", uuid_prefix, machine.hostname);
+            }
 
             let install_disk = if machine.install_disk.is_empty() {
                 "/dev/sda"

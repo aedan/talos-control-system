@@ -3478,6 +3478,8 @@ pub struct NetworkConfigRequest {
     pub dns: Vec<String>,
     #[serde(default)]
     pub mtu: Option<u32>,
+    #[serde(default)]
+    pub hostname: String,
 }
 
 #[derive(Deserialize)]
@@ -3531,6 +3533,7 @@ pub async fn generate_cluster_config(
             gateway: n.gateway.clone(),
             dns: if n.dns.is_empty() { vec!["172.24.16.254".into()] } else { n.dns.clone() },
             mtu: n.mtu,
+            hostname: n.hostname.clone(),
         }
     );
     let art = ctrl

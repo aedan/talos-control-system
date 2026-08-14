@@ -40,6 +40,7 @@ pub struct NetworkConfigParams {
     pub gateway: String,
     pub dns: Vec<String>,
     pub mtu: Option<u32>,
+    pub hostname: String,
 }
 
 /// Default kernel module extensions for metal provisioning.
@@ -388,50 +389,48 @@ fn render_network_yaml(nc: &NetworkConfigParams) -> String {
     let subnet_cidr = nc.subnet.rfind('/').and_then(|idx| nc.subnet[idx+1..].parse::<u32>().ok()).unwrap_or(26);
 
     let interfaces_list = nc.bond_interfaces.iter()
-        .map(|i| format!("            - {i}"))
+        .map(|i| format!("              - {i}"))
         .collect::<Vec<_>>()
         .join("\n");
 
     yaml.push_str("  network:\n");
+    if !nc.hostname.is_empty() {
+        yaml.push_str(&format!("    hostname: {}\n", nc.hostname));
+    }
     yaml.push_str("    interfaces:\n");
+    yaml.push_str(&format!("      - interface: {}\n", nc.bond_name));
+    yaml.push_str(&format!("        mtu: {}\n", mtu_val));
+    yaml.push_str("        bond:\n");
+    yaml.push_str(&format!("          mode: {}\n", bond_mode_name));
 
     let emit_lacp = bond_mode_name == "802.3ad" && !nc.bond_lacp_rate.is_empty();
+    if emit_lacp {
+        yaml.push_str(&format!("          lacpRate: {}\n", nc.bond_lacp_rate));
+    }
 
-    if nc.vlan_id == 0 {
-        yaml.push_str(&format!("      - interface: {}\n", nc.bond_name));
-        yaml.push_str(&format!("        mtu: {}\n", mtu_val));
-        yaml.push_str("        bond:\n");
-        yaml.push_str(&format!("          mode: {}\n", bond_mode_name));
-        yaml.push_str(&format!("          miimon: {}\n", nc.bond_miimon));
-        if emit_lacp {
-            yaml.push_str(&format!("          lacpRate: {}\n", nc.bond_lacp_rate));
-        }
-        yaml.push_str("          interfaces:\n");
-        yaml.push_str(&interfaces_list);
-        yaml.push_str("\n");
-        yaml.push_str("        addresses:\n");
-        yaml.push_str(&format!("          - __IP__/{subnet_cidr}\n"));
-        if !nc.gateway.is_empty() {
-            yaml.push_str("        routes:\n");
-            yaml.push_str("          - network: 0.0.0.0/0\n");
-            yaml.push_str(&format!("            gateway: {}\n", nc.gateway));
+    yaml.push_str("          interfaces:\n");
+    yaml.push_str(&interfaces_list);
+    yaml.push_str("\n");
+
+    // VLANs nested under bond (Talos v1.13 style)
+    if nc.vlan_id != 0 {
+        yaml.push_str("        vlans:\n");
+        // VLAN for addresses
+        yaml.push_str(&format!("          - vlanId: {}\n", nc.vlan_id));
+        yaml.push_str("            addresses:\n");
+        yaml.push_str(&format!("              - __IP__/{subnet_cidr}\n"));
+        yaml.push_str(&format!("            mtu: {}\n", mtu_val));
+        // Gateway VLAN (vlan_id - 6 per reference: 207 -> 201)
+        let gw_vlan = nc.vlan_id.saturating_sub(6);
+        if gw_vlan > 0 && !nc.gateway.is_empty() {
+            yaml.push_str(&format!("          - vlanId: {}\n", gw_vlan));
+            yaml.push_str(&format!("            mtu: {}\n", mtu_val));
+            yaml.push_str("            routes:\n");
+            yaml.push_str("              - network: 0.0.0.0/0\n");
+            yaml.push_str(&format!("                gateway: {}\n", nc.gateway));
         }
     } else {
-        yaml.push_str(&format!("      - interface: {}\n", nc.bond_name));
-        yaml.push_str(&format!("        mtu: {}\n", mtu_val));
-        yaml.push_str("        bond:\n");
-        yaml.push_str(&format!("          mode: {}\n", bond_mode_name));
-        yaml.push_str(&format!("          miimon: {}\n", nc.bond_miimon));
-        if emit_lacp {
-            yaml.push_str(&format!("          lacpRate: {}\n", nc.bond_lacp_rate));
-        }
-        yaml.push_str("          interfaces:\n");
-        yaml.push_str(&interfaces_list);
-        yaml.push_str("\n");
-        let vlan_iface = format!("{}.{}", nc.bond_name, nc.vlan_id);
-        yaml.push_str(&format!("      - interface: {}\n", vlan_iface));
-        yaml.push_str(&format!("        mtu: {}\n", mtu_val));
-        yaml.push_str(&format!("        vlan: {}\n", nc.vlan_id));
+        // No VLAN: addresses and routes directly on bond
         yaml.push_str("        addresses:\n");
         yaml.push_str(&format!("          - __IP__/{subnet_cidr}\n"));
         if !nc.gateway.is_empty() {
@@ -441,6 +440,7 @@ fn render_network_yaml(nc: &NetworkConfigParams) -> String {
         }
     }
 
+    // Ignore 1G NICs
     yaml.push_str("      - interface: eno1\n");
     yaml.push_str("        ignore: true\n");
     yaml.push_str("      - interface: eno2\n");
@@ -449,6 +449,7 @@ fn render_network_yaml(nc: &NetworkConfigParams) -> String {
     yaml.push_str("        ignore: true\n");
     yaml.push_str("      - interface: eno4\n");
     yaml.push_str("        ignore: true\n");
+
     if !nc.dns.is_empty() {
         yaml.push_str("    nameservers:\n");
         for d in &nc.dns {
@@ -677,6 +678,11 @@ machine:
     wipe: {wipe}
     disk: {install_disk}
     image: {install_image}
+    extensions:
+      officialExtensions:
+        - siderolabs/iscsi-tools
+        - siderolabs/util-linux-tools
+        - siderolabs/bnx2-bnx2x
 
   features:
     diskQuotaSupport: true
