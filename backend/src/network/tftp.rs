@@ -39,12 +39,6 @@ async fn run_tftp_loop(asset_dir: &str, bind_interface: &str) -> Result<(), AppE
     socket
         .set_reuse_address(true)
         .map_err(|e| AppError::Network(format!("TFTP reuse: {e}")))?;
-    #[cfg(target_os = "linux")]
-    if !bind_interface.is_empty() {
-        if let Err(e) = socket.bind_device(Some(bind_interface.as_bytes())) {
-            warn!(interface = bind_interface, error = %e, "TFTP: failed to bind to interface");
-        }
-    }
     socket
         .bind(&SocketAddr::from(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, TFTP_PORT)).into())
         .map_err(|e| AppError::Network(format!("TFTP bind :{TFTP_PORT}: {e}")))?;
