@@ -214,7 +214,11 @@ fn generate_talos_secrets(
     let machine_token = bootstrap_token();
     let kube_token = bootstrap_token();
 
-    let install_image = format!("factory.talos.dev/installer/{}", talos_version);
+    // Use custom factory schematic with extensions baked in (iscsi-tools, util-linux-tools, bnx2-bnx2x)
+    let install_image = format!(
+        "factory.talos.dev/installer/f496fbb2b94094bd709de7817df67046467518ba6d7066b93209f899bec62ac5/{}",
+        talos_version
+    );
 
     let controlplane_yaml = build_controlplane_yaml(
         cluster_name,
@@ -521,6 +525,11 @@ machine:
     wipe: {wipe}
     disk: {install_disk}
     image: {install_image}
+    extensions:
+      officialExtensions:
+        - siderolabs/iscsi-tools
+        - siderolabs/util-linux-tools
+        - siderolabs/bnx2-bnx2x
 
   features:
     diskQuotaSupport: true
