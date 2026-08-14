@@ -526,11 +526,6 @@ machine:
     wipe: {wipe}
     disk: {install_disk}
     image: {install_image}
-    extensions:
-      officialExtensions:
-        - siderolabs/iscsi-tools
-        - siderolabs/util-linux-tools
-        - siderolabs/bnx2-bnx2x
 
   features:
     diskQuotaSupport: true
@@ -678,11 +673,6 @@ machine:
     wipe: {wipe}
     disk: {install_disk}
     image: {install_image}
-    extensions:
-      officialExtensions:
-        - siderolabs/iscsi-tools
-        - siderolabs/util-linux-tools
-        - siderolabs/bnx2-bnx2x
 
   features:
     diskQuotaSupport: true
