@@ -432,7 +432,10 @@ fn render_network_yaml(nc: &NetworkConfigParams) -> String {
         .join("\n");
 
     yaml.push_str("  network:\n");
-    if !nc.hostname.is_empty() {
+    if nc.hostname.is_empty() {
+        // Per-machine placeholder; patched in load_config_yaml.
+        yaml.push_str("    hostname: __HOSTNAME__\n");
+    } else {
         yaml.push_str(&format!("    hostname: {}\n", nc.hostname));
     }
     yaml.push_str("    interfaces:\n");

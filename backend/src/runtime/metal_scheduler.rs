@@ -26,6 +26,10 @@ pub struct MetalJobPayload {
     pub current_machine_index: usize,
     pub step: String,
     pub steps_log: Vec<String>,
+    /// Shared config artifact generated once for the whole job so every
+    /// machine uses the same PKI / cluster id / tokens.
+    #[serde(default)]
+    pub job_artifact_id: Option<Uuid>,
 }
 
 pub fn spawn_metal_scheduler(
@@ -259,7 +263,7 @@ async fn run_job(
             } else {
                 None
             };
-            let yaml = load_config_yaml(pool, &jwt_secret, &machine, &payload).await?;
+            let yaml = load_config_yaml(pool, &jwt_secret, &machine, &mut payload).await?;
             match ctrl
                 .install_machine(machine_id, &yaml, lease_ip.as_deref())
                 .await
@@ -402,66 +406,97 @@ async fn load_config_yaml(
     pool: &DbPool,
     jwt_secret: &str,
     machine: &crate::db::models::machine::Machine,
-    payload: &MetalJobPayload,
+    payload: &mut MetalJobPayload,
 ) -> Result<String, AppError> {
+    // An explicit artifact_id (from the API request) always wins. Otherwise we
+    // generate ONE shared artifact for the whole job so every machine uses the
+    // same PKI / cluster id / bootstrap tokens. The shared id is cached in the
+    // payload so it is generated only once.
     let artifact_id = match payload.artifact_id {
         Some(id) => id,
-        None => {
-            // Auto-generate config artifact when not provided
-            let cluster_id = machine.cluster_id.ok_or_else(|| {
-                AppError::InvalidInput("artifact_id not provided and machine has no cluster_id".into())
-            })?;
-            let cluster = repos::cluster::get(pool, cluster_id)
-                .await?
-                .ok_or_else(|| AppError::NotFound(format!("cluster {cluster_id}")))?;
+        None => match payload.job_artifact_id {
+            Some(id) => id,
+            None => {
+                let cluster_id = machine.cluster_id.ok_or_else(|| {
+                    AppError::InvalidInput(
+                        "artifact_id not provided and machine has no cluster_id".into(),
+                    )
+                })?;
+                let cluster = repos::cluster::get(pool, cluster_id)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound(format!("cluster {cluster_id}")))?;
 
-            let prov_ctrl = ProvisionController::new(pool.clone(), jwt_secret.to_string());
-            let endpoint = if machine.address.is_empty() {
-                // Use cluster name as fallback; IP will be patched below
-                cluster.name.clone()
-            } else {
-                machine.address.strip_suffix(":6443").unwrap_or(&machine.address).to_string()
-            };
+                // Collect machine addresses: the first control-plane address is
+                // the cluster endpoint; ALL addresses become cert SANs so each
+                // node's API server cert is valid when probed via its own IP.
+                let mut cp_addresses: Vec<String> = Vec::new();
+                let mut all_addresses: Vec<String> = Vec::new();
+                for mid in &payload.machine_ids {
+                    if let Ok(Some(m)) = repos::machine::get(pool, *mid).await {
+                        if m.address.is_empty() {
+                            continue;
+                        }
+                        let ip = m.address.strip_suffix(":6443").unwrap_or(&m.address).to_string();
+                        if !all_addresses.contains(&ip) {
+                            all_addresses.push(ip.clone());
+                        }
+                        let is_cp = m.machine_type.to_ascii_lowercase().contains("control");
+                        if is_cp && !cp_addresses.contains(&ip) {
+                            cp_addresses.push(ip);
+                        }
+                    }
+                }
+                let endpoint = if !cp_addresses.is_empty() {
+                    cp_addresses[0].clone()
+                } else if !all_addresses.is_empty() {
+                    all_addresses[0].clone()
+                } else if !machine.address.is_empty() {
+                    machine.address.strip_suffix(":6443").unwrap_or(&machine.address).to_string()
+                } else {
+                    cluster.name.clone()
+                };
 
-            // Restore network config from cluster metadata (persisted by generate_config)
-            let mut nc = cluster.network_config.as_ref().and_then(|j| {
-                serde_json::from_str::<crate::controllers::provision::NetworkConfigParams>(j).ok()
-            });
+                // Restore network config from cluster metadata (persisted by generate_config).
+                // Hostname is left empty so render_network_yaml emits the
+                // __HOSTNAME__ placeholder, patched per-machine below.
+                let nc = cluster.network_config.as_ref().and_then(|j| {
+                    serde_json::from_str::<crate::controllers::provision::NetworkConfigParams>(j).ok()
+                });
 
-            // Set per-machine hostname: {system_uuid_prefix}-{hostname}
-            if let Some(ref mut nc_params) = nc {
-                let uuid_prefix = machine.system_uuid.split('-').next().unwrap_or(&machine.system_uuid);
-                nc_params.hostname = format!("{}-{}", uuid_prefix, machine.hostname);
+                let install_disk = if machine.install_disk.is_empty() {
+                    "/dev/sda"
+                } else {
+                    &machine.install_disk
+                };
+                let prov_ctrl = ProvisionController::new(pool.clone(), jwt_secret.to_string());
+                let art = prov_ctrl
+                    .generate_config(
+                        &cluster.name,
+                        &format!("https://{}:6443", endpoint),
+                        &cluster.talos_version,
+                        &cluster.control_plane_version,
+                        Some(cluster_id),
+                        nc,
+                        install_disk,
+                        true,
+                        &all_addresses,
+                        "cluster.local",
+                        None, // uses DEFAULT_SYSTEM_EXTENSIONS
+                    )
+                    .await?;
+
+                info!(
+                    artifact_id = %art.id,
+                    cluster_id = %cluster_id,
+                    endpoint = %endpoint,
+                    cp_count = cp_addresses.len(),
+                    sans_count = all_addresses.len(),
+                    "Generated shared Talos config artifact for metal provisioning job"
+                );
+                payload.job_artifact_id = Some(art.id);
+                art.id
             }
-
-            let install_disk = if machine.install_disk.is_empty() {
-                "/dev/sda"
-            } else {
-                &machine.install_disk
-            };
-            let art = prov_ctrl
-                .generate_config(
-                    &cluster.name,
-                    &format!("https://{}:6443", endpoint),
-                    &cluster.talos_version,
-                    &cluster.control_plane_version,
-                    Some(cluster_id),
-                    nc,
-                    install_disk,
-                    true,
-                    &[endpoint.clone()],
-                    "cluster.local",
-                    None, // uses DEFAULT_SYSTEM_EXTENSIONS
-                )
-                .await?;
-
-            info!(
-                artifact_id = %art.id,
-                cluster_id = %cluster_id,
-                "Auto-generated Talos config artifact for metal provisioning"
-            );
-            art.id
-        }
+        },
     };
 
     let art = repos::provision::get(pool, artifact_id)
@@ -478,10 +513,13 @@ async fn load_config_yaml(
     }
     .ok_or_else(|| AppError::InvalidInput("artifact missing config yaml".into()))?;
 
-    // Patch per-machine IP: replace __IP__ placeholder with machine's assigned address
+    // Patch per-machine IP and hostname placeholders.
     if !machine.address.is_empty() {
         let ip = machine.address.strip_suffix(":6443").unwrap_or(&machine.address);
         yaml = yaml.replace("__IP__", ip);
+    }
+    if !machine.hostname.is_empty() {
+        yaml = yaml.replace("__HOSTNAME__", &machine.hostname);
     }
 
     Ok(yaml)

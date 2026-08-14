@@ -4417,6 +4417,7 @@ pub async fn start_cluster_provision(
         current_machine_index: 0,
         step: "pending".into(),
         steps_log: vec![format!("{} job created", chrono::Utc::now().to_rfc3339())],
+        job_artifact_id: None,
     };
     let now = chrono::Utc::now();
     let job = repos::provision_job::ProvisionJob {
