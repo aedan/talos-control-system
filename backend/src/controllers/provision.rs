@@ -572,9 +572,6 @@ machine:
     kubePrism:
       enabled: true
       port: 7445
-  hostDNS:
-    enabled: true
-    forwardKubeDNSToHost: true
   nodeLabels:
     node.kubernetes.io/exclude-from-external-load-balancers: ""
 {network_yaml}
@@ -717,9 +714,6 @@ machine:
     kubePrism:
       enabled: true
       port: 7445
-    hostDNS:
-      enabled: true
-      forwardKubeDNSToHost: true
   nodeLabels:
     node.kubernetes.io/exclude-from-external-load-balancers: ""
 {network_yaml}
