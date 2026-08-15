@@ -7,7 +7,7 @@ use chrono::{Datelike, Utc};
 use rand::RngCore;
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType,
-    IsCa, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
+    ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
 };
 use rsa::{pkcs8::EncodePrivateKey, pkcs8::LineEnding, RsaPrivateKey};
 use sha2::{Digest, Sha256};
@@ -348,6 +348,11 @@ fn generate_server_cert(
     params.distinguished_name.push(DnType::CommonName, cn);
     params.not_before = dt - TimeDuration::days(1);
     params.not_after = dt + TimeDuration::days(days);
+    // These are client certs (talosctl admin, apiserver-kubelet-client). Talos
+    // v1.13's machine API requires a clientAuth EKU on the client cert for
+    // mTLS; without it the handshake is rejected with "bad certificate".
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
 
     let cert_issuer =
         CertifiedIssuer::signed_by(params, key_pair, ca_issuer)
