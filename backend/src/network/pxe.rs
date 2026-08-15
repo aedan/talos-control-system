@@ -109,7 +109,7 @@ pub fn build_ipxe_script(
     let kernel = format!("{base}/pxe/assets/{version}/{arch}/vmlinuz-{arch}");
     let initrd = format!("{base}/pxe/assets/{version}/{arch}/initramfs-{arch}.xz");
     let mut cmdline = format!(
-        "initrd=initramfs-{arch}.xz talos.platform=metal slab_nomerge pti=on"
+        "initrd=initramfs-{arch}.xz talos.platform=metal slab_nomerge pti=on ip=dhcp"
     );
     if !profile_cmdline.is_empty() {
         cmdline.push(' ');

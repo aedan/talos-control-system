@@ -179,9 +179,9 @@ async fn run_job(
             save_progress(pool, job.id, "waiting_installer", &payload).await?;
         }
         "wait_installer" => {
-            // During PXE boot the machine only has its DHCP lease address
-            // (installer lives on the provision network, e.g. eno1/192.168.1.x).
-            // Prefer the lease; fall back to the static post-install address.
+            // During PXE boot the installer may be reachable on either the
+            // DHCP lease address or the machine's static address (firmware
+            // may assign a static IP that overrides DHCP). Try both.
             let lease_ip = if !machine.mac_address.is_empty() {
                 repos::dhcp_lease::get_by_mac(pool, &machine.mac_address)
                     .await
@@ -192,38 +192,57 @@ async fn run_job(
             } else {
                 None
             };
-            let boot_addr = lease_ip.clone().unwrap_or_else(|| machine.address.clone());
-            let endpoint: Option<String> = lease_ip;
-            if let Some(ref ip) = endpoint {
-                if machine.address.is_empty() || machine.address != *ip {
-                    log(
-                        &mut payload,
-                        &format!("installer at DHCP lease {ip} (static {})", machine.address),
-                    );
-                }
+            let mut candidates: Vec<String> = Vec::new();
+            if let Some(ref ip) = lease_ip {
+                candidates.push(ip.clone());
             }
-            if boot_addr.is_empty() {
+            if !machine.address.is_empty() && !candidates.contains(&machine.address) {
+                candidates.push(machine.address.clone());
+            }
+            if candidates.is_empty() {
                 log(&mut payload, "waiting for machine address / DHCP lease");
                 save_progress(pool, job.id, "waiting_installer", &payload).await?;
                 return Ok(());
+            }
+            if lease_ip.is_some() && !machine.address.is_empty() {
+                log(
+                    &mut payload,
+                    &format!(
+                        "probing installer: lease {} static {}",
+                        lease_ip.as_deref().unwrap_or("?"),
+                        machine.address
+                    ),
+                );
             }
             let ctrl = ClusterController::with_context(
                 pool.clone(),
                 sqlite_path.to_string(),
                 jwt_secret.to_string(),
             );
-            match ctrl.list_disks(machine_id, endpoint.as_deref()).await {
-                Ok(disks) => {
+            let mut disks: Option<Vec<serde_json::Value>> = None;
+            let mut last_err = String::new();
+            for cand in &candidates {
+                match ctrl.list_disks(machine_id, Some(cand)).await {
+                    Ok(d) => {
+                        disks = Some(d);
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = format!("{cand}: {e}");
+                    }
+                }
+            }
+            match disks {
+                Some(d) => {
                     log(
                         &mut payload,
-                        &format!("installer reachable ({} disks)", disks.len()),
+                        &format!("installer reachable ({} disks)", d.len()),
                     );
-                    // auto-pick install disk if needed
                     if machine.install_disk.is_empty() {
                         if let Some(disk) = payload.install_disk.clone() {
                             machine.install_disk = disk;
-                        } else if let Some(best) = disks.iter().max_by_key(|d| {
-                            d.get("size").and_then(|v| v.as_u64()).unwrap_or(0)
+                        } else if let Some(best) = d.iter().max_by_key(|x| {
+                            x.get("size").and_then(|v| v.as_u64()).unwrap_or(0)
                         }) {
                             if let Some(name) = best
                                 .get("deviceName")
@@ -240,8 +259,8 @@ async fn run_job(
                     payload.step = "install".into();
                     save_progress(pool, job.id, "installing", &payload).await?;
                 }
-                Err(e) => {
-                    log(&mut payload, &format!("installer not ready: {e}"));
+                None => {
+                    log(&mut payload, &format!("installer not ready: {last_err}"));
                     save_progress(pool, job.id, "waiting_installer", &payload).await?;
                 }
             }
@@ -252,7 +271,10 @@ async fn run_job(
                 sqlite_path.to_string(),
                 jwt_secret.to_string(),
             );
-            // Installer still runs from PXE RAM: connect via DHCP lease if known.
+            // Installer still runs from PXE RAM. It may be reachable on the
+            // DHCP lease or the machine's static address (firmware may assign
+            // a static IP that overrides DHCP). Try the lease first, then the
+            // static address.
             let lease_ip = if !machine.mac_address.is_empty() {
                 repos::dhcp_lease::get_by_mac(pool, &machine.mac_address)
                     .await
@@ -263,19 +285,33 @@ async fn run_job(
             } else {
                 None
             };
+            let mut candidates: Vec<String> = Vec::new();
+            if let Some(ip) = lease_ip {
+                candidates.push(ip);
+            }
+            if !machine.address.is_empty() && !candidates.contains(&machine.address) {
+                candidates.push(machine.address.clone());
+            }
             let yaml = load_config_yaml(pool, &jwt_secret, &machine, &mut payload).await?;
-            match ctrl
-                .install_machine(machine_id, &yaml, lease_ip.as_deref())
-                .await
-            {
-                Ok(()) => {
-                    log(&mut payload, "install applied (reboot)");
-                    payload.step = "wait_post_install".into();
-                    save_progress(pool, job.id, "bootstrapping", &payload).await?;
+            let mut applied = false;
+            let mut last_err = String::new();
+            for cand in &candidates {
+                match ctrl.install_machine(machine_id, &yaml, Some(cand)).await {
+                    Ok(()) => {
+                        applied = true;
+                        log(&mut payload, &format!("install applied at {cand} (reboot)"));
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = format!("{cand}: {e}");
+                    }
                 }
-                Err(e) => {
-                    fail_job(pool, job.id, &mut payload, &format!("install: {e}")).await?;
-                }
+            }
+            if applied {
+                payload.step = "wait_post_install".into();
+                save_progress(pool, job.id, "bootstrapping", &payload).await?;
+            } else {
+                fail_job(pool, job.id, &mut payload, &format!("install: {last_err}")).await?;
             }
         }
         "wait_post_install" => {
