@@ -416,20 +416,10 @@ fn bootstrap_token() -> String {
 fn render_network_yaml(nc: &NetworkConfigParams) -> String {
     let mut yaml = String::new();
 
-    let bond_mode_name = match nc.bond_mode.as_str() {
-        "802.3ad" | "lacp" => "802.3ad",
-        "active-backup" => "active-backup",
-        "balance-rr" | "balance-roundrobin" => "balance-rr",
-        _ => "balance-rr",
-    };
-
     let mtu_val = nc.mtu.unwrap_or(1500);
     let subnet_cidr = nc.subnet.rfind('/').and_then(|idx| nc.subnet[idx+1..].parse::<u32>().ok()).unwrap_or(26);
 
-    let interfaces_list = nc.bond_interfaces.iter()
-        .map(|i| format!("              - {i}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let is_bond = nc.bond_interfaces.len() > 1;
 
     yaml.push_str("  network:\n");
     if nc.hostname.is_empty() {
@@ -439,39 +429,62 @@ fn render_network_yaml(nc: &NetworkConfigParams) -> String {
         yaml.push_str(&format!("    hostname: {}\n", nc.hostname));
     }
     yaml.push_str("    interfaces:\n");
-    yaml.push_str(&format!("      - interface: {}\n", nc.bond_name));
-    yaml.push_str(&format!("        mtu: {}\n", mtu_val));
-    yaml.push_str("        bond:\n");
-    yaml.push_str(&format!("          mode: {}\n", bond_mode_name));
 
-    let emit_lacp = bond_mode_name == "802.3ad" && !nc.bond_lacp_rate.is_empty();
-    if emit_lacp {
-        yaml.push_str(&format!("          lacpRate: {}\n", nc.bond_lacp_rate));
-    }
+    if is_bond {
+        let bond_mode_name = match nc.bond_mode.as_str() {
+            "802.3ad" | "lacp" => "802.3ad",
+            "active-backup" => "active-backup",
+            "balance-rr" | "balance-roundrobin" => "balance-rr",
+            _ => "balance-rr",
+        };
+        let interfaces_list = nc.bond_interfaces.iter()
+            .map(|i| format!("              - {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
 
-    yaml.push_str("          interfaces:\n");
-    yaml.push_str(&interfaces_list);
-    yaml.push_str("\n");
+        yaml.push_str(&format!("      - interface: {}\n", nc.bond_name));
+        yaml.push_str(&format!("        mtu: {}\n", mtu_val));
+        yaml.push_str("        bond:\n");
+        yaml.push_str(&format!("          mode: {}\n", bond_mode_name));
+        let emit_lacp = bond_mode_name == "802.3ad" && !nc.bond_lacp_rate.is_empty();
+        if emit_lacp {
+            yaml.push_str(&format!("          lacpRate: {}\n", nc.bond_lacp_rate));
+        }
+        yaml.push_str("          interfaces:\n");
+        yaml.push_str(&interfaces_list);
+        yaml.push_str("\n");
 
-    // VLANs nested under bond (Talos v1.13 style)
-    if nc.vlan_id != 0 {
-        yaml.push_str("        vlans:\n");
-        // VLAN for addresses
-        yaml.push_str(&format!("          - vlanId: {}\n", nc.vlan_id));
-        yaml.push_str("            addresses:\n");
-        yaml.push_str(&format!("              - __IP__/{subnet_cidr}\n"));
-        yaml.push_str(&format!("            mtu: {}\n", mtu_val));
-        // Gateway VLAN (vlan_id - 6 per reference: 207 -> 201)
-        let gw_vlan = nc.vlan_id.saturating_sub(6);
-        if gw_vlan > 0 && !nc.gateway.is_empty() {
-            yaml.push_str(&format!("          - vlanId: {}\n", gw_vlan));
+        // VLANs nested under bond (Talos v1.13 style)
+        if nc.vlan_id != 0 {
+            yaml.push_str("        vlans:\n");
+            yaml.push_str(&format!("          - vlanId: {}\n", nc.vlan_id));
+            yaml.push_str("            addresses:\n");
+            yaml.push_str(&format!("              - __IP__/{subnet_cidr}\n"));
             yaml.push_str(&format!("            mtu: {}\n", mtu_val));
-            yaml.push_str("            routes:\n");
-            yaml.push_str("              - network: 0.0.0.0/0\n");
-            yaml.push_str(&format!("                gateway: {}\n", nc.gateway));
+            // Gateway VLAN (vlan_id - 6 per reference: 207 -> 201)
+            let gw_vlan = nc.vlan_id.saturating_sub(6);
+            if gw_vlan > 0 && !nc.gateway.is_empty() {
+                yaml.push_str(&format!("          - vlanId: {}\n", gw_vlan));
+                yaml.push_str(&format!("            mtu: {}\n", mtu_val));
+                yaml.push_str("            routes:\n");
+                yaml.push_str("              - network: 0.0.0.0/0\n");
+                yaml.push_str(&format!("                gateway: {}\n", nc.gateway));
+            }
+        } else {
+            // No VLAN: addresses and routes directly on bond
+            yaml.push_str("        addresses:\n");
+            yaml.push_str(&format!("          - __IP__/{subnet_cidr}\n"));
+            if !nc.gateway.is_empty() {
+                yaml.push_str("        routes:\n");
+                yaml.push_str("          - network: 0.0.0.0/0\n");
+                yaml.push_str(&format!("            gateway: {}\n", nc.gateway));
+            }
         }
     } else {
-        // No VLAN: addresses and routes directly on bond
+        // Single interface (no bond): addresses and routes directly on it.
+        let iface = nc.bond_interfaces.first().map(|s| s.as_str()).unwrap_or(nc.bond_name.as_str());
+        yaml.push_str(&format!("      - interface: {}\n", iface));
+        yaml.push_str(&format!("        mtu: {}\n", mtu_val));
         yaml.push_str("        addresses:\n");
         yaml.push_str(&format!("          - __IP__/{subnet_cidr}\n"));
         if !nc.gateway.is_empty() {
@@ -481,15 +494,13 @@ fn render_network_yaml(nc: &NetworkConfigParams) -> String {
         }
     }
 
-    // Ignore 1G NICs
-    yaml.push_str("      - interface: eno1\n");
-    yaml.push_str("        ignore: true\n");
-    yaml.push_str("      - interface: eno2\n");
-    yaml.push_str("        ignore: true\n");
-    yaml.push_str("      - interface: eno3\n");
-    yaml.push_str("        ignore: true\n");
-    yaml.push_str("      - interface: eno4\n");
-    yaml.push_str("        ignore: true\n");
+    // Ignore the 1G NICs that are not in use.
+    for k in ["eno1", "eno2", "eno3", "eno4"] {
+        if !nc.bond_interfaces.iter().any(|i| i == k) && nc.bond_name != k {
+            yaml.push_str(&format!("      - interface: {k}\n"));
+            yaml.push_str("        ignore: true\n");
+        }
+    }
 
     if !nc.dns.is_empty() {
         yaml.push_str("    nameservers:\n");
