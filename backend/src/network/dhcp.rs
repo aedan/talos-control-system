@@ -347,7 +347,12 @@ async fn run_dhcp_loop(pool: DbPool, cfg: DhcpServerConfig) -> Result<(), AppErr
             cfg.http_boot_base.trim_end_matches('/'),
             mac_n
         );
+        // iPXE identifies itself via option 77 (User-Class) = "iPXE". Some
+        // builds also echo it in option 60 (Vendor-Class); check both.
         let is_ipxe = matches!(
+            msg.opts().get(OptionCode::UserClass),
+            Some(DhcpOption::UserClass(v)) if String::from_utf8_lossy(v).contains("iPXE")
+        ) || matches!(
             msg.opts().get(OptionCode::ClassIdentifier),
             Some(DhcpOption::ClassIdentifier(v)) if String::from_utf8_lossy(v).contains("iPXE")
         );
