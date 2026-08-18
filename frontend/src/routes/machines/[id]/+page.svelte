@@ -77,6 +77,7 @@
         /* optional */
       }
       await loadDesiredConfig();
+      void loadHostname();
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Failed to load machine';
     } finally {
@@ -418,7 +419,7 @@
     <div class="error">{error}</div>
   {:else if machine}
     <div class="detail-header">
-      <h1>{hostnameLive || machineLabel(machine)}</h1>
+      <h1>{hostnameLive || machine.hostname || machineLabel(machine)}</h1>
       <div class="header-actions">
         <span class="status-badge">{machine.status}</span>
         <span class="type-badge">{machine.machineType}</span>
@@ -555,7 +556,7 @@
 
       <div class="helper-grid">
         <div class="info-section">
-          <h3>Helpers (merge into desired)</h3>
+          <h3>Helpers (deep-merged into desired config)</h3>
           <label>
             Install image (factory / custom installer)
             <input
@@ -565,7 +566,8 @@
             />
           </label>
           <label>
-            Network YAML (merged under machine.network)
+            Network YAML — deep-merged under machine.network (lists like
+            <code>interfaces</code> are replaced, not appended)
             <textarea
               bind:value={networkYamlHelper}
               rows="6"

@@ -960,4 +960,53 @@ machine:
         assert!(merged.contains("---"));
         assert_eq!(merged.matches("---\n").count(), 2);
     }
+
+    #[test]
+    fn merge_interfaces_list_is_replaced_not_appended() {
+        let current = r#"
+version: v1alpha1
+machine:
+  type: controlplane
+  network:
+    interfaces:
+      - interface: eno1
+        mtu: 1500
+        addresses:
+          - 192.168.1.200/24
+        routes:
+          - network: 0.0.0.0/0
+            gateway: 192.168.1.2
+      - interface: eno2
+        ignore: true
+cluster:
+  clusterName: demo
+"#;
+        // Operator pastes ONLY the bond into the Network YAML helper.
+        let patch = r#"
+machine:
+  network:
+    interfaces:
+      - interface: bond0
+        mtu: 9000
+        addresses:
+          - 192.168.1.200/24
+        routes:
+          - network: 0.0.0.0/0
+            gateway: 192.168.1.2
+        bonds:
+          bond0:
+            interfaces:
+              - eno1
+              - eno2
+            mode: 802.3ad
+"#;
+        let merged = merge_yaml_docs_into_machine_config(current, patch).unwrap();
+        // The bond is present...
+        assert!(merged.contains("bond0"));
+        // ...but the pre-existing eno1/eno2 entries are GONE (list replaced).
+        assert!(!merged.contains("interface: eno1"));
+        assert!(!merged.contains("interface: eno2"));
+        // Other keys survive the deep merge.
+        assert!(merged.contains("clusterName: demo") || merged.contains("clusterName:demo"));
+    }
 }
