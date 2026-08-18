@@ -515,12 +515,12 @@ impl TalosctlClient {
         Self::ensure_installed().await?;
 
         let mut args: Vec<String> = vec![
-            "get".into(), "mc".into(), "-e".into(), endpoint.into(), "-n".into(), endpoint.into(), "-o".into(), "yaml".into(),
+            "get".into(), "mc".into(), "-e".into(), endpoint.into(), "-n".into(), endpoint.into(), "-o".into(), "json".into(),
         ];
         args.extend(Self::talosconfig_args(talosconfig));
 
         let out = Self::run(&args).await?;
-        Ok(out)
+        spec_from_mc_json(&out)
     }
 
     /// List machined services on a node.
@@ -881,6 +881,21 @@ fn serialize_yaml_documents(docs: &[serde_yaml::Value]) -> Result<String, AppErr
     Ok(out)
 }
 
+/// Extract the machine config from `talosctl get mc -o json` output.
+///
+/// The MachineConfig resource wraps the real config in `spec` as an opaque
+/// YAML string (fields like `node`/`metadata` are resource plumbing that
+/// must not be fed back to the node).
+fn spec_from_mc_json(out: &str) -> Result<String, AppError> {
+    let parsed: serde_json::Value = serde_json::from_str(out).map_err(|e| {
+        AppError::Network(format!("Failed to parse talosctl mc JSON: {e}"))
+    })?;
+    parsed["spec"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| AppError::Network("talosctl get mc returned no spec".to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1012,5 +1027,28 @@ machine:
         assert!(!merged.contains("interface: eno2"));
         // Other keys survive the deep merge.
         assert!(merged.contains("clusterName: demo") || merged.contains("clusterName:demo"));
+    }
+
+    #[test]
+    fn spec_from_mc_json_extracts_opaque_spec() {
+        let out = r#"{
+  "node": "192.168.1.200",
+  "metadata": {
+    "namespace": "config",
+    "type": "MachineConfigs.config.talos.dev",
+    "id": "v1alpha1"
+  },
+  "spec": "version: v1alpha1\nmachine:\n  type: controlplane\n  network:\n    hostname: 914333-infra01\ncluster:\n  clusterName: kronos\n"
+}"#;
+        let spec = spec_from_mc_json(out).unwrap();
+        assert!(spec.starts_with("version: v1alpha1"));
+        assert!(spec.contains("914333-infra01"));
+        assert!(!spec.contains("\"spec\""));
+    }
+
+    #[test]
+    fn spec_from_mc_json_errors_on_missing_spec() {
+        let err = spec_from_mc_json(r#"{"node":"x","metadata":{}}"#).unwrap_err();
+        assert!(err.to_string().contains("no spec"));
     }
 }

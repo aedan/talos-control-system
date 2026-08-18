@@ -133,8 +133,8 @@
     }
   }
 
-  function populateHelpersFromConfig() {
-    if (!configYaml.trim()) return;
+  function populateHelpersFromConfig(): { interfaces: number; nameservers: number } {
+    if (!configYaml.trim()) return { interfaces: 0, nameservers: 0 };
     try {
       const parsed = parseNetworkIntoBuilder(configYaml);
       netInterfaces = parsed.interfaces;
@@ -151,20 +151,27 @@
       if (Array.isArray(mounts) && mounts.length > 0) {
         mountsYamlHelper = yamlStringify(mounts);
       }
+      return { interfaces: parsed.interfaces.length, nameservers: parsed.nameservers.length };
     } catch {
       /* keep helpers empty if the config cannot be parsed */
+      return { interfaces: 0, nameservers: 0 };
     }
   }
 
-  function loadCurrentIntoBuilder() {
+  async function loadCurrentIntoBuilder() {
     if (!configYaml.trim()) {
-      notifyError('No config loaded — load desired or live config first');
+      await loadLiveConfig(true);
+    }
+    if (!configYaml.trim()) {
+      notifyError('No config loaded and live config is not reachable');
       return;
     }
-    populateHelpersFromConfig();
-    success(
-      `Loaded ${netInterfaces.length} interface(s) and ${netNameservers.length} nameserver(s) into helpers`
-    );
+    const { interfaces, nameservers } = populateHelpersFromConfig();
+    if (interfaces === 0 && nameservers === 0) {
+      notifyError('No interfaces or nameservers found in the loaded config');
+    } else {
+      success(`Loaded ${interfaces} interface(s) and ${nameservers} nameserver(s) into helpers`);
+    }
   }
 
   function addNetInterface() {
