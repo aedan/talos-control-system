@@ -181,4 +181,27 @@ ${yamlText
     expect(state.interfaces[2].bondMode).toBe('802.3ad');
     expect(state.nameservers).toEqual(['8.8.8.8', '1.1.1.1']);
   });
+
+  it('parses without crypto.randomUUID (insecure http context)', () => {
+    const original = globalThis.crypto;
+    const restore = () => {
+      Object.defineProperty(globalThis, 'crypto', {
+        value: original,
+        configurable: true,
+      });
+    };
+    try {
+      Object.defineProperty(globalThis, 'crypto', {
+        value: {},
+        configurable: true,
+      });
+      const state = parseNetworkIntoBuilder(yamlText);
+      expect(state.interfaces).toHaveLength(3);
+      expect(state.interfaces[0].interface).toBe('eno1');
+      expect(state.nameservers).toEqual(['8.8.8.8', '1.1.1.1']);
+      expect(newNetInterface().id).toMatch(/^id-/);
+    } finally {
+      restore();
+    }
+  });
 });

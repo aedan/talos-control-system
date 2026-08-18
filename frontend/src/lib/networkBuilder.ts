@@ -30,7 +30,19 @@ export interface NetworkBuilderKeys {
 
 export const BOND_MODES = ['none', '802.3ad', 'active-backup', 'balance-rr', 'balance-xor', 'balance-tlb'];
 
-export function newNetInterface(id: string = crypto.randomUUID()): NetInterfaceBlock {
+/**
+ * crypto.randomUUID is only available in secure contexts (HTTPS or
+ * localhost). TCS is often reached over plain HTTP on a LAN address, so
+ * fall back to a timestamp+random id when it is missing.
+ */
+export function newBlockId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+export function newNetInterface(id: string = newBlockId()): NetInterfaceBlock {
   return {
     id,
     interface: '',
@@ -136,7 +148,7 @@ export function parseNetworkIntoBuilder(yamlText: string): NetworkBuilderState {
           const bondKey = bonds ? Object.keys(bonds)[0] : undefined;
           const bond = bondKey && bonds ? bonds[bondKey] : undefined;
           return {
-            id: crypto.randomUUID(),
+            id: newBlockId(),
             interface: typeof i.interface === 'string' ? i.interface : '',
             dhcp: Boolean(i.dhcp),
             ignore: Boolean(i.ignore),
