@@ -161,4 +161,24 @@ cluster:
     expect(parseNetworkIntoBuilder('').interfaces).toEqual([]);
     expect(parseNetworkIntoBuilder('machine:\n  type: worker').nameservers).toEqual([]);
   });
+
+  it('unwraps a MachineConfig resource wrapper (node/metadata/spec)', () => {
+    const wrapper = `node: 192.168.1.200
+metadata:
+  namespace: config
+  type: MachineConfigs.config.talos.dev
+  id: v1alpha1
+spec: |-
+${yamlText
+  .split('\n')
+  .map((l) => (l ? `  ${l}` : ''))
+  .join('\n')}
+`;
+    const state = parseNetworkIntoBuilder(wrapper);
+    expect(state.interfaces).toHaveLength(3);
+    expect(state.interfaces[0].interface).toBe('eno1');
+    expect(state.interfaces[0].mtu).toBe('1500');
+    expect(state.interfaces[2].bondMode).toBe('802.3ad');
+    expect(state.nameservers).toEqual(['8.8.8.8', '1.1.1.1']);
+  });
 });

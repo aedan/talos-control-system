@@ -112,13 +112,20 @@ export function buildNetworkHelperYaml(
 
 /**
  * Parse a full Talos machine config YAML into builder state, so the helper
- * blocks start from the node's current values.
+ * blocks start from the node's current values. Tolerates the MachineConfig
+ * resource wrapper (`node`/`metadata`/`spec`) where the real config is an
+ * opaque YAML string inside `spec`.
  */
 export function parseNetworkIntoBuilder(yamlText: string): NetworkBuilderState {
   const state: NetworkBuilderState = { interfaces: [], nameservers: [] };
   try {
     const doc = yamlText ? (yamlParse(yamlText) as Record<string, any> | null) : null;
-    const net = doc?.machine?.network;
+    let machine = doc?.machine as Record<string, any> | undefined;
+    if (!machine && typeof doc?.spec === 'string') {
+      const spec = yamlParse(doc.spec) as Record<string, any> | null;
+      machine = spec?.machine as Record<string, any> | undefined;
+    }
+    const net = machine?.network;
     if (!net) return state;
 
     if (Array.isArray(net.interfaces)) {
