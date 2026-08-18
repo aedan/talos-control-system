@@ -68,6 +68,7 @@ impl ProvisionController {
         install_disk: &str,
         wipe: bool,
         cert_sans: &[String],
+        cp_addresses: &[String],
         cluster_domain: &str,
         system_extensions: Option<Vec<String>>,
     ) -> Result<ProvisionArtifact, AppError> {
@@ -90,6 +91,7 @@ impl ProvisionController {
             install_disk,
             wipe,
             cert_sans,
+            cp_addresses,
             cluster_domain,
             &ext_slice,
         )?;
@@ -177,6 +179,7 @@ fn generate_talos_secrets(
     install_disk: &str,
     wipe: bool,
     cert_sans: &[String],
+    cp_addresses: &[String],
     cluster_domain: &str,
     _system_extensions: &[&str],
 ) -> Result<GeneratedSecrets, AppError> {
@@ -216,11 +219,12 @@ fn generate_talos_secrets(
     let sans_refs: Vec<&str> = cert_san_list.iter().map(|s| s.as_str()).collect();
 
     let (api_cert, _api_key) =
-        generate_server_cert(&cabs.k8s_ca, "apiserver-kubelet-client", &sans_refs, 365)?;
+        generate_server_cert(&cabs.k8s_ca, "apiserver-kubelet-client", "system:masters", &sans_refs, 365)?;
 
     // Admin client cert signed by machine CA — used by talosctl for node access.
+    // Subject O must be "os:admin" so the machine API grants the admin role.
     let (admin_cert, admin_key) =
-        generate_server_cert(&cabs.machine_ca, "admin", &sans_refs, 365)?;
+        generate_server_cert(&cabs.machine_ca, "admin", "os:admin", &sans_refs, 365)?;
 
     let sa_key_pem = generate_rsa2048_pem()?;
 
@@ -259,12 +263,15 @@ fn generate_talos_secrets(
         install_disk,
         wipe,
         &cert_san_list,
+        cp_addresses,
         cluster_domain,
         _system_extensions,
     );
 
     let worker_yaml = build_worker_yaml(
         cluster_name,
+        &cabs.machine_ca.pem(),
+        &cabs.k8s_ca.pem(),
         &cluster_id_b64,
         &cluster_secret_b64,
         &machine_token,
@@ -328,6 +335,7 @@ fn generate_ca_issuer(cn: &str, days: i64) -> Result<CertifiedIssuer<'static, Ke
 fn generate_server_cert(
     ca_issuer: &CertifiedIssuer<'_, KeyPair>,
     cn: &str,
+    org: &str,
     sans: &[&str],
     days: i64,
 ) -> Result<(String, String), AppError> {
@@ -346,6 +354,10 @@ fn generate_server_cert(
         .map_err(|e| AppError::Internal(format!("server params: {e}")))?;
     params.distinguished_name = DistinguishedName::new();
     params.distinguished_name.push(DnType::CommonName, cn);
+    // Talos machine-API RBAC reads the caller role from the cert Subject O
+    // (role.Admin == "os:admin"); the apiserver-kubelet-client cert uses the
+    // Kubernetes group "system:masters". Without O the machine API returns 403.
+    params.distinguished_name.push(DnType::OrganizationName, org);
     params.not_before = dt - TimeDuration::days(1);
     params.not_after = dt + TimeDuration::days(days);
     // These are client certs (talosctl admin, apiserver-kubelet-client). Talos
@@ -542,6 +554,7 @@ fn build_controlplane_yaml(
     install_disk: &str,
     wipe: bool,
     cert_sans: &[String],
+    cp_addresses: &[String],
     cluster_domain: &str,
     _system_extensions: &[&str],
 ) -> String {
@@ -556,6 +569,23 @@ fn build_controlplane_yaml(
             .collect::<Vec<_>>()
             .join("\n");
         format!("  certSANs:\n{entries}")
+    };
+
+    // apiserver certSANs: every control-plane node address so the apiserver
+    // TLS cert is valid for all CP endpoints (not just the bootstrap one).
+    let mut api_sans: Vec<String> = cp_addresses.to_vec();
+    if api_sans.is_empty() {
+        api_sans = cert_sans.to_vec();
+    }
+    let api_sans_yaml = if api_sans.is_empty() {
+        String::new()
+    } else {
+        let entries: String = api_sans
+            .iter()
+            .map(|s| format!("      - {s}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("    certSANs:\n{entries}\n")
     };
 
     let network_yaml = if let Some(nc) = network_config {
@@ -578,7 +608,6 @@ machine:
 {cert_sans}
   kubelet:
     defaultRuntimeSeccompProfileEnabled: true
-    disableManifestsDirectory: true
   install:
     wipe: {wipe}
     disk: {install_disk}
@@ -588,6 +617,12 @@ machine:
     kubePrism:
       enabled: true
       port: 7445
+    hostDNS:
+      enabled: true
+      forwardKubeDNSToHost: true
+    rbac: true
+    stableHostname: true
+    apidCheckExtKeyUsage: true
   nodeLabels:
     node.kubernetes.io/exclude-from-external-load-balancers: ""
 {network_yaml}
@@ -615,7 +650,7 @@ cluster:
     key: {sa_key_b64}
   apiServer:
     image: registry.k8s.io/kube-apiserver:v{k8s}
-    admissionControl:
+{api_sans_yaml}    admissionControl:
       - name: PodSecurity
         configuration:
           apiVersion: pod-security.admission.config.k8s.io/v1alpha1
@@ -673,6 +708,7 @@ cluster:
         install_disk = install_disk,
         wipe = wipe,
         cert_sans = cert_sans_yaml,
+        api_sans_yaml = api_sans_yaml,
         cluster_domain = cluster_domain,
         network_yaml = network_yaml,
     )
@@ -680,6 +716,8 @@ cluster:
 
 fn build_worker_yaml(
     name: &str,
+    machine_ca_crt: &str,
+    k8s_ca_crt: &str,
     cluster_id: &str,
     cluster_secret: &str,
     machine_token: &str,
@@ -717,10 +755,12 @@ persist: true
 machine:
   type: worker
   token: {machine_token}
+  ca:
+    crt: {mc_crt}
+    key: ''
 {cert_sans}
   kubelet:
     defaultRuntimeSeccompProfileEnabled: true
-    disableManifestsDirectory: true
   install:
     wipe: {wipe}
     disk: {install_disk}
@@ -730,8 +770,12 @@ machine:
     kubePrism:
       enabled: true
       port: 7445
-  nodeLabels:
-    node.kubernetes.io/exclude-from-external-load-balancers: ""
+    hostDNS:
+      enabled: true
+      forwardKubeDNSToHost: true
+    rbac: true
+    stableHostname: true
+    apidCheckExtKeyUsage: true
 {network_yaml}
 cluster:
   id: {cid}
@@ -746,6 +790,9 @@ cluster:
     serviceSubnets:
       - 10.96.0.0/12
   token: {ktok}
+  ca:
+    crt: {k8s_crt}
+    key: ''
   discovery:
     enabled: true
     registries:
@@ -754,6 +801,8 @@ cluster:
       service: {{}}
 "#,
         machine_token = machine_token,
+        mc_crt = b64_le(machine_ca_crt),
+        k8s_crt = b64_le(k8s_ca_crt),
         cid = cluster_id,
         csec = cluster_secret,
         ep = endpoint,

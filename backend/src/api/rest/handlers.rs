@@ -3547,6 +3547,7 @@ pub async fn generate_cluster_config(
             payload.install_disk.as_deref().unwrap_or("/dev/sda"),
             payload.wipe,
             &payload.cert_sans,
+            &[],
             if payload.cluster_domain.is_empty() { "cluster.local" } else { &payload.cluster_domain },
             payload.system_extensions,
         )

@@ -516,6 +516,7 @@ async fn load_config_yaml(
                         install_disk,
                         true,
                         &all_addresses,
+                        &cp_addresses,
                         "cluster.local",
                         None, // uses DEFAULT_SYSTEM_EXTENSIONS
                     )
