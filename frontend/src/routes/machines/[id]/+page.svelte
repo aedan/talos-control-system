@@ -46,18 +46,8 @@
   let liveReachable = $state(false);
   let hasDesired = $state(false);
   let installImageHelper = $state('');
-  let networkYamlHelper = $state(`# interfaces:
-#   - interface: eth0
-#     dhcp: true
-`);
-  let mountsYamlHelper = $state(`# - destination: /var/mnt/data
-#   type: bind
-#   source: /var/mnt/data
-#   options:
-#     - bind
-#     - rshared
-#     - rw
-`);
+  let networkYamlHelper = $state('');
+  let mountsYamlHelper = $state('');
   let applyReboot = $state(false);
   let applyMergeLive = $state(false);
   let isoUrl = $state('');
@@ -576,11 +566,29 @@
           </label>
           <label>
             Network YAML (merged under machine.network)
-            <textarea bind:value={networkYamlHelper} rows="6" spellcheck="false"></textarea>
+            <textarea
+              bind:value={networkYamlHelper}
+              rows="6"
+              spellcheck="false"
+              placeholder="interfaces:
+  - interface: eth0
+    dhcp: true"
+            ></textarea>
           </label>
           <label>
             Extra mounts (kubelet.extraMounts list)
-            <textarea bind:value={mountsYamlHelper} rows="6" spellcheck="false"></textarea>
+            <textarea
+              bind:value={mountsYamlHelper}
+              rows="6"
+              spellcheck="false"
+              placeholder="- destination: /var/mnt/data
+  type: bind
+  source: /var/mnt/data
+  options:
+    - bind
+    - rshared
+    - rw"
+            ></textarea>
           </label>
           <Button variant="secondary" size="sm" onclick={applyHelpers} disabled={configBusy}>
             Merge helpers into editor
