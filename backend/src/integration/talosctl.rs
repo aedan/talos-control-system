@@ -208,7 +208,7 @@ impl TalosctlClient {
         Self::ensure_installed().await?;
 
         let mut args: Vec<String> = vec![
-            "get".into(), "disks".into(), "-e".into(), endpoint.into(), "-o".into(), "json".into(),
+            "get".into(), "disks".into(), "-e".into(), endpoint.into(), "-n".into(), endpoint.into(), "-o".into(), "json".into(),
         ];
         args.extend(Self::talosconfig_args(talosconfig));
 
@@ -470,7 +470,7 @@ impl TalosctlClient {
         Self::ensure_installed().await?;
 
         let mut args: Vec<String> = vec![
-            "get".into(), "mc".into(), "-e".into(), endpoint.into(), "-o".into(), "yaml".into(),
+            "get".into(), "mc".into(), "-e".into(), endpoint.into(), "-n".into(), endpoint.into(), "-o".into(), "yaml".into(),
         ];
         args.extend(Self::talosconfig_args(talosconfig));
 
@@ -486,7 +486,7 @@ impl TalosctlClient {
         Self::ensure_installed().await?;
 
         let mut args: Vec<String> = vec![
-            "get".into(), "services".into(), "-e".into(), endpoint.into(), "-o".into(), "json".into(),
+            "get".into(), "services".into(), "-e".into(), endpoint.into(), "-n".into(), endpoint.into(), "-o".into(), "json".into(),
         ];
         args.extend(Self::talosconfig_args(talosconfig));
 
@@ -523,7 +523,7 @@ impl TalosctlClient {
         Self::ensure_installed().await?;
 
         let mut args: Vec<String> = vec![
-            "get".into(), "mc".into(), "-e".into(), endpoint.into(), "-o".into(), "json".into(),
+            "get".into(), "mc".into(), "-e".into(), endpoint.into(), "-n".into(), endpoint.into(), "-o".into(), "json".into(),
         ];
         args.extend(Self::talosconfig_args(talosconfig));
 
