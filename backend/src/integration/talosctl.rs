@@ -916,13 +916,27 @@ fn serialize_yaml_documents(docs: &[serde_yaml::Value]) -> Result<String, AppErr
 /// YAML string (fields like `node`/`metadata` are resource plumbing that
 /// must not be fed back to the node).
 fn spec_from_mc_json(out: &str) -> Result<String, AppError> {
-    let parsed: serde_json::Value = serde_json::from_str(out).map_err(|e| {
-        AppError::Network(format!("Failed to parse talosctl mc JSON: {e}"))
-    })?;
-    parsed["spec"]
-        .as_str()
+    // talosctl get mc -o json emits one JSON document per machine config
+    // resource (multi-doc configs produce several). Pick the primary
+    // machine config document (metadata.id == "v1alpha1"), falling back to
+    // the first document that carries a spec string.
+    let stream: Vec<serde_json::Value> = serde_json::Deserializer::from_str(out)
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            AppError::Network(format!("Failed to parse talosctl mc JSON: {e}"))
+        })?;
+    let primary = stream
+        .iter()
+        .find(|v| v["metadata"]["id"].as_str() == Some("v1alpha1"))
+        .or_else(|| stream.iter().find(|v| v["spec"].is_string()));
+    let spec = primary
+        .and_then(|v| v["spec"].as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| AppError::Network("talosctl get mc returned no spec".to_string()))
+        .ok_or_else(|| AppError::Network("talosctl get mc returned no spec".to_string()))?;
+    // The primary resource spec may itself be a multi-doc YAML (machine
+    // config + standalone config documents). Keep only the machine config.
+    Ok(spec.split("\n---\n").next().unwrap_or(&spec).to_string())
 }
 
 #[cfg(test)]
@@ -1073,6 +1087,16 @@ machine:
         assert!(spec.starts_with("version: v1alpha1"));
         assert!(spec.contains("914333-infra01"));
         assert!(!spec.contains("\"spec\""));
+    }
+
+    #[test]
+    fn spec_from_mc_json_handles_multi_doc_stream_and_splits_spec() {
+        let out = format!(
+            r#"{{"node":"192.168.1.200","metadata":{{"id":"persistent"}},"spec":"version: v1alpha1\nmachine:\n  type: worker\n---\napiVersion: v1alpha1\nkind: VLANConfig\nname: bond0.207\nvlanID: 207\nparent: bond0\n"}}{{"node":"192.168.1.200","metadata":{{"id":"v1alpha1"}},"spec":"version: v1alpha1\nmachine:\n  type: worker\n---\napiVersion: v1alpha1\nkind: VLANConfig\nname: bond0.207\nvlanID: 207\nparent: bond0\n"}}"#
+        );
+        let spec = spec_from_mc_json(&out).unwrap();
+        assert!(spec.contains("type: worker"));
+        assert!(!spec.contains("VLANConfig"));
     }
 
     #[test]
