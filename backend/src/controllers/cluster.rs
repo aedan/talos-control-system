@@ -1104,21 +1104,38 @@ fn indent_yaml(yaml: &str, spaces: usize) -> String {
         .join("\n")
 }
 
-/// Normalize a Network YAML helper into a patch doc that merges under
+/// Normalize a Network YAML helper into a patch that merges under
 /// `machine.network`. Accepted forms:
 ///   - full `machine:`-rooted YAML (used as-is)
 ///   - `network:`-rooted YAML (nested under `machine:` — otherwise the merge
 ///     would create a duplicate top-level `network:` key)
 ///   - bare fragment such as `interfaces:` (nested under `machine.network:`)
+/// Multi-document fragments may append standalone network config docs
+/// (e.g. `kind: VLANConfig`); those pass through unchanged after the `---`.
 fn wrap_network_helper_yaml(net: &str) -> String {
-    let net = net.trim();
-    if net.contains("machine:") {
-        net.to_string()
-    } else if net.trim_start().starts_with("network:") {
-        format!("machine:\n{}", indent_yaml(net, 2))
-    } else {
-        format!("machine:\n  network:\n{}", indent_yaml(net, 4))
+    let docs: Vec<&str> = net
+        .trim()
+        .split("\n---\n")
+        .map(|d| d.trim().trim_start_matches("---").trim())
+        .filter(|d| !d.is_empty())
+        .collect();
+
+    let mut out = Vec::new();
+    for (i, doc) in docs.iter().enumerate() {
+        if i == 0 {
+            let first = doc.trim();
+            if first.contains("machine:") {
+                out.push(first.to_string());
+            } else if first.starts_with("network:") {
+                out.push(format!("machine:\n{}", indent_yaml(first, 2)));
+            } else {
+                out.push(format!("machine:\n  network:\n{}", indent_yaml(first, 4)));
+            }
+        } else {
+            out.push(doc.to_string());
+        }
     }
+    out.join("\n---\n")
 }
 
 /// Rewrite `machine.install.disk` in Talos machine config YAML.
@@ -1148,6 +1165,17 @@ mod tests {
         let wrapped = wrap_network_helper_yaml(net);
         assert!(wrapped.starts_with("machine:\n  network:\n"));
         assert!(wrapped.contains("interface: eth0"));
+    }
+
+    #[test]
+    fn wrap_network_helper_passes_through_standalone_docs() {
+        let net = "interfaces:\n  - interface: bond0\n    bond:\n      mode: 802.3ad\n      interfaces:\n        - eno49\n---\napiVersion: v1alpha1\nkind: VLANConfig\nname: bond0.207\nvlanID: 207\nparent: bond0\n";
+        let wrapped = wrap_network_helper_yaml(net);
+        assert!(wrapped.starts_with("machine:\n  network:\n    interfaces:"));
+        let parts: Vec<&str> = wrapped.split("\n---\n").collect();
+        assert_eq!(parts.len(), 2);
+        assert!(parts[1].contains("kind: VLANConfig"));
+        assert!(parts[1].contains("vlanID: 207"));
     }
 
     #[test]

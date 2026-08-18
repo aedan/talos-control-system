@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
-  import { parse as yamlParse, stringify as yamlStringify } from 'yaml';
+  import { parseAllDocuments as yamlParseAll, stringify as yamlStringify } from 'yaml';
   import { client } from '$lib/api/client';
   import { success, error as notifyError } from '$lib/stores/notifications';
   import { machineLabel, type Machine } from '$lib/api/types';
@@ -62,6 +62,7 @@
   let netNameservers = $state<string[]>([]);
   let lastDiff = $state('');
   let showDiff = $state(false);
+  let applyStatus = $state<{ kind: 'ok' | 'error'; text: string } | null>(null);
   let applyReboot = $state(false);
   let applyMergeLive = $state(false);
   let isoUrl = $state('');
@@ -156,7 +157,9 @@
       if (parsed.interfaces.length > 0) netKeys.interfaces = true;
       if (parsed.nameservers.length > 0) netKeys.nameservers = true;
 
-      const doc = yamlParse(configYaml) as Record<string, any> | null;
+      const doc = yamlParseAll(configYaml)
+        .map((d) => d.toJS({ maxAliasCount: 1000 }) as Record<string, any> | null)
+        .find(Boolean) as Record<string, any> | null;
       const machine = doc?.machine as Record<string, any> | undefined;
       if (typeof machine?.install?.image === 'string') {
         installImageHelper = machine.install.image;
@@ -236,6 +239,7 @@
   }
 
   async function applyConfig(dryRun: boolean) {
+    applyStatus = null;
     configBusy = true;
     try {
       const res = (await client.post(`/machines/${$page.params.id}/config/apply`, {
@@ -244,14 +248,16 @@
         reboot: applyReboot,
         mergeWithLive: applyMergeLive,
       })) as { ok?: boolean; bytes?: number };
-      success(
-        dryRun
-          ? `Dry-run OK (${res.bytes ?? 0} bytes)`
-          : `Config applied${applyReboot ? ' (reboot requested)' : ''}`
-      );
+      const text = dryRun
+        ? `Dry-run OK — config is valid (${res.bytes ?? 0} bytes)`
+        : `Config applied to node${applyReboot ? ' (reboot requested)' : ''}`;
+      applyStatus = { kind: 'ok', text };
+      success(text);
       if (!dryRun) hasDesired = true;
     } catch (e: unknown) {
-      notifyError(e instanceof Error ? e.message : 'Apply failed');
+      const text = e instanceof Error ? e.message : 'Apply failed';
+      applyStatus = { kind: 'error', text };
+      notifyError(text);
     } finally {
       configBusy = false;
     }
@@ -780,6 +786,14 @@
                     <div class="kv-row">
                       <span class="sub">vlan id</span>
                       <input type="text" placeholder="207" bind:value={block.vlanId} class="mono small" />
+                      {#if block.vlanId.trim()}
+                        <input
+                          type="text"
+                          placeholder="vlan addresses (CIDR, comma-separated)"
+                          bind:value={block.vlanAddresses}
+                          class="mono"
+                        />
+                      {/if}
                     </div>
                   </div>
                 </div>
@@ -856,6 +870,12 @@
               >Apply to node</Button
             >
           </div>
+          {#if applyStatus}
+            <div class="apply-status {applyStatus.kind}">
+              <strong>{applyStatus.kind === 'ok' ? 'OK' : 'Error'}:</strong>
+              <code>{applyStatus.text}</code>
+            </div>
+          {/if}
           <textarea
             class="config-yaml"
             bind:value={configYaml}
@@ -1002,6 +1022,34 @@ cluster:
     align-items: center;
     gap: 0.35rem;
     font-size: 0.8rem;
+  }
+  .apply-status {
+    margin: 0.5rem 0;
+    padding: 0.5rem 0.6rem;
+    border-radius: 6px;
+    border: 1px solid var(--tcs-border);
+    font-size: 0.75rem;
+    display: flex;
+    gap: 0.4rem;
+    align-items: baseline;
+    max-height: 8rem;
+    overflow: auto;
+  }
+  .apply-status code {
+    font-family: ui-monospace, monospace;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--tcs-text);
+  }
+  .apply-status.ok {
+    border-color: rgba(74, 222, 128, 0.4);
+    background: rgba(74, 222, 128, 0.08);
+    color: #4ade80;
+  }
+  .apply-status.error {
+    border-color: rgba(248, 113, 113, 0.4);
+    background: rgba(248, 113, 113, 0.08);
+    color: #f87171;
   }
   .config-yaml, .info-section textarea {
     width: 100%;

@@ -52,7 +52,7 @@ describe('buildNetworkHelperYaml', () => {
     expect((out.match(/- interface: /g) ?? []).length).toBe(1);
   });
 
-  it('emits a bond with members and mode keyed by the interface name', () => {
+  it('emits a bond with members and mode on the interface (bond: key)', () => {
     const state: NetworkBuilderState = {
       interfaces: [
         {
@@ -65,21 +65,35 @@ describe('buildNetworkHelperYaml', () => {
       nameservers: [],
     };
     const out = buildNetworkHelperYaml(state, ALL_KEYS);
-    expect(out).toContain('bonds:');
-    expect(out).toContain('bond0:');
+    expect(out).toContain('bond:');
+    expect(out).not.toContain('bonds:');
     expect(out).toContain('- eno49');
     expect(out).toContain('- eno50');
     expect(out).toContain('mode: 802.3ad');
   });
 
-  it('emits a vlan id when set', () => {
+  it('emits a standalone VLANConfig document instead of device-level vlan', () => {
     const state: NetworkBuilderState = {
-      interfaces: [{ ...newNetInterface('a'), interface: 'eno49', vlanId: '207' }],
+      interfaces: [
+        {
+          ...newNetInterface('a'),
+          interface: 'bond0',
+          bondMode: '802.3ad',
+          bondMembers: 'eno49, eno50',
+          vlanId: '207',
+          vlanAddresses: '10.10.10.1/24',
+        },
+      ],
       nameservers: [],
     };
     const out = buildNetworkHelperYaml(state, ALL_KEYS);
-    expect(out).toContain('vlan:');
-    expect(out).toContain('vlanId: 207');
+    expect(out).toContain('---');
+    expect(out).toContain('kind: VLANConfig');
+    expect(out).toContain('name: bond0.207');
+    expect(out).toContain('vlanID: 207');
+    expect(out).toContain('parent: bond0');
+    expect(out).toContain('- address: 10.10.10.1/24');
+    expect(out).not.toContain('vlanId:');
   });
 
   it('emits nameservers', () => {
@@ -114,17 +128,24 @@ machine:
       - interface: bond0
         addresses:
           - 10.0.0.1/24
-        bonds:
-          bond0:
-            interfaces:
-              - eno49
-              - eno50
-            mode: 802.3ad
+        bond:
+          interfaces:
+            - eno49
+            - eno50
+          mode: 802.3ad
     nameservers:
       - 8.8.8.8
       - 1.1.1.1
 cluster:
   clusterName: demo
+---
+apiVersion: v1alpha1
+kind: VLANConfig
+name: bond0.207
+vlanID: 207
+parent: bond0
+addresses:
+  - address: 10.10.10.1/24
 `;
 
   it('parses interfaces, bonds and nameservers from a machine config', () => {
@@ -144,6 +165,8 @@ cluster:
     const bond = state.interfaces[2];
     expect(bond.bondMode).toBe('802.3ad');
     expect(bond.bondMembers).toBe('eno49, eno50');
+    expect(bond.vlanId).toBe('207');
+    expect(bond.vlanAddresses).toBe('10.10.10.1/24');
   });
 
   it('round-trips through the serializer', () => {

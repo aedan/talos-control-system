@@ -825,10 +825,39 @@ pub fn merge_yaml_docs_into_machine_config(
 
     let patch_docs = parse_yaml_documents(patch_yaml)?;
     for patch in patch_docs {
-        deep_merge_yaml(&mut docs[target_idx], patch);
+        if is_standalone_config_doc(&patch) {
+            upsert_standalone_doc(&mut docs, patch);
+        } else {
+            deep_merge_yaml(&mut docs[target_idx], patch);
+        }
     }
 
     serialize_yaml_documents(&docs)
+}
+
+/// A standalone network config document (e.g. `kind: VLANConfig`) is
+/// identified by the presence of `apiVersion` + `kind` — it must not be
+/// deep-merged into the machine config doc.
+fn is_standalone_config_doc(doc: &serde_yaml::Value) -> bool {
+    let Some(map) = doc.as_mapping() else {
+        return false;
+    };
+    map.contains_key(serde_yaml::Value::String("kind".into()))
+}
+
+/// Replace a standalone doc with the same `kind`+`name`, or append it.
+fn upsert_standalone_doc(docs: &mut Vec<serde_yaml::Value>, patch: serde_yaml::Value) {
+    let kind = patch.get("kind").map(|v| v.as_str().unwrap_or("").to_string());
+    let name = patch.get("name").map(|v| v.as_str().unwrap_or("").to_string());
+    if let Some((idx, _)) = docs.iter().enumerate().find(|(_, d)| {
+        is_standalone_config_doc(d)
+            && d.get("kind").and_then(|v| v.as_str()) == kind.as_deref()
+            && d.get("name").and_then(|v| v.as_str()) == name.as_deref()
+    }) {
+        docs[idx] = patch;
+    } else {
+        docs.push(patch);
+    }
 }
 
 fn parse_yaml_documents(yaml: &str) -> Result<Vec<serde_yaml::Value>, AppError> {
@@ -1050,5 +1079,22 @@ machine:
     fn spec_from_mc_json_errors_on_missing_spec() {
         let err = spec_from_mc_json(r#"{"node":"x","metadata":{}}"#).unwrap_err();
         assert!(err.to_string().contains("no spec"));
+    }
+
+    #[test]
+    fn merge_appends_standalone_doc_and_dedupes_by_kind_name() {
+        let current = "version: v1alpha1\nmachine:\n  type: worker\ncluster:\n  clusterName: demo\n";
+        let patch = "machine:\n  network:\n    interfaces:\n      - interface: bond0\n        bond:\n          mode: 802.3ad\n          interfaces:\n            - eno49\n            - eno50\n---\napiVersion: v1alpha1\nkind: VLANConfig\nname: bond0.207\nvlanID: 207\nparent: bond0\n";
+        let merged = merge_yaml_docs_into_machine_config(current, patch).unwrap();
+        assert!(merged.contains("kind: VLANConfig"));
+        assert!(merged.contains("vlanID: 207"));
+        assert!(merged.contains("mode: 802.3ad"));
+
+        // Second merge with the same VLANConfig must replace, not duplicate.
+        let patch2 = "machine:\n  network:\n    interfaces:\n      - interface: bond0\n        bond:\n          mode: active-backup\n          interfaces:\n            - eno49\n            - eno50\n---\napiVersion: v1alpha1\nkind: VLANConfig\nname: bond0.207\nvlanID: 208\nparent: bond0\n";
+        let merged2 = merge_yaml_docs_into_machine_config(&merged, patch2).unwrap();
+        assert_eq!(merged2.matches("kind: VLANConfig").count(), 1);
+        assert!(merged2.contains("vlanID: 208"));
+        assert!(merged2.contains("mode: active-backup"));
     }
 }
