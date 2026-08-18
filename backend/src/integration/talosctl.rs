@@ -282,6 +282,7 @@ impl TalosctlClient {
         endpoint: &str,
         config_yaml: &str,
         reboot: bool,
+        dry_run: bool,
         talosconfig: Option<&str>,
     ) -> Result<(), AppError> {
         Self::ensure_installed().await?;
@@ -298,6 +299,9 @@ impl TalosctlClient {
             "-e".into(), endpoint.into(), "-n".into(), endpoint.into(),
             "-m".into(), mode.into(),
         ];
+        if dry_run {
+            args.push("--dry-run".into());
+        }
         args.extend(Self::talosconfig_args(talosconfig));
 
         Self::run(&args).await?;

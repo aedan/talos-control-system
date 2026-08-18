@@ -429,7 +429,7 @@ impl ClusterController {
                                 }
                             };
                             match TalosctlClient::apply_config(
-                                &machine.address, &merged, false, tc.as_deref(),
+                                &machine.address, &merged, false, dry_run, tc.as_deref(),
                             ).await {
                                 Ok(()) => {
                                     let tag = if dry_run { "dry-run" } else { "applied" };
@@ -586,7 +586,7 @@ impl ClusterController {
             ).await?;
         } else {
             TalosctlClient::apply_config(
-                &machine.address, &config_yaml, true, tc.as_deref(),
+                &machine.address, &config_yaml, true, false, tc.as_deref(),
             ).await?;
         }
 
@@ -605,7 +605,7 @@ impl ClusterController {
     ) -> Result<(), AppError> {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
         let tc = self.talosconfig_yaml(&cluster)?;
-        TalosctlClient::apply_config(&machine.address, config_yaml, false, tc.as_deref()).await
+        TalosctlClient::apply_config(&machine.address, config_yaml, false, false, tc.as_deref()).await
     }
 
     /// Fetch live machine config from the node (requires address + talosconfig).
@@ -687,7 +687,7 @@ impl ClusterController {
 
         let (cluster, m) = self.cluster_and_machine(machine_id).await?;
         let tc = self.talosconfig_yaml(&cluster)?;
-        TalosctlClient::apply_config(&m.address, &yaml, reboot, tc.as_deref()).await?;
+        TalosctlClient::apply_config(&m.address, &yaml, reboot, dry_run, tc.as_deref()).await?;
 
         if !dry_run {
             // Keep desired in sync with what we applied
@@ -741,11 +741,7 @@ impl ClusterController {
             ));
         }
         if let Some(net) = network_yaml.map(str::trim).filter(|s| !s.is_empty()) {
-            let patch = if net.contains("machine:") || net.trim_start().starts_with("network:") {
-                net.to_string()
-            } else {
-                format!("machine:\n  network:\n{}", indent_yaml(net, 4))
-            };
+            let patch = wrap_network_helper_yaml(net);
             base = merge_yaml_docs_into_machine_config(&base, &patch)?;
         }
         if let Some(mounts) = extra_mounts_yaml.map(str::trim).filter(|s| !s.is_empty()) {
@@ -1108,6 +1104,23 @@ fn indent_yaml(yaml: &str, spaces: usize) -> String {
         .join("\n")
 }
 
+/// Normalize a Network YAML helper into a patch doc that merges under
+/// `machine.network`. Accepted forms:
+///   - full `machine:`-rooted YAML (used as-is)
+///   - `network:`-rooted YAML (nested under `machine:` — otherwise the merge
+///     would create a duplicate top-level `network:` key)
+///   - bare fragment such as `interfaces:` (nested under `machine.network:`)
+fn wrap_network_helper_yaml(net: &str) -> String {
+    let net = net.trim();
+    if net.contains("machine:") {
+        net.to_string()
+    } else if net.trim_start().starts_with("network:") {
+        format!("machine:\n{}", indent_yaml(net, 2))
+    } else {
+        format!("machine:\n  network:\n{}", indent_yaml(net, 4))
+    }
+}
+
 /// Rewrite `machine.install.disk` in Talos machine config YAML.
 pub fn inject_install_disk(config_yaml: &str, disk: &str) -> String {
     let disk = disk.trim();
@@ -1123,4 +1136,47 @@ pub fn inject_install_disk(config_yaml: &str, disk: &str) -> String {
         }
     }
     config_yaml.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_network_helper_bare_fragment_nests_under_machine_network() {
+        let net = "interfaces:\n  - interface: eth0\n    dhcp: true";
+        let wrapped = wrap_network_helper_yaml(net);
+        assert!(wrapped.starts_with("machine:\n  network:\n"));
+        assert!(wrapped.contains("interface: eth0"));
+    }
+
+    #[test]
+    fn wrap_network_helper_network_prefix_nests_under_machine() {
+        let net = "network:\n  interfaces:\n    - interface: bond0";
+        let wrapped = wrap_network_helper_yaml(net);
+        assert!(wrapped.starts_with("machine:\n  network:\n"), "got: {wrapped}");
+        assert!(!wrapped.starts_with("network:"), "got: {wrapped}");
+    }
+
+    #[test]
+    fn wrap_network_helper_full_machine_used_as_is() {
+        let net = "machine:\n  type: worker\n  network:\n    interfaces: []";
+        assert_eq!(wrap_network_helper_yaml(net), net);
+    }
+
+    #[test]
+    fn wrap_network_helper_merge_produces_single_network_key() {
+        let net = "network:\n  interfaces:\n    - interface: bond0";
+        let wrapped = wrap_network_helper_yaml(net);
+        let base = "version: v1alpha1\nmachine:\n  type: controlplane\n  network:\n    interfaces:\n      - interface: eno1\ncluster:\n  clusterName: demo\n";
+        let merged = merge_yaml_docs_into_machine_config(base, &wrapped).unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&merged).unwrap();
+        let map = doc.as_mapping().unwrap();
+        assert!(
+            !map.contains_key(serde_yaml::Value::String("network".into())),
+            "duplicate top-level network key:\n{merged}"
+        );
+        assert!(merged.contains("bond0"));
+        assert!(merged.contains("clusterName: demo") || merged.contains("clusterName:demo"));
+    }
 }
