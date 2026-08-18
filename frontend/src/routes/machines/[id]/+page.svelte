@@ -1,11 +1,20 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
+  import { parse as yamlParse, stringify as yamlStringify } from 'yaml';
   import { client } from '$lib/api/client';
   import { success, error as notifyError } from '$lib/stores/notifications';
   import { machineLabel, type Machine } from '$lib/api/types';
   import Button from '$lib/components/Button.svelte';
   import Spinner from '$lib/components/Spinner.svelte';
+  import {
+    BOND_MODES,
+    buildNetworkHelperYaml,
+    newNetInterface,
+    parseNetworkIntoBuilder,
+    type NetInterfaceBlock,
+    type NetworkBuilderKeys,
+  } from '$lib/networkBuilder';
 
   interface ServiceRow {
     id: string;
@@ -46,8 +55,10 @@
   let liveReachable = $state(false);
   let hasDesired = $state(false);
   let installImageHelper = $state('');
-  let networkYamlHelper = $state('');
   let mountsYamlHelper = $state('');
+  let netKeys = $state<NetworkBuilderKeys>({ interfaces: false, nameservers: false });
+  let netInterfaces = $state<NetInterfaceBlock[]>([]);
+  let netNameservers = $state<string[]>([]);
   let applyReboot = $state(false);
   let applyMergeLive = $state(false);
   let isoUrl = $state('');
@@ -77,6 +88,10 @@
         /* optional */
       }
       await loadDesiredConfig();
+      if (!configYaml.trim()) {
+        await loadLiveConfig(true);
+      }
+      populateHelpersFromConfig();
       void loadHostname();
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Failed to load machine';
@@ -102,7 +117,7 @@
     }
   }
 
-  async function loadLiveConfig() {
+  async function loadLiveConfig(silent = false) {
     configBusy = true;
     try {
       const res = (await client.get(`/machines/${$page.params.id}/config/live`)) as {
@@ -110,12 +125,62 @@
       };
       configYaml = res.configYaml || '';
       liveReachable = true;
-      success('Loaded live machine config from node');
+      if (!silent) success('Loaded live machine config from node');
     } catch (e: unknown) {
-      notifyError(e instanceof Error ? e.message : 'Failed to load live config');
+      if (!silent) notifyError(e instanceof Error ? e.message : 'Failed to load live config');
     } finally {
       configBusy = false;
     }
+  }
+
+  function populateHelpersFromConfig() {
+    if (!configYaml.trim()) return;
+    try {
+      const parsed = parseNetworkIntoBuilder(configYaml);
+      netInterfaces = parsed.interfaces;
+      netNameservers = parsed.nameservers;
+      if (parsed.interfaces.length > 0) netKeys.interfaces = true;
+      if (parsed.nameservers.length > 0) netKeys.nameservers = true;
+
+      const doc = yamlParse(configYaml) as Record<string, any> | null;
+      const machine = doc?.machine as Record<string, any> | undefined;
+      if (typeof machine?.install?.image === 'string') {
+        installImageHelper = machine.install.image;
+      }
+      const mounts = machine?.kubelet?.extraMounts;
+      if (Array.isArray(mounts) && mounts.length > 0) {
+        mountsYamlHelper = yamlStringify(mounts);
+      }
+    } catch {
+      /* keep helpers empty if the config cannot be parsed */
+    }
+  }
+
+  function loadCurrentIntoBuilder() {
+    if (!configYaml.trim()) {
+      notifyError('No config loaded — load desired or live config first');
+      return;
+    }
+    populateHelpersFromConfig();
+    success(
+      `Loaded ${netInterfaces.length} interface(s) and ${netNameservers.length} nameserver(s) into helpers`
+    );
+  }
+
+  function addNetInterface() {
+    netInterfaces.push(newNetInterface());
+  }
+
+  function removeNetInterface(id: string) {
+    netInterfaces = netInterfaces.filter((b) => b.id !== id);
+  }
+
+  function addNameServer() {
+    netNameservers.push('');
+  }
+
+  function removeNameServer(idx: number) {
+    netNameservers.splice(idx, 1);
   }
 
   async function saveDesiredConfig() {
@@ -160,11 +225,15 @@
   }
 
   async function applyHelpers() {
+    const networkYaml = buildNetworkHelperYaml(
+      { interfaces: netInterfaces, nameservers: netNameservers },
+      netKeys
+    );
     configBusy = true;
     try {
       const res = (await client.post(`/machines/${$page.params.id}/config/helpers`, {
         installImage: installImageHelper.trim() || undefined,
-        networkYaml: networkYamlHelper.trim() || undefined,
+        networkYaml: networkYaml || undefined,
         extraMountsYaml: mountsYamlHelper.trim() || undefined,
         hostname: editHostname.trim() || undefined,
         baseFromLive: true,
@@ -566,17 +635,148 @@
             />
           </label>
           <label>
-            Network YAML — deep-merged under machine.network (lists like
-            <code>interfaces</code> are replaced, not appended)
-            <textarea
-              bind:value={networkYamlHelper}
-              rows="6"
-              spellcheck="false"
-              placeholder="interfaces:
-  - interface: eth0
-    dhcp: true"
-            ></textarea>
+            Network blocks (deep-merged under machine.network)
+            <div class="net-keys-row">
+              <label class="check"
+                ><input type="checkbox" bind:checked={netKeys.interfaces} /> interfaces</label
+              >
+              <label class="check"
+                ><input type="checkbox" bind:checked={netKeys.nameservers} /> nameservers</label
+              >
+              <Button variant="ghost" size="sm" onclick={loadCurrentIntoBuilder} disabled={configBusy}
+                >Load current values</Button
+              >
+            </div>
           </label>
+
+          {#if netKeys.interfaces}
+            <div class="block-list">
+              {#each netInterfaces as block (block.id)}
+                <div class="net-block">
+                  <div class="net-block-row">
+                    <input
+                      type="text"
+                      placeholder="interface (e.g. eno1)"
+                      bind:value={block.interface}
+                      class="mono"
+                    />
+                    <label class="check"
+                      ><input type="checkbox" bind:checked={block.dhcp} /> dhcp</label
+                    >
+                    <label class="check"
+                      ><input type="checkbox" bind:checked={block.ignore} /> ignore</label
+                    >
+                    <input
+                      type="text"
+                      placeholder="mtu"
+                      bind:value={block.mtu}
+                      class="mono small"
+                    />
+                    <Button variant="ghost" size="sm" onclick={() => removeNetInterface(block.id)}
+                      >remove</Button
+                    >
+                  </div>
+                  <div class="net-block-col">
+                    <div class="kv-row">
+                      <span class="sub">addresses (CIDR)</span>
+                      {#each block.addresses as _, i}
+                        <div class="kv-row">
+                          <input type="text" bind:value={block.addresses[i]} class="mono" />
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onclick={() => block.addresses.splice(i, 1)}
+                            >–</Button
+                          >
+                        </div>
+                      {/each}
+                      <Button variant="ghost" size="sm" onclick={() => block.addresses.push('')}
+                        >+ address</Button
+                      >
+                    </div>
+                    <div class="kv-row">
+                      <span class="sub">routes (network / gateway)</span>
+                      {#each block.routes as _, i}
+                        <div class="kv-row">
+                          <input
+                            type="text"
+                            placeholder="0.0.0.0/0"
+                            bind:value={block.routes[i].network}
+                            class="mono small"
+                          />
+                          <input
+                            type="text"
+                            placeholder="192.168.1.2"
+                            bind:value={block.routes[i].gateway}
+                            class="mono small"
+                          />
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onclick={() => block.routes.splice(i, 1)}
+                            >–</Button
+                          >
+                        </div>
+                      {/each}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onclick={() => block.routes.push({ network: '', gateway: '' })}
+                        >+ route</Button
+                      >
+                    </div>
+                    <div class="kv-row">
+                      <span class="sub">bond</span>
+                      <select bind:value={block.bondMode}>
+                        {#each BOND_MODES as mode}
+                          <option value={mode}>{mode}</option>
+                        {/each}
+                      </select>
+                      {#if block.bondMode !== 'none'}
+                        <input
+                          type="text"
+                          placeholder="members (e.g. eno49, eno50)"
+                          bind:value={block.bondMembers}
+                          class="mono"
+                        />
+                      {/if}
+                    </div>
+                    <div class="kv-row">
+                      <span class="sub">vlan id</span>
+                      <input type="text" placeholder="207" bind:value={block.vlanId} class="mono small" />
+                    </div>
+                  </div>
+                </div>
+              {/each}
+              <Button variant="secondary" size="sm" onclick={addNetInterface}
+                >+ Add interface block</Button
+              >
+            </div>
+          {/if}
+
+          {#if netKeys.nameservers}
+            <div class="block-list">
+              <div class="net-block-col">
+                <div class="kv-row">
+                  <span class="sub">nameservers</span>
+                  {#each netNameservers as _, i}
+                    <div class="kv-row">
+                      <input type="text" bind:value={netNameservers[i]} class="mono" />
+                      <Button variant="ghost" size="sm" onclick={() => removeNameServer(i)}
+                        >–</Button
+                      >
+                    </div>
+                  {/each}
+                  <Button variant="ghost" size="sm" onclick={addNameServer}>+ nameserver</Button>
+                </div>
+              </div>
+            </div>
+          {/if}
+
+          <details class="net-preview">
+            <summary>Preview network YAML that will merge</summary>
+            <pre>{buildNetworkHelperYaml({ interfaces: netInterfaces, nameservers: netNameservers }, netKeys) || '(no enabled keys)'}</pre>
+          </details>
           <label>
             Extra mounts (kubelet.extraMounts list)
             <textarea
@@ -598,7 +798,7 @@
         </div>
         <div class="info-section full">
           <div class="config-toolbar">
-            <Button variant="secondary" size="sm" onclick={loadLiveConfig} disabled={configBusy}
+            <Button variant="secondary" size="sm" onclick={() => loadLiveConfig()} disabled={configBusy}
               >Load live from node</Button
             >
             <Button variant="secondary" size="sm" onclick={loadDesiredConfig} disabled={configBusy}
@@ -798,4 +998,89 @@ cluster:
   .health.ok { color: var(--tcs-success, #22c55e); }
   .health.bad { color: var(--tcs-error, #ef4444); }
   .health.unk { color: var(--tcs-text-muted); }
+  .net-keys-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    align-items: center;
+    margin: 0.25rem 0 0.5rem;
+  }
+  .net-keys-row .check {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.8rem;
+    margin: 0;
+  }
+  .block-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    margin: 0.25rem 0 0.75rem;
+    border: 1px dashed var(--tcs-border);
+    border-radius: 8px;
+    padding: 0.6rem;
+  }
+  .net-block {
+    border: 1px solid var(--tcs-border);
+    border-radius: 8px;
+    padding: 0.5rem 0.6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    background: var(--tcs-background);
+  }
+  .net-block-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    align-items: center;
+  }
+  .net-block-row .check {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: 0.75rem;
+    margin: 0;
+  }
+  .net-block-row input:not(.small) { flex: 1 1 10rem; min-width: 8rem; }
+  .net-block-row input.small, .net-block-col input.small { width: 6rem; flex: 0 0 auto; }
+  .net-block-col {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .kv-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    align-items: center;
+  }
+  .kv-row .sub {
+    font-size: 0.7rem;
+    color: var(--tcs-text-muted);
+    min-width: 8rem;
+  }
+  .kv-row input { flex: 1 1 9rem; min-width: 7rem; font-size: 0.75rem; }
+  .kv-row select {
+    padding: 0.35rem 0.5rem;
+    border-radius: 6px;
+    border: 1px solid var(--tcs-border);
+    background: var(--tcs-background);
+    color: var(--tcs-text);
+    font-size: 0.75rem;
+  }
+  .net-preview { margin: 0.4rem 0 0.75rem; font-size: 0.8rem; }
+  .net-preview pre {
+    margin: 0.35rem 0 0;
+    padding: 0.5rem;
+    border-radius: 6px;
+    border: 1px solid var(--tcs-border);
+    background: var(--tcs-background);
+    color: var(--tcs-text);
+    font-family: ui-monospace, monospace;
+    font-size: 0.7rem;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
 </style>

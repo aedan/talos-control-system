@@ -2,17 +2,17 @@
   "name": "tcs-frontend",
   "version": "0.1.0",
   "private": true,
-    "scripts": {
-      "dev": "vite dev",
-      "build": "svelte-kit sync && vite build",
-      "preview": "vite preview",
-      "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-      "test": "vitest"
-    },
-    "devDependencies": {
-      "@sveltejs/adapter-static": "^3.0.8",
-      "@sveltejs/kit": "^2.16.0",
-      "@tailwindcss/vite": "^4.0.0",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "svelte-kit sync && vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.8",
+    "@sveltejs/kit": "^2.16.0",
+    "@tailwindcss/vite": "^4.0.0",
     "svelte": "^5.0.0",
     "svelte-check": "^4.0.0",
     "tailwindcss": "^4.0.0",
@@ -22,7 +22,8 @@
   },
   "dependencies": {
     "date-fns": "^4.0.0",
-    "mode-watcher": "^0.5.1"
+    "mode-watcher": "^0.5.1",
+    "yaml": "^2.9.0"
   },
   "type": "module"
 }
