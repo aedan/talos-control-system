@@ -491,23 +491,26 @@ impl TalosctlClient {
         args.extend(Self::talosconfig_args(talosconfig));
 
         let out = Self::run(&args).await?;
-        let parsed: serde_json::Value = serde_json::from_str(&out).map_err(|e| {
-            AppError::Network(format!("Failed to parse talosctl services JSON: {e}"))
-        })?;
+        let stream: Vec<serde_json::Value> = serde_json::Deserializer::from_str(&out)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                AppError::Network(format!("Failed to parse talosctl services JSON: {e}"))
+            })?;
 
-        let services = parsed["items"]
-            .as_array()
-            .unwrap_or(&vec![])
+        let services = stream
             .iter()
+            .filter(|v| v.is_object())
             .map(|svc| {
                 let id = svc["metadata"]["id"].as_str().unwrap_or("").to_string();
-                let state = svc["spec"]["health"]["state"].as_str().unwrap_or("").to_string();
-                let healthy = svc["spec"]["health"]["healthy"].as_bool().unwrap_or(false);
+                let state = svc["metadata"]["phase"].as_str().unwrap_or("").to_string();
+                let healthy = svc["spec"]["healthy"].as_bool().unwrap_or(false);
+                let unknown = svc["spec"]["unknown"].as_bool().unwrap_or(false);
                 serde_json::json!({
                     "id": id,
                     "state": state,
                     "healthy": healthy,
-                    "unknown": false,
+                    "unknown": unknown,
                 })
             })
             .collect();
@@ -532,7 +535,15 @@ impl TalosctlClient {
             AppError::Network(format!("Failed to parse talosctl mc JSON: {e}"))
         })?;
 
-        parsed["spec"]["machine"]["network"]["hostname"]
+        // The MachineConfig `spec` is an opaque YAML string, not a JSON object.
+        let spec_yaml = parsed["spec"].as_str().ok_or_else(|| {
+            AppError::Network("talosctl get mc returned no spec".to_string())
+        })?;
+        let spec: serde_yaml::Value = serde_yaml::from_str(spec_yaml).map_err(|e| {
+            AppError::Network(format!("Failed to parse mc spec YAML: {e}"))
+        })?;
+
+        spec["machine"]["network"]["hostname"]
             .as_str()
             .map(|s| s.to_string())
             .ok_or_else(|| AppError::Network("talosctl get mc returned no hostname".to_string()))
