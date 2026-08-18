@@ -5,6 +5,7 @@ pub mod scheduler;
 pub mod backup_scheduler;
 pub mod upgrade_scheduler;
 pub mod metal_scheduler;
+pub mod status_reconciler;
 pub mod ha;
 
 pub use event::{EventBus, EventType, Event};
@@ -14,3 +15,4 @@ pub use scheduler::{ControllerScheduler, ReconciliationMode};
 pub use backup_scheduler::spawn_backup_scheduler;
 pub use upgrade_scheduler::spawn_upgrade_scheduler;
 pub use metal_scheduler::spawn_metal_scheduler;
+pub use status_reconciler::spawn_status_reconciler;

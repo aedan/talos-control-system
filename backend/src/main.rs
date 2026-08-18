@@ -197,10 +197,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config.auth.jwt_secret.clone(),
     );
     let _metal_sched = talos_control_system::runtime::spawn_metal_scheduler(
-        db_pool,
+        db_pool.clone(),
         config.database.sqlite_path.clone(),
         config.auth.jwt_secret.clone(),
         metal_merged,
+    );
+    let _status_sched = talos_control_system::runtime::spawn_status_reconciler(
+        db_pool.clone(),
+        config.auth.jwt_secret.clone(),
     );
 
     if tls_enabled {

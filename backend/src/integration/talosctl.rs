@@ -86,17 +86,28 @@ impl TalosctlClient {
     }
 
     /// Build common args: `--talosconfig <path>` if provided.
+    ///
+    /// The talosconfig is written to a per-call unique temp file (systemd
+    /// ProtectSystem makes /tmp read-only). A unique name avoids clobbering
+    /// when multiple talosctl commands run concurrently.
     fn talosconfig_args(talosconfig: Option<&str>) -> Vec<String> {
         match talosconfig {
             Some(tc) => {
-                // Write talosconfig to a writable temp file (systemd ProtectSystem makes /tmp read-only).
                 let tmpdir = PathBuf::from("/var/lib/tcs/talosctl-tmp");
                 if let Err(e) = std::fs::create_dir_all(&tmpdir) {
                     warn!(error = %e, "Failed to create talosctl temp dir");
                 }
-                let tmpfile = tmpdir.join("talosconfig");
+                let name = format!(
+                    "talosconfig.{}.{}",
+                    std::process::id(),
+                    TalosctlClient::tmp_counter().fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                );
+                let tmpfile = tmpdir.join(name);
                 match std::fs::write(&tmpfile, tc) {
-                    Ok(_) => vec!["--talosconfig".to_string(), tmpfile.to_string_lossy().to_string()],
+                    Ok(_) => vec![
+                        "--talosconfig".to_string(),
+                        tmpfile.to_string_lossy().to_string(),
+                    ],
                     Err(e) => {
                         warn!(error = %e, "Failed to write talosconfig temp file, falling back to inline");
                         vec!["--talosconfig".to_string(), tc.to_string()]
@@ -107,8 +118,20 @@ impl TalosctlClient {
         }
     }
 
+    fn tmp_counter() -> &'static std::sync::atomic::AtomicU64 {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        &COUNTER
+    }
+
     /// Run a talosctl command and return stdout as a string.
     async fn run(args: &[String]) -> Result<String, AppError> {
+        // Remember the per-call talosconfig temp file so we can remove it after.
+        let talosconfig_tmp = args
+            .iter()
+            .position(|a| a == "--talosconfig")
+            .and_then(|i| args.get(i + 1).cloned())
+            .filter(|p| p.starts_with("/var/lib/tcs/talosctl-tmp/"));
+
         let out = Command::new("talosctl")
             .args(args)
             .stdout(Stdio::piped())
@@ -116,6 +139,10 @@ impl TalosctlClient {
             .output()
             .await
             .map_err(|e| AppError::Network(format!("talosctl spawn: {e}")))?;
+
+        if let Some(p) = &talosconfig_tmp {
+            let _ = std::fs::remove_file(p);
+        }
 
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -135,24 +162,38 @@ impl TalosctlClient {
     // ── Public API ───────────────────────────────────────────────────────────
 
     /// Get the Talos version string from a node.
+    ///
+    /// `talosctl version` does not support `-o json`; it prints text. We use
+    /// `--short` and parse the `Tag:` line (e.g. `Tag: v1.13.7`).
     pub async fn get_version(endpoint: &str, talosconfig: Option<&str>) -> Result<String, AppError> {
         Self::ensure_installed().await?;
 
         let mut args: Vec<String> = vec![
-            "version".into(), "--server".into(), "-e".into(), endpoint.into(), "-o".into(), "json".into(),
+            "version".into(), "--short".into(), "-e".into(), endpoint.into(), "-n".into(), endpoint.into(),
         ];
         args.extend(Self::talosconfig_args(talosconfig));
 
-        let out = Self::run(&args).await?;
-        let parsed: serde_json::Value = serde_json::from_str(&out).map_err(|e| {
-            AppError::Network(format!("Failed to parse talosctl version JSON: {e}"))
-        })?;
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            Self::run(&args),
+        )
+        .await
+        .map_err(|_| AppError::Network("talosctl version timed out".to_string()))?
+        .map_err(|e| AppError::Network(format!("talosctl version failed: {e}")))?;
 
-        parsed["server"]
-            .as_str()
-            .map(|s| s.to_string())
-            .or_else(|| parsed["version"].as_str().map(|s| s.to_string()))
-            .ok_or_else(|| AppError::Network("talosctl version returned no version field".to_string()))
+        for line in out.lines() {
+            let line = line.trim();
+            if let Some(tag) = line.strip_prefix("Tag:") {
+                let tag = tag.trim();
+                if !tag.is_empty() {
+                    return Ok(tag.to_string());
+                }
+            }
+        }
+
+        Err(AppError::Network(
+            "talosctl version returned no Tag field".to_string(),
+        ))
     }
 
     /// Discover available disks on a machine (maintenance mode, PXE installer).
