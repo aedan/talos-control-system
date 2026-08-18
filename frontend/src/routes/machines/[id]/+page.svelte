@@ -15,6 +15,7 @@
     type NetInterfaceBlock,
     type NetworkBuilderKeys,
   } from '$lib/networkBuilder';
+  import { renderYamlDiff } from '$lib/diffView';
 
   interface ServiceRow {
     id: string;
@@ -59,6 +60,8 @@
   let netKeys = $state<NetworkBuilderKeys>({ interfaces: false, nameservers: false });
   let netInterfaces = $state<NetInterfaceBlock[]>([]);
   let netNameservers = $state<string[]>([]);
+  let lastDiff = $state('');
+  let showDiff = $state(false);
   let applyReboot = $state(false);
   let applyMergeLive = $state(false);
   let isoUrl = $state('');
@@ -101,6 +104,7 @@
   });
 
   async function loadDesiredConfig() {
+    const before = configYaml;
     try {
       const res = (await client.get(`/machines/${$page.params.id}/config`)) as {
         desiredConfig?: string | null;
@@ -114,10 +118,16 @@
       }
     } catch {
       /* optional until cluster talosconfig set */
+      return;
+    }
+    if (configYaml !== before) {
+      lastDiff = renderYamlDiff(before, configYaml);
+      showDiff = lastDiff !== '';
     }
   }
 
   async function loadLiveConfig(silent = false) {
+    const before = configYaml;
     configBusy = true;
     try {
       const res = (await client.get(`/machines/${$page.params.id}/config/live`)) as {
@@ -125,6 +135,10 @@
       };
       configYaml = res.configYaml || '';
       liveReachable = true;
+      if (configYaml !== before) {
+        lastDiff = renderYamlDiff(before, configYaml);
+        showDiff = lastDiff !== '';
+      }
       if (!silent) success('Loaded live machine config from node');
     } catch (e: unknown) {
       if (!silent) notifyError(e instanceof Error ? e.message : 'Failed to load live config');
@@ -172,6 +186,18 @@
     } else {
       success(`Loaded ${interfaces} interface(s) and ${nameservers} nameserver(s) into helpers`);
     }
+  }
+
+  function renderDiffHtml(patch: string): string {
+    return patch
+      .split('\n')
+      .map((line) => {
+        if (line.startsWith('@@')) return `<span class="diff-hunk">${line}</span>`;
+        if (line.startsWith('+') && !line.startsWith('+++')) return `<span class="diff-add">${line}</span>`;
+        if (line.startsWith('-') && !line.startsWith('---')) return `<span class="diff-del">${line}</span>`;
+        return `<span class="diff-ctx">${line}</span>`;
+      })
+      .join('\n');
   }
 
   function addNetInterface() {
@@ -236,6 +262,7 @@
       { interfaces: netInterfaces, nameservers: netNameservers },
       netKeys
     );
+    const before = configYaml;
     configBusy = true;
     try {
       const res = (await client.post(`/machines/${$page.params.id}/config/helpers`, {
@@ -246,6 +273,8 @@
         baseFromLive: true,
       })) as { desiredConfig?: string };
       if (res.desiredConfig) {
+        lastDiff = renderYamlDiff(before, res.desiredConfig);
+        showDiff = lastDiff !== '';
         configYaml = res.desiredConfig;
         hasDesired = true;
       }
@@ -842,6 +871,12 @@ machine:
 cluster:
   ..."
           ></textarea>
+          {#if showDiff && lastDiff}
+            <details class="diff-view" open>
+              <summary>What changed in the editor (vs before)</summary>
+              <pre class="diff">{@html renderDiffHtml(lastDiff)}</pre>
+            </details>
+          {/if}
         </div>
       </div>
     </section>
@@ -1090,4 +1125,27 @@ cluster:
     white-space: pre-wrap;
     word-break: break-all;
   }
+  .diff-view {
+    margin: 0.6rem 0 0;
+    font-size: 0.8rem;
+  }
+  .diff-view summary {
+    cursor: pointer;
+    margin-bottom: 0.35rem;
+  }
+  .diff-view pre {
+    margin: 0;
+    padding: 0.5rem;
+    border-radius: 6px;
+    border: 1px solid var(--tcs-border);
+    background: var(--tcs-background);
+    font-family: ui-monospace, monospace;
+    font-size: 0.7rem;
+    line-height: 1.45;
+    overflow-x: auto;
+  }
+  .diff-view .diff-add { color: #4ade80; background: rgba(74, 222, 128, 0.08); display: block; }
+  .diff-view .diff-del { color: #f87171; background: rgba(248, 113, 113, 0.08); display: block; }
+  .diff-view .diff-hunk { color: #60a5fa; display: block; }
+  .diff-view .diff-ctx { color: var(--tcs-text-muted); display: block; }
 </style>
