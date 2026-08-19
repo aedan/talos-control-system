@@ -787,12 +787,7 @@
                       <span class="sub">vlan id</span>
                       <input type="text" placeholder="207" bind:value={block.vlanId} class="mono small" />
                       {#if block.vlanId.trim()}
-                        <input
-                          type="text"
-                          placeholder="vlan addresses (CIDR, comma-separated)"
-                          bind:value={block.vlanAddresses}
-                          class="mono"
-                        />
+                        <span class="hint">addresses &amp; routes land on {block.interface.trim()}.{block.vlanId.trim()}</span>
                       {/if}
                     </div>
                   </div>

@@ -72,7 +72,7 @@ describe('buildNetworkHelperYaml', () => {
     expect(out).toContain('mode: 802.3ad');
   });
 
-  it('emits a standalone VLANConfig document instead of device-level vlan', () => {
+  it('emits a standalone VLANConfig document carrying addresses and routes', () => {
     const state: NetworkBuilderState = {
       interfaces: [
         {
@@ -81,7 +81,8 @@ describe('buildNetworkHelperYaml', () => {
           bondMode: '802.3ad',
           bondMembers: 'eno49, eno50',
           vlanId: '207',
-          vlanAddresses: '10.10.10.1/24',
+          addresses: ['10.10.10.1/24'],
+          routes: [{ network: '0.0.0.0/0', gateway: '10.10.10.254' }],
         },
       ],
       nameservers: [],
@@ -92,8 +93,32 @@ describe('buildNetworkHelperYaml', () => {
     expect(out).toContain('name: bond0.207');
     expect(out).toContain('vlanID: 207');
     expect(out).toContain('parent: bond0');
+    expect(out).toContain('up: true');
     expect(out).toContain('- address: 10.10.10.1/24');
+    expect(out).toContain('gateway: 10.10.10.254');
     expect(out).not.toContain('vlanId:');
+    const ifaceSection = out.slice(0, out.indexOf('---'));
+    expect(ifaceSection).not.toContain('addresses:');
+    expect(ifaceSection).not.toContain('routes:');
+  });
+
+  it('emits a destination for a non-default vlan route', () => {
+    const state: NetworkBuilderState = {
+      interfaces: [
+        {
+          ...newNetInterface('a'),
+          interface: 'bond0',
+          vlanId: '207',
+          addresses: ['10.10.10.1/24'],
+          routes: [{ network: '10.20.0.0/16', gateway: '10.10.10.254', metric: '100' }],
+        },
+      ],
+      nameservers: [],
+    };
+    const out = buildNetworkHelperYaml(state, ALL_KEYS);
+    expect(out).toContain('- destination: 10.20.0.0/16');
+    expect(out).toContain('gateway: 10.10.10.254');
+    expect(out).toContain('metric: 100');
   });
 
   it('emits nameservers', () => {
@@ -126,8 +151,6 @@ machine:
       - interface: eno2
         ignore: true
       - interface: bond0
-        addresses:
-          - 10.0.0.1/24
         bond:
           interfaces:
             - eno49
@@ -144,8 +167,11 @@ kind: VLANConfig
 name: bond0.207
 vlanID: 207
 parent: bond0
+up: true
 addresses:
   - address: 10.10.10.1/24
+routes:
+  - gateway: 10.10.10.254
 `;
 
   it('parses interfaces, bonds and nameservers from a machine config', () => {
@@ -166,7 +192,18 @@ addresses:
     expect(bond.bondMode).toBe('802.3ad');
     expect(bond.bondMembers).toBe('eno49, eno50');
     expect(bond.vlanId).toBe('207');
-    expect(bond.vlanAddresses).toBe('10.10.10.1/24');
+    expect(bond.addresses).toEqual(['10.10.10.1/24']);
+    expect(bond.routes).toEqual([{ network: '0.0.0.0/0', gateway: '10.10.10.254' }]);
+  });
+
+  it('round-trips vlan addresses and routes through the serializer', () => {
+    const state = parseNetworkIntoBuilder(yamlText);
+    const out = buildNetworkHelperYaml(state, ALL_KEYS);
+    const bondSection = out.slice(out.indexOf('- interface: bond0'), out.indexOf('---'));
+    expect(bondSection).not.toContain('addresses:');
+    expect(bondSection).not.toContain('routes:');
+    expect(out).toContain('- address: 10.10.10.1/24');
+    expect(out).toContain('gateway: 10.10.10.254');
   });
 
   it('round-trips through the serializer', () => {
