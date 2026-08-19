@@ -1,10 +1,21 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { machines, loading, error, loadMachines } from '$lib/stores/machines';
+  import { onMount, onDestroy } from 'svelte';
+  import {
+    machines,
+    loading,
+    error,
+    loadMachines,
+    startMachinesPolling,
+    stopMachinesPolling,
+  } from '$lib/stores/machines';
   import { machineLabel } from '$lib/api/types';
   import Spinner from '$lib/components/Spinner.svelte';
 
-  onMount(loadMachines);
+  onMount(() => {
+    void loadMachines();
+    startMachinesPolling();
+  });
+  onDestroy(stopMachinesPolling);
 
   let pendingList = $derived.by(() => $machines.filter((m) => m.status === 'pending'));
 </script>

@@ -1,11 +1,22 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { machines, loading, error, loadMachines } from '$lib/stores/machines';
+  import { onMount, onDestroy } from 'svelte';
+  import {
+    machines,
+    loading,
+    error,
+    loadMachines,
+    startMachinesPolling,
+    stopMachinesPolling,
+  } from '$lib/stores/machines';
   import { machineLabel, machineHasBmc } from '$lib/api/types';
   import Button from '$lib/components/Button.svelte';
   import Spinner from '$lib/components/Spinner.svelte';
 
-  onMount(loadMachines);
+  onMount(() => {
+    void loadMachines();
+    startMachinesPolling();
+  });
+  onDestroy(stopMachinesPolling);
 
   let filter = $state('');
 
