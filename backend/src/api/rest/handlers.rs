@@ -702,6 +702,30 @@ pub async fn set_cluster_talosconfig(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SetKubeconfigRequest {
+    pub kubeconfig: String,
+}
+
+pub async fn set_cluster_kubeconfig(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<uuid::Uuid>,
+    Json(payload): Json<SetKubeconfigRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller
+        .set_kubeconfig(cluster_id, payload.kubeconfig)
+        .await
+    {
+        Ok(()) => Ok(Json(serde_json::json!({
+            "ok": true,
+            "hasKubeconfig": true,
+        }))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ApplyConfigRequest {
     #[serde(default)]
     pub dry_run: bool,

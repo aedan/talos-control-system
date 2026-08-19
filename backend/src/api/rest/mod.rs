@@ -96,6 +96,7 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route("/clusters/:id", put(handlers::update_cluster))
         .route("/clusters/:id", delete(handlers::delete_cluster))
         .route("/clusters/:id/talosconfig", put(handlers::set_cluster_talosconfig))
+        .route("/clusters/:id/kubeconfig", put(handlers::set_cluster_kubeconfig))
         .route("/clusters/:id/refresh", post(handlers::refresh_cluster))
         .route("/clusters/:id/talos/test", post(handlers::test_cluster_talos))
         .route(

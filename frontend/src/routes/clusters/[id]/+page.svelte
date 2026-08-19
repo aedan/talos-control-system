@@ -65,6 +65,10 @@
 
   // ── header actions ────────────────────────────────────────────────
   let talosconfigText = $state('');
+  let kubeconfigText = $state('');
+  let talosTestResults = $state<
+    Array<{ address?: string; ok: boolean; talosVersion?: string; error?: string }>
+  >([]);
   let upgradeImage = $state('ghcr.io/siderolabs/installer:v1.9.0');
   let upgradeMaxUnavail = $state(1);
   let upgradeCpLast = $state(true);
@@ -155,15 +159,33 @@
 
   async function testTalos() {
     busy = true;
+    talosTestResults = [];
     try {
       const res = (await client.post(`/clusters/${cid}/talos/test`, {})) as {
         results: Array<{ ok: boolean; address?: string; talosVersion?: string; error?: string }>;
       };
-      const ok = res.results?.filter((r) => r.ok).length ?? 0;
-      const fail = (res.results?.length ?? 0) - ok;
-      success(`Talos test: ${ok} ok, ${fail} failed`);
+      talosTestResults = res.results ?? [];
+      const ok = talosTestResults.filter((r) => r.ok).length;
+      const fail = talosTestResults.length - ok;
+      if (fail === 0) success(`Talos test: ${ok} ok`);
+      else notifyError(`Talos test: ${ok} ok, ${fail} failed`);
     } catch (e: unknown) {
       notifyError(e instanceof Error ? e.message : 'Talos connectivity test failed');
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function saveKubeconfig() {
+    if (!kubeconfigText.trim()) return;
+    busy = true;
+    try {
+      await client.put(`/clusters/${cid}/kubeconfig`, { kubeconfig: kubeconfigText });
+      await loadCluster();
+      kubeconfigText = '';
+      success('Kubeconfig saved (encrypted at rest)');
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Failed to save kubeconfig');
     } finally {
       busy = false;
     }
@@ -439,6 +461,53 @@
       </div>
     </div>
 
+    {#if talosTestResults.length > 0}
+      <div class="talos-test">
+        <div class="talos-test-header">
+          <h3>Talos connectivity</h3>
+          <span class="hint">
+            {talosTestResults.filter((r) => r.ok).length} ok ·
+            {talosTestResults.filter((r) => !r.ok).length} failed
+          </span>
+          <Button variant="ghost" size="sm" class="dismiss" onclick={() => (talosTestResults = [])}>Dismiss</Button>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Address</th>
+              <th>Result</th>
+              <th>Talos version</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each talosTestResults as r (r.address ?? Math.random())}
+              <tr>
+                <td class="mono">{r.address || '—'}</td>
+                <td>
+                  {#if r.ok}
+                    <span class="status-badge running">ok</span>
+                  {:else}
+                    <span class="status-badge offline" title={r.error}>failed</span>
+                  {/if}
+                </td>
+                <td>{r.talosVersion || (r.error ? '' : '—')}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+        {#if talosTestResults.some((r) => !r.ok)}
+          <details>
+            <summary>Failure details</summary>
+            <ul class="err-list">
+              {#each talosTestResults.filter((r) => !r.ok) as r (r.address ?? Math.random())}
+                <li><span class="mono">{r.address}</span>: {r.error}</li>
+              {/each}
+            </ul>
+          </details>
+        {/if}
+      </div>
+    {/if}
+
     <details class="panel">
       <summary>Cluster actions</summary>
       <div class="actions-stack">
@@ -447,6 +516,14 @@
           <textarea bind:value={talosconfigText} rows="6" placeholder="Paste ~/.talos/config YAML"></textarea>
           <Button variant="primary" size="sm" onclick={saveTalosconfig} disabled={busy || !talosconfigText.trim()}>
             Save talosconfig
+          </Button>
+        </div>
+        <div class="action-block">
+          <h3>Attach / replace kubeconfig</h3>
+          <p class="hint">Needed for "Refresh from K8s" (live node discovery + version sync).</p>
+          <textarea bind:value={kubeconfigText} rows="6" placeholder="Paste ~/.kube/config YAML"></textarea>
+          <Button variant="primary" size="sm" onclick={saveKubeconfig} disabled={busy || !kubeconfigText.trim()}>
+            Save kubeconfig
           </Button>
         </div>
         <div class="action-block">
@@ -777,6 +854,20 @@
     font-size: 0.875rem;
     margin-bottom: 1.5rem;
   }
+
+  .talos-test {
+    background: var(--tcs-surface);
+    border: 1px solid var(--tcs-border);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1.5rem;
+  }
+  .talos-test-header { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.75rem; }
+  .talos-test-header h3 { margin: 0; font-size: 1rem; }
+  .talos-test-header .hint { margin: 0; }
+  .talos-test-header .dismiss { margin-left: auto; }
+  .err-list { margin: 0.5rem 0 0; padding-left: 1.25rem; font-size: 0.8rem; color: var(--tcs-text-muted); }
+  .err-list li { margin-bottom: 0.25rem; word-break: break-word; }
   .hint { color: var(--tcs-text-muted); font-size: 0.85rem; margin: 0 0 0.75rem; }
   .mono { font-family: ui-monospace, monospace; font-size: 0.8rem; }
 

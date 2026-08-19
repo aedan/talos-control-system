@@ -194,6 +194,17 @@ impl ClusterController {
         Ok(())
     }
 
+    pub async fn set_kubeconfig(
+        &self,
+        cluster_id: Uuid,
+        kubeconfig_yaml: String,
+    ) -> Result<(), AppError> {
+        let _ = crate::integration::kubernetes::parse_kubeconfig(&kubeconfig_yaml)?;
+        let enc = self.enc(kubeconfig_yaml.trim())?;
+        crate::db::repos::cluster::set_kubeconfig(&self.pool, cluster_id, &enc).await?;
+        Ok(())
+    }
+
     pub async fn refresh_from_kubeconfig(&self, cluster_id: Uuid) -> Result<i32, AppError> {
         let cluster = crate::db::repos::cluster::get(&self.pool, cluster_id)
             .await?
