@@ -157,7 +157,26 @@ impl ClusterController {
             };
             let system_uuid = format!("k8s-{}-{}", cluster_id, node.name);
 
-            if let Some(mut m) = existing.iter().find(|e| e.system_uuid == system_uuid).cloned() {
+            // Match an existing machine by synthetic uuid, then by address,
+            // then by hostname. Inventory-imported machines carry their real
+            // hardware UUID (not the synthetic one), so address/hostname is
+            // what actually links a discovered node to its stored row.
+            let match_idx = existing
+                .iter()
+                .position(|e| e.system_uuid == system_uuid)
+                .or_else(|| {
+                    existing
+                        .iter()
+                        .position(|e| !node.internal_ip.is_empty() && e.address == node.internal_ip)
+                })
+                .or_else(|| {
+                    existing
+                        .iter()
+                        .position(|e| !node.name.is_empty() && e.hostname == node.name)
+                });
+
+            if let Some(idx) = match_idx {
+                let mut m = existing[idx].clone();
                 m.address = node.internal_ip.clone();
                 m.talos_version = node.talos_version.clone();
                 m.machine_type = mtype.to_string();
