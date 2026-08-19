@@ -57,13 +57,22 @@ pub async fn run(client: &Client, cluster: &str, args: &GetArgs) -> super::super
 
 /// Build a `{"columns": [...], "rows": [[...]]}` value from a raw K8s list/get.
 fn to_table(raw: &Value, wide: bool) -> Value {
-    let items: Vec<&Value> = match raw {
-        // A List object: { items: [...] }
-        v if v.get("kind").and_then(|k| k.as_str()) == Some("List") => {
-            v.get("items").and_then(|i| i.as_array()).map(|a| a.iter().collect()).unwrap_or_default()
-        }
-        // A single object.
-        v => vec![v],
+    // K8s lists come back as typed objects (`NodeList`, `PodList`, …) or the
+    // generic `List`; both carry an `items` array. Anything else is a single object.
+    let is_list = raw
+        .get("kind")
+        .and_then(|k| k.as_str())
+        .map(|k| k == "List" || k.ends_with("List"))
+        .unwrap_or(false)
+        || raw.get("items").map(|i| i.is_array()).unwrap_or(false);
+
+    let items: Vec<&Value> = if is_list {
+        raw.get("items")
+            .and_then(|i| i.as_array())
+            .map(|a| a.iter().collect())
+            .unwrap_or_default()
+    } else {
+        vec![raw]
     };
 
     let mut columns = vec!["NAME".to_string()];
@@ -140,5 +149,56 @@ fn human_age(secs: i64) -> String {
         format!("{}h", secs / 3600)
     } else {
         format!("{}d", secs / 86400)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn names(v: &Value) -> Vec<String> {
+        v.get("rows")
+            .and_then(|r| r.as_array())
+            .map(|r| {
+                r.iter()
+                    .filter_map(|row| row.get(0).and_then(|c| c.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn table_typed_list() {
+        let raw = json!({"kind": "NodeList", "items": [
+            {"metadata": {"name": "n1"}},
+            {"metadata": {"name": "n2"}}
+        ]});
+        let v = to_table(&raw, false);
+        assert_eq!(names(&v), vec!["n1", "n2"]);
+    }
+
+    #[test]
+    fn table_generic_list() {
+        let raw = json!({"kind": "List", "items": [
+            {"metadata": {"name": "p1", "namespace": "default"}}
+        ]});
+        let v = to_table(&raw, false);
+        assert_eq!(names(&v), vec!["p1"]);
+        assert!(v["columns"].as_array().unwrap().iter().any(|c| c == "NAMESPACE"));
+    }
+
+    #[test]
+    fn table_single_object() {
+        let raw = json!({"kind": "Pod", "metadata": {"name": "solo", "namespace": "ns"}});
+        let v = to_table(&raw, false);
+        assert_eq!(names(&v), vec!["solo"]);
+    }
+
+    #[test]
+    fn table_empty_list() {
+        let raw = json!({"kind": "PodList", "items": []});
+        let v = to_table(&raw, false);
+        assert!(v["rows"].as_array().unwrap().is_empty());
     }
 }

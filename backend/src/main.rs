@@ -26,13 +26,12 @@ type AcmeChallengeStore = Arc<DashMap<String, String>>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    init_tracing();
-
     let argv: Vec<String> = std::env::args().collect();
 
     // One-shot tools before server boot
     if let Some(cmd) = argv.get(1) {
         if cmd == "migrate-sqlite-to-postgres" {
+            init_tracing();
             let sqlite = std::env::var("TCS_SQLITE_PATH")
                 .or_else(|_| std::env::var("TCS_DATABASE_SQLITE_PATH"))
                 .unwrap_or_else(|_| "/var/lib/tcs/data.db".into());
@@ -96,6 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     use talos_control_system::auth::jwt::set_jwt_secret;
+    init_tracing();
     talos_control_system::api::rest::handlers::record_start_time();
 
     // Install ring as the rustls CryptoProvider before any TLS operations.
