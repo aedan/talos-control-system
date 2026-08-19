@@ -9,6 +9,10 @@ use crate::AppState;
 use crate::config::BrandingConfig;
 
 pub mod handlers;
+pub mod k8s_action_handlers;
+pub mod k8s_common;
+pub mod k8s_list_handlers;
+pub mod k8s_stream_handlers;
 pub mod middleware;
 
 pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router {
@@ -208,6 +212,35 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route("/settings/audit-logs", get(handlers::get_audit_logs))
         .route("/settings/audit-logs", delete(handlers::clear_audit_logs))
         .route("/settings/system/info", get(handlers::get_system_info))
+        // K8s explorer + CLI (proxied through TCS; kubeconfig never leaves the server)
+        .route("/clusters/:id/k8s/kinds", get(k8s_list_handlers::list_kinds))
+        .route("/clusters/:id/k8s/namespaces", get(k8s_list_handlers::list_namespaces))
+        .route("/clusters/:id/k8s/pods", get(k8s_list_handlers::list_pods))
+        .route(
+            "/clusters/:id/k8s/pods/:ns/:name",
+            get(k8s_list_handlers::get_pod),
+        )
+        .route(
+            "/clusters/:id/k8s/deployments",
+            get(k8s_list_handlers::list_deployments),
+        )
+        .route("/clusters/:id/k8s/services", get(k8s_list_handlers::list_services))
+        .route("/clusters/:id/k8s/events", get(k8s_list_handlers::list_events))
+        .route("/clusters/:id/k8s/nodes", get(k8s_list_handlers::list_nodes))
+        .route("/clusters/:id/k8s/resource", get(k8s_list_handlers::list_resource))
+        .route(
+            "/clusters/:id/k8s/resource/:name",
+            get(k8s_list_handlers::get_resource)
+                .delete(k8s_action_handlers::delete_resource),
+        )
+        .route("/clusters/:id/k8s/logs", get(k8s_stream_handlers::logs))
+        .route("/clusters/:id/k8s/exec", get(k8s_stream_handlers::exec_ws))
+        .route("/clusters/:id/k8s/attach", get(k8s_stream_handlers::attach_ws))
+        .route("/clusters/:id/k8s/scale", post(k8s_action_handlers::scale_deployment))
+        .route("/clusters/:id/k8s/cordon", post(k8s_action_handlers::cordon_node))
+        .route("/clusters/:id/k8s/uncordon", post(k8s_action_handlers::uncordon_node))
+        .route("/clusters/:id/k8s/drain", post(k8s_action_handlers::drain_node))
+        .route("/clusters/:id/k8s/apply", post(k8s_action_handlers::apply_manifest))
         .layer(from_fn_with_state(
             state.clone(),
             middleware::rbac_middleware,

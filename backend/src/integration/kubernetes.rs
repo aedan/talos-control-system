@@ -501,3 +501,507 @@ pub async fn discover_cluster_from_kubeconfig(kubeconfig_yaml: &str) -> Result<D
         is_talos,
     })
 }
+
+// ============================================================================
+// K8sClient — the frozen proxy substrate for the explorer + CLI
+// ============================================================================
+//
+// A single, self-contained client over a stored kubeconfig. Every method the
+// REST handlers and the CLI need lives here so that the parallel agents only
+// ever call into this surface (they never touch kube internals directly).
+
+use std::collections::BTreeMap;
+use futures::io::AsyncBufRead;
+
+use crate::integration::k8s_explorer::{
+    ApplyResult, DrainResult, ResolvedKind,
+};
+use crate::utils::secrets;
+
+/// Map a `kube::Error` to an `AppError`, surfacing the HTTP status when present.
+fn map_kube_err(e: kube::Error) -> AppError {
+    let code = match &e {
+        kube::Error::Api(resp) => Some(resp.code),
+        _ => None,
+    };
+    let msg = e.to_string();
+    match code {
+        Some(404) => AppError::NotFound(msg),
+        Some(401 | 403) => AppError::Auth(msg),
+        Some(409) => AppError::InvalidInput(msg),
+        Some(429) => AppError::Network(msg),
+        Some(c) if (400..500).contains(&c) => AppError::InvalidInput(format!("{c}: {msg}")),
+        Some(c) if (500..600).contains(&c) => AppError::Internal(format!("{c}: {msg}")),
+        _ => AppError::Internal(msg),
+    }
+}
+
+/// Build the absolute API path for a resolved kind.
+fn url_path_for(r: &ResolvedKind, ns: Option<&str>) -> String {
+    let group = if r.group.is_empty() {
+        "api".to_string()
+    } else {
+        "apis".to_string()
+    };
+    match ns {
+        Some(n) if r.namespaced => format!("/{group}/{}/namespaces/{}/{}", r.version, r.plural, n),
+        _ => format!("/{group}/{}/{}", r.version, r.plural),
+    }
+}
+
+/// A typed + dynamic Kubernetes client bound to one stored cluster kubeconfig.
+#[derive(Clone)]
+pub struct K8sClient {
+    client: kube::Client,
+    discovery: std::sync::Arc<kube::discovery::Discovery>,
+}
+
+impl K8sClient {
+    /// Build a client from a decrypted kubeconfig YAML string.
+    pub async fn from_kubeconfig_yaml(yaml: &str) -> Result<Self, AppError> {
+        let client = build_client_from_kubeconfig_yaml(yaml).await?;
+        let discovery = kube::discovery::Discovery::new(client.clone())
+            .run()
+            .await
+            .map_err(map_kube_err)?;
+        Ok(Self {
+            client,
+            discovery: std::sync::Arc::new(discovery),
+        })
+    }
+
+    pub fn raw(&self) -> &kube::Client {
+        &self.client
+    }
+
+    // ---- discovery --------------------------------------------------------
+
+    /// Resolve an arbitrary kind (e.g. "pods", "po", "deploy", "ingress", "mycrd")
+    /// to its group/version/plural/namespaced shape via API discovery.
+    pub fn resolve(&self, kind: &str) -> Result<ResolvedKind, AppError> {
+        let norm = kind.to_lowercase().trim().to_string();
+        let norm = norm.chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+
+        let mut best: Option<(ResolvedKind, usize)> = None;
+        for group in self.discovery.groups_alphabetical() {
+            for (res, caps) in group.recommended_resources() {
+                let rkind = res.kind.to_lowercase();
+                let rplural = res.plural.to_lowercase();
+                let score = if rkind == norm {
+                    3
+                } else if rplural == norm {
+                    3
+                } else if rkind.starts_with(&norm) && norm.len() >= 3 {
+                    2
+                } else if rplural.starts_with(&norm) && norm.len() >= 3 {
+                    2
+                } else {
+                    0
+                };
+                if score > 0 {
+                    let namespaced = matches!(caps.scope, kube::discovery::Scope::Namespaced);
+                    let rk = ResolvedKind {
+                        group: res.group.clone(),
+                        version: res.version.clone(),
+                        api_version: res.api_version.clone(),
+                        kind: res.kind.clone(),
+                        plural: res.plural.clone(),
+                        namespaced,
+                    };
+                    // Prefer exact matches; keep the highest score.
+                    if best.as_ref().map(|(b, s)| score > *s || (score == *s && b.kind.len() >= rk.kind.len())).unwrap_or(true) {
+                        best = Some((rk, score));
+                    }
+                }
+            }
+        }
+
+        best.map(|(rk, _)| rk)
+            .ok_or_else(|| AppError::NotFound(format!("kind '{kind}' not found in cluster")))
+    }
+
+    // ---- typed core lists (fast path for the explorer) --------------------
+
+    pub async fn list_namespaces(&self) -> Result<Vec<k8s_openapi::api::core::v1::Namespace>, AppError> {
+        let api = kube::Api::<k8s_openapi::api::core::v1::Namespace>::all(self.client.clone());
+        Ok(api.list(&kube::api::ListParams::default()).await.map_err(map_kube_err)?.items)
+    }
+
+    pub async fn list_pods(&self, ns: Option<&str>) -> Result<Vec<k8s_openapi::api::core::v1::Pod>, AppError> {
+        let api = match ns {
+            Some(n) => kube::Api::<k8s_openapi::api::core::v1::Pod>::namespaced(self.client.clone(), n),
+            None => kube::Api::<k8s_openapi::api::core::v1::Pod>::all(self.client.clone()),
+        };
+        Ok(api.list(&kube::api::ListParams::default()).await.map_err(map_kube_err)?.items)
+    }
+
+    pub async fn list_deployments(&self, ns: Option<&str>) -> Result<Vec<k8s_openapi::api::apps::v1::Deployment>, AppError> {
+        let api = match ns {
+            Some(n) => kube::Api::<k8s_openapi::api::apps::v1::Deployment>::namespaced(self.client.clone(), n),
+            None => kube::Api::<k8s_openapi::api::apps::v1::Deployment>::all(self.client.clone()),
+        };
+        Ok(api.list(&kube::api::ListParams::default()).await.map_err(map_kube_err)?.items)
+    }
+
+    pub async fn list_services(&self, ns: Option<&str>) -> Result<Vec<k8s_openapi::api::core::v1::Service>, AppError> {
+        let api = match ns {
+            Some(n) => kube::Api::<k8s_openapi::api::core::v1::Service>::namespaced(self.client.clone(), n),
+            None => kube::Api::<k8s_openapi::api::core::v1::Service>::all(self.client.clone()),
+        };
+        Ok(api.list(&kube::api::ListParams::default()).await.map_err(map_kube_err)?.items)
+    }
+
+    pub async fn list_events(&self, ns: Option<&str>) -> Result<Vec<k8s_openapi::api::core::v1::Event>, AppError> {
+        let api = match ns {
+            Some(n) => kube::Api::<k8s_openapi::api::core::v1::Event>::namespaced(self.client.clone(), n),
+            None => kube::Api::<k8s_openapi::api::core::v1::Event>::all(self.client.clone()),
+        };
+        Ok(api.list(&kube::api::ListParams::default()).await.map_err(map_kube_err)?.items)
+    }
+
+    pub async fn list_nodes(&self) -> Result<Vec<k8s_openapi::api::core::v1::Node>, AppError> {
+        let api = kube::Api::<k8s_openapi::api::core::v1::Node>::all(self.client.clone());
+        Ok(api.list(&kube::api::ListParams::default()).await.map_err(map_kube_err)?.items)
+    }
+
+    pub async fn get_pod(&self, ns: &str, name: &str) -> Result<k8s_openapi::api::core::v1::Pod, AppError> {
+        let api = kube::Api::<k8s_openapi::api::core::v1::Pod>::namespaced(self.client.clone(), ns);
+        api.get(name).await.map_err(map_kube_err)
+    }
+
+    // ---- dynamic (arbitrary-kind) reads -----------------------------------
+
+    /// List an arbitrary kind, returning raw JSON (items + metadata).
+    pub async fn list_kind(&self, kind: &str, ns: Option<&str>) -> Result<serde_json::Value, AppError> {
+        let rk = self.resolve(kind)?;
+        let path = url_path_for(&rk, ns.filter(|_| rk.namespaced));
+        let req = kube::core::Request::new(path)
+            .list(&kube::api::ListParams::default())
+            .map_err(|e| AppError::Internal(format!("build list request: {e}")))?;
+        self.client.request::<serde_json::Value>(req).await.map_err(map_kube_err)
+    }
+
+    /// Get a single arbitrary-kind object as raw JSON.
+    pub async fn get_kind(&self, kind: &str, ns: Option<&str>, name: &str) -> Result<serde_json::Value, AppError> {
+        let rk = self.resolve(kind)?;
+        let path = url_path_for(&rk, ns.filter(|_| rk.namespaced));
+        let req = kube::core::Request::new(path)
+            .get(name, &kube::api::GetParams::default())
+            .map_err(|e| AppError::Internal(format!("build get request: {e}")))?;
+        self.client.request::<serde_json::Value>(req).await.map_err(map_kube_err)
+    }
+
+    // ---- mutations --------------------------------------------------------
+
+    /// Delete an arbitrary-kind object.
+    pub async fn delete_kind(&self, kind: &str, ns: Option<&str>, name: &str) -> Result<(), AppError> {
+        let rk = self.resolve(kind)?;
+        let path = url_path_for(&rk, ns.filter(|_| rk.namespaced));
+        let dp = kube::api::DeleteParams::foreground();
+        let req = kube::core::Request::new(path)
+            .delete(name, &dp)
+            .map_err(|e| AppError::Internal(format!("build delete request: {e}")))?;
+        self.client.request::<kube::core::Status>(req).await.map_err(map_kube_err)?;
+        Ok(())
+    }
+
+    /// Scale a Deployment to `replicas`.
+    pub async fn scale_deployment(&self, ns: &str, name: &str, replicas: i32) -> Result<(), AppError> {
+        let path = format!("/apis/apps/v1/namespaces/{ns}/deployments/{name}/scale");
+        let body = serde_json::json!({ "spec": { "replicas": replicas } });
+        let pp = kube::api::PatchParams::apply("tcs");
+        let req = kube::core::Request::new(path)
+            .patch(name, &pp, &kube::api::Patch::Apply(&body))
+            .map_err(|e| AppError::Internal(format!("build scale request: {e}")))?;
+        self.client.request::<serde_json::Value>(req).await.map_err(map_kube_err)?;
+        Ok(())
+    }
+
+    /// Cordon a node (mark unschedulable).
+    pub async fn cordon(&self, name: &str) -> Result<(), AppError> {
+        let api = kube::Api::<k8s_openapi::api::core::v1::Node>::all(self.client.clone());
+        api.cordon(name).await.map_err(map_kube_err)?;
+        Ok(())
+    }
+
+    /// Uncordon a node.
+    pub async fn uncordon(&self, name: &str) -> Result<(), AppError> {
+        let api = kube::Api::<k8s_openapi::api::core::v1::Node>::all(self.client.clone());
+        api.uncordon(name).await.map_err(map_kube_err)?;
+        Ok(())
+    }
+
+    /// Drain a node: cordon it, then evict its non-DaemonSet, non-mirror pods.
+    pub async fn drain(&self, name: &str, force: bool) -> Result<DrainResult, AppError> {
+        let mut result = DrainResult {
+            node: name.to_string(),
+            evicted: Vec::new(),
+            skipped: Vec::new(),
+            errors: Vec::new(),
+        };
+
+        self.cordon(name).await?;
+
+        let lp = kube::api::ListParams {
+            field_selector: Some(format!("spec.nodeName={name}")),
+            ..Default::default()
+        };
+        let pods_api = kube::Api::<k8s_openapi::api::core::v1::Pod>::all(self.client.clone());
+        let pods = pods_api.list(&lp).await.map_err(map_kube_err)?.items;
+
+        for pod in pods {
+            let pod_name = pod.metadata.name.clone().unwrap_or_default();
+            let ns = pod.metadata.namespace.clone().unwrap_or_default();
+
+            // Skip mirror pods (managed by static file) and pods without a controller.
+            if pod
+                .metadata
+                .owner_references
+                .as_ref()
+                .map(|o| o.iter().any(|r| r.kind == "DaemonSet"))
+                .unwrap_or(false)
+            {
+                result.skipped.push(format!("{ns}/{pod_name} (daemonset)"));
+                continue;
+            }
+            if pod
+                .metadata
+                .annotations
+                .as_ref()
+                .map(|a| a.contains_key("kubernetes.io/config.mirror"))
+                .unwrap_or(false)
+            {
+                result.skipped.push(format!("{ns}/{pod_name} (mirror)"));
+                continue;
+            }
+
+            let pod_api = kube::Api::<k8s_openapi::api::core::v1::Pod>::namespaced(self.client.clone(), &ns);
+            let ep = kube::api::EvictParams {
+                delete_options: Some(kube::api::DeleteParams {
+                    grace_period_seconds: Some(0),
+                    ..Default::default()
+                }),
+                post_options: kube::api::PostParams::default(),
+            };
+            match pod_api.evict(&pod_name, &ep).await {
+                Ok(_) => result.evicted.push(format!("{ns}/{pod_name}")),
+                Err(e) => {
+                    if force {
+                        // Best-effort hard delete on force.
+                        let _ = pod_api.delete(&pod_name, &kube::api::DeleteParams::foreground()).await;
+                        result.evicted.push(format!("{ns}/{pod_name} (forced)"));
+                    } else {
+                        result.errors.push(format!("{ns}/{pod_name}: {e}"));
+                    }
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Server-side apply of a single YAML document (arbitrary kind).
+    pub async fn apply_document(&self, doc: &str) -> Result<ApplyResult, AppError> {
+        let value: serde_json::Value =
+            serde_yaml::from_str(doc).map_err(|e| AppError::InvalidInput(format!("invalid YAML: {e}")))?;
+        let kind = value.get("kind").and_then(|k| k.as_str()).unwrap_or("").to_string();
+        let name = value
+            .get("metadata")
+            .and_then(|m| m.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string();
+        let ns = value
+            .get("metadata")
+            .and_then(|m| m.get("namespace"))
+            .and_then(|n| n.as_str())
+            .map(|s| s.to_string());
+
+        if kind.is_empty() || name.is_empty() {
+            return Ok(ApplyResult {
+                kind,
+                name,
+                namespace: ns.unwrap_or_default(),
+                status: "skipped (no kind/name)".to_string(),
+            });
+        }
+
+        let rk = self.resolve(&kind)?;
+        let path = url_path_for(&rk, ns.as_deref().filter(|_| rk.namespaced));
+        let pp = kube::api::PatchParams::apply("tcs");
+        let req = kube::core::Request::new(path)
+            .patch(&name, &pp, &kube::api::Patch::Apply(&value))
+            .map_err(|e| AppError::Internal(format!("build apply request: {e}")))?;
+        self.client.request::<serde_json::Value>(req).await.map_err(map_kube_err)?;
+
+        Ok(ApplyResult {
+            kind,
+            name,
+            namespace: ns.unwrap_or_default(),
+            status: "applied".to_string(),
+        })
+    }
+
+    /// Apply a multi-document YAML manifest, returning one result per document.
+    pub async fn apply_manifest(&self, manifest: &str) -> Result<Vec<ApplyResult>, AppError> {
+        let docs: Vec<&str> = manifest
+            .split("\n---")
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+        let mut out = Vec::new();
+        for doc in docs {
+            out.push(self.apply_document(doc).await?);
+        }
+        Ok(out)
+    }
+
+    // ---- streaming / interactive -----------------------------------------
+
+    /// Fetch pod logs as a string (non-follow).
+    pub async fn logs(
+        &self,
+        ns: &str,
+        name: &str,
+        container: Option<&str>,
+        tail_lines: Option<i64>,
+        previous: bool,
+        since_seconds: Option<i64>,
+    ) -> Result<String, AppError> {
+        let api = kube::Api::<k8s_openapi::api::core::v1::Pod>::namespaced(self.client.clone(), ns);
+        let lp = kube::api::LogParams {
+            container: container.map(|s| s.to_string()),
+            tail_lines,
+            previous,
+            since_seconds,
+            ..Default::default()
+        };
+        api.logs(name, &lp).await.map_err(map_kube_err)
+    }
+
+    /// Stream pod logs (follow). Returns a `Send + Unpin` async reader.
+    pub async fn log_stream(
+        &self,
+        ns: &str,
+        name: &str,
+        container: Option<&str>,
+        tail_lines: Option<i64>,
+        previous: bool,
+    ) -> Result<impl AsyncBufRead + Send + Unpin, AppError> {
+        let api = kube::Api::<k8s_openapi::api::core::v1::Pod>::namespaced(self.client.clone(), ns);
+        let lp = kube::api::LogParams {
+            container: container.map(|s| s.to_string()),
+            tail_lines,
+            previous,
+            follow: true,
+            ..Default::default()
+        };
+        api.log_stream(name, &lp).await.map_err(map_kube_err)
+    }
+
+    /// Exec into a pod. Returns the attached process (stdin/stdout/stderr + resize).
+    pub async fn exec(
+        &self,
+        ns: &str,
+        name: &str,
+        command: &[String],
+        container: Option<&str>,
+        tty: bool,
+    ) -> Result<kube::api::AttachedProcess, AppError> {
+        let api = kube::Api::<k8s_openapi::api::core::v1::Pod>::namespaced(self.client.clone(), ns);
+        let ap = kube::api::AttachParams {
+            container: container.map(|s| s.to_string()),
+            stdin: true,
+            stdout: true,
+            stderr: !tty,
+            tty,
+            ..Default::default()
+        };
+        api.exec(name, command, &ap).await.map_err(map_kube_err)
+    }
+
+    /// Attach to a running pod's main container (interactive shell).
+    pub async fn attach(
+        &self,
+        ns: &str,
+        name: &str,
+        container: Option<&str>,
+        tty: bool,
+    ) -> Result<kube::api::AttachedProcess, AppError> {
+        let api = kube::Api::<k8s_openapi::api::core::v1::Pod>::namespaced(self.client.clone(), ns);
+        let ap = kube::api::AttachParams {
+            container: container.map(|s| s.to_string()),
+            stdin: true,
+            stdout: true,
+            stderr: !tty,
+            tty,
+            ..Default::default()
+        };
+        api.attach(name, &ap).await.map_err(map_kube_err)
+    }
+
+    /// All served kinds (for `tcs api-resources` style listing).
+    pub fn all_kinds(&self) -> Vec<ResolvedKind> {
+        let mut seen = BTreeMap::new();
+        for group in self.discovery.groups_alphabetical() {
+            for (res, caps) in group.recommended_resources() {
+                let namespaced = matches!(caps.scope, kube::discovery::Scope::Namespaced);
+                seen.entry(res.kind.clone()).or_insert(ResolvedKind {
+                    group: res.group.clone(),
+                    version: res.version.clone(),
+                    api_version: res.api_version.clone(),
+                    kind: res.kind.clone(),
+                    plural: res.plural.clone(),
+                    namespaced,
+                });
+            }
+        }
+        seen.into_values().collect()
+    }
+}
+
+/// A pool of `K8sClient`s keyed by cluster id, built lazily from the stored
+/// (encrypted) kubeconfig. Wired into `AppState` so handlers share one client
+/// per cluster instead of rebuilding per request.
+pub struct K8sClientPool {
+    cache: moka::future::Cache<uuid::Uuid, std::sync::Arc<K8sClient>>,
+}
+
+impl K8sClientPool {
+    pub fn new() -> Self {
+        Self {
+            cache: moka::future::Cache::builder()
+                .max_capacity(1024)
+                .time_to_live(Duration::from_secs(3600))
+                .time_to_idle(Duration::from_secs(1800))
+                .build(),
+        }
+    }
+
+    /// Get or build a client for a cluster from its encrypted kubeconfig.
+    /// Returns `Err(NotFound)` if the cluster has no kubeconfig stored.
+    pub async fn get(
+        &self,
+        cluster_id: uuid::Uuid,
+        encrypted_kubeconfig: &str,
+        jwt_secret: &str,
+    ) -> Result<std::sync::Arc<K8sClient>, AppError> {
+        if let Some(c) = self.cache.get(&cluster_id).await {
+            return Ok(c);
+        }
+        let plain = secrets::decrypt(jwt_secret, encrypted_kubeconfig)?;
+        let client = std::sync::Arc::new(K8sClient::from_kubeconfig_yaml(&plain).await?);
+        self.cache.insert(cluster_id, std::sync::Arc::clone(&client)).await;
+        Ok(client)
+    }
+
+    /// Drop a cached client (e.g. after the kubeconfig is replaced).
+    pub async fn invalidate(&self, cluster_id: &uuid::Uuid) {
+        self.cache.invalidate(cluster_id).await;
+    }
+}
+
+impl Default for K8sClientPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}

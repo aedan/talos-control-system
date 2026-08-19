@@ -20,6 +20,7 @@ use talos_control_system::runtime::event::EventBus;
 use talos_control_system::utils::logging::init_tracing;
 use talos_control_system::utils::version::VERSION_INFO;
 use talos_control_system::AppState;
+use clap::Parser as _;
 
 type AcmeChallengeStore = Arc<DashMap<String, String>>;
 
@@ -27,9 +28,10 @@ type AcmeChallengeStore = Arc<DashMap<String, String>>;
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     init_tracing();
 
+    let argv: Vec<String> = std::env::args().collect();
+
     // One-shot tools before server boot
-    let mut args = std::env::args().skip(1);
-    if let Some(cmd) = args.next() {
+    if let Some(cmd) = argv.get(1) {
         if cmd == "migrate-sqlite-to-postgres" {
             let sqlite = std::env::var("TCS_SQLITE_PATH")
                 .or_else(|_| std::env::var("TCS_DATABASE_SQLITE_PATH"))
@@ -49,9 +51,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                    (default)                   Start the control plane\n\
                    migrate-sqlite-to-postgres  Copy SQLite data into Postgres\n\
                                                env: TCS_SQLITE_PATH, TCS_POSTGRES_URL\n\
-                   help                        Show this message\n"
+                   help                        Show this message\n\n\
+                 CLI (kubectl-like, thin client over the TCS API):\n\
+                   tcs login <email> <password>\n\
+                   tcs clusters\n\
+                   tcs get <kind> [name] [--ns] [-o table|wide|json|yaml]\n\
+                   tcs describe <kind> <name> [--ns]\n\
+                   tcs logs <pod> [--ns] [-f] [--tail N] [-c CONTAINER]\n\
+                   tcs exec <pod> [--ns] [-c CONTAINER] [-t] -- <command...>\n\
+                   tcs attach <pod> [--ns] [-c CONTAINER] [-t]\n\
+                   tcs delete <kind> <name> [--ns] [-f]\n\
+                   tcs scale <deployment> [--ns] --replicas N\n\
+                   tcs cordon <node> | uncordon <node>\n\
+                   tcs drain <node> [-f]\n\
+                   tcs apply -f <file|->\n\n\
+                 Global flags: --server URL --token JWT --cluster ID\n\
+                 Auth: `tcs login`, TCS_TOKEN, or ~/.tcs/config\n"
             );
             return Ok(());
+        }
+    }
+
+    // CLI verbs (tcs get / logs / exec / ...) vs. the server (bare `tcs`).
+    //
+    // The control plane is always started with no subcommand, so:
+    //   * parse Ok + a subcommand present  -> run the CLI and exit
+    //   * parse Ok + no subcommand         -> fall through and start the server
+    //   * parse Err (help/version/typo)    -> clap already printed the message; exit
+    match talos_control_system::cli::Cli::try_parse_from(&argv) {
+        Ok(cli) => {
+            if cli.command.is_some() {
+                if let Err(e) = talos_control_system::cli::run_cli(cli).await {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
+        }
+        Err(e) => {
+            // `try_parse_from` does not print the message itself (unlike `parse_from`);
+            // `exit()` renders help/errors to the right stream and sets the exit code.
+            e.exit();
         }
     }
 
@@ -184,6 +224,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         siderolink_wg,
         tls_runtime: None,
         metal_runtime: Some(metal_runtime),
+        k8s_pool: Arc::new(talos_control_system::integration::K8sClientPool::new()),
     };
 
     let _backup_sched = talos_control_system::runtime::spawn_backup_scheduler(

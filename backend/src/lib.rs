@@ -10,6 +10,7 @@ pub mod integration;
 pub mod utils;
 pub mod cert;
 pub mod static_server;
+pub mod cli;
 
 use std::sync::Arc;
 use crate::branding::manager::BrandingManager;
@@ -27,6 +28,8 @@ pub struct AppState {
     pub tls_runtime: Option<Arc<crate::cert::TlsRuntime>>,
     /// Live metal DHCP/PXE config + service handles.
     pub metal_runtime: Option<Arc<crate::network::MetalRuntime>>,
+    /// Shared pool of K8s clients (built lazily from stored kubeconfigs).
+    pub k8s_pool: Arc<crate::integration::K8sClientPool>,
 }
 
 impl Clone for AppState {
@@ -40,6 +43,7 @@ impl Clone for AppState {
             siderolink_wg: Arc::clone(&self.siderolink_wg),
             tls_runtime: self.tls_runtime.clone(),
             metal_runtime: self.metal_runtime.clone(),
+            k8s_pool: Arc::clone(&self.k8s_pool),
         }
     }
 }

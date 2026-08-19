@@ -16,13 +16,23 @@ pub struct RbacClaims {
 }
 
 pub fn extract_claims_from_request(request: &Request) -> Option<RbacClaims> {
-    let headers = request.headers();
+    // Prefer the Authorization header; fall back to a `?token=` query param for
+    // WebSocket/SSE clients that cannot set custom headers.
+    let token = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
+        .or_else(|| {
+            let query = request.uri().query()?;
+            query
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("token="))
+                .map(|s| s.to_string())
+        })?;
 
-    let auth_header = headers.get(axum::http::header::AUTHORIZATION)?;
-    let auth_str = auth_header.to_str().ok()?;
-    let token = auth_str.strip_prefix("Bearer ")?;
-
-    let token_data = verify_jwt(token).ok()?;
+    let token_data = verify_jwt(&token).ok()?;
     let claims = token_data.claims;
 
     Some(RbacClaims {

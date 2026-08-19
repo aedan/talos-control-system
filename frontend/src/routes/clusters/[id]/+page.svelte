@@ -13,8 +13,9 @@
     type Machine,
     type ClusterBackup,
   } from '$lib/api/types';
+  import WorkloadsExplorer from '$lib/explorer/WorkloadsExplorer.svelte';
 
-  type Tab = 'nodes' | 'machines' | 'config' | 'backups';
+  type Tab = 'nodes' | 'machines' | 'workloads' | 'config' | 'backups';
 
   let cluster = $state<any>(null);
   let loading = $state(true);
@@ -417,6 +418,7 @@
   const controlPlanes = $derived(machines.filter(isControlPlane));
   const cpCount = $derived(machines.filter(isControlPlane).length);
   const workerCount = $derived(machines.length - cpCount);
+  const hasKubeconfig = $derived(!!(cluster && (cluster.hasKubeconfig || cluster.has_kubeconfig)));
 </script>
 
 <div class="cluster-detail">
@@ -520,7 +522,7 @@
         </div>
         <div class="action-block">
           <h3>Attach / replace kubeconfig</h3>
-          <p class="hint">Needed for "Refresh from K8s" (live node discovery + version sync).</p>
+          <p class="hint">Needed for the Workloads explorer and “Refresh from K8s”.</p>
           <textarea bind:value={kubeconfigText} rows="6" placeholder="Paste ~/.kube/config YAML"></textarea>
           <Button variant="primary" size="sm" onclick={saveKubeconfig} disabled={busy || !kubeconfigText.trim()}>
             Save kubeconfig
@@ -566,6 +568,7 @@
     <nav class="tabs">
       <button class:active={tab === 'nodes'} onclick={() => selectTab('nodes')}>Nodes</button>
       <button class:active={tab === 'machines'} onclick={() => selectTab('machines')}>Machines</button>
+      <button class:active={tab === 'workloads'} onclick={() => selectTab('workloads')}>Workloads</button>
       <button class:active={tab === 'config'} onclick={() => selectTab('config')}>Config</button>
       <button class:active={tab === 'backups'} onclick={() => selectTab('backups')}>Backups</button>
     </nav>
@@ -649,6 +652,22 @@
               {/each}
             </tbody>
           </table>
+        {/if}
+      </div>
+    {/if}
+
+    <!-- ── Workloads (K8s explorer) ──────────────────────────────── -->
+    {#if tab === 'workloads'}
+      <div class="tab-panel">
+        {#if !hasKubeconfig}
+          <div class="empty-state">
+            <p>No kubeconfig attached to this cluster</p>
+            <p class="hint">
+              Attach a kubeconfig under “Cluster actions” to enable the workloads explorer.
+            </p>
+          </div>
+        {:else}
+          <WorkloadsExplorer clusterId={cid ?? ''} />
         {/if}
       </div>
     {/if}
