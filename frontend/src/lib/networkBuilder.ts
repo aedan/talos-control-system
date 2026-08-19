@@ -3,7 +3,16 @@ import { parseAllDocuments as yamlParseAll } from 'yaml';
 export interface NetRouteBlock {
   network: string;
   gateway: string;
-  metric?: string;
+  metric: string;
+}
+
+export interface NetVlanBlock {
+  id: string;
+  vlanId: string;
+  mtu: string;
+  dhcp: boolean;
+  addresses: string[];
+  routes: NetRouteBlock[];
 }
 
 export interface NetInterfaceBlock {
@@ -16,7 +25,7 @@ export interface NetInterfaceBlock {
   routes: NetRouteBlock[];
   bondMode: string;
   bondMembers: string;
-  vlanId: string;
+  vlans: NetVlanBlock[];
 }
 
 export interface NetworkBuilderState {
@@ -43,6 +52,10 @@ export function newBlockId(): string {
   return `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
+export function newNetVlan(id: string = newBlockId()): NetVlanBlock {
+  return { id, vlanId: '', mtu: '', dhcp: false, addresses: [], routes: [] };
+}
+
 export function newNetInterface(id: string = newBlockId()): NetInterfaceBlock {
   return {
     id,
@@ -54,7 +67,7 @@ export function newNetInterface(id: string = newBlockId()): NetInterfaceBlock {
     routes: [],
     bondMode: 'none',
     bondMembers: '',
-    vlanId: '',
+    vlans: [],
   };
 }
 
@@ -62,42 +75,38 @@ export function newNetInterface(id: string = newBlockId()): NetInterfaceBlock {
  * Serialize the network builder into the YAML fragment sent to the helpers
  * endpoint. Emits `interfaces:` and/or `nameservers:` at the top level; the
  * backend nests the fragment under `machine.network` before deep-merging.
- * A block with a vlan id is a VLAN: its addresses and routes are emitted in
- * a standalone `kind: VLANConfig` document after the fragment (`---`
- * separator), not on the parent interface. Only enabled keys are emitted.
+ * VLANs are emitted nested under their parent interface (`vlans:` list),
+ * matching the standard Talos v1alpha1 machine config and supporting any
+ * number of VLANs per interface. Only enabled keys are emitted.
  */
 export function buildNetworkHelperYaml(
   state: NetworkBuilderState,
   keys: NetworkBuilderKeys,
 ): string {
   const lines: string[] = [];
-  const vlanDocs: string[] = [];
 
   if (keys.interfaces) {
     const blocks = state.interfaces.filter((b) => b.interface.trim());
     if (blocks.length > 0) {
       lines.push('interfaces:');
       for (const b of blocks) {
-        const isVlan = Boolean(b.vlanId.trim());
         lines.push(`  - interface: ${b.interface.trim()}`);
         if (b.dhcp) lines.push('    dhcp: true');
         if (b.ignore) lines.push('    ignore: true');
         const mtu = b.mtu.trim();
         if (mtu) lines.push(`    mtu: ${mtu}`);
         const addresses = b.addresses.map((a) => a.trim()).filter(Boolean);
+        if (addresses.length > 0) {
+          lines.push('    addresses:');
+          for (const a of addresses) lines.push(`      - ${a}`);
+        }
         const routes = b.routes.filter((r) => r.network.trim() && r.gateway.trim());
-        if (!isVlan) {
-          if (addresses.length > 0) {
-            lines.push('    addresses:');
-            for (const a of addresses) lines.push(`      - ${a}`);
-          }
-          if (routes.length > 0) {
-            lines.push('    routes:');
-            for (const r of routes) {
-              lines.push(`      - network: ${r.network.trim()}`);
-              lines.push(`        gateway: ${r.gateway.trim()}`);
-              if (r.metric) lines.push(`        metric: ${r.metric.trim()}`);
-            }
+        if (routes.length > 0) {
+          lines.push('    routes:');
+          for (const r of routes) {
+            lines.push(`      - network: ${r.network.trim()}`);
+            lines.push(`        gateway: ${r.gateway.trim()}`);
+            if (r.metric) lines.push(`        metric: ${r.metric.trim()}`);
           }
         }
         if (b.bondMode !== 'none') {
@@ -109,9 +118,29 @@ export function buildNetworkHelperYaml(
             lines.push(`      mode: ${b.bondMode}`);
           }
         }
-        const vlanId = b.vlanId.trim();
-        if (vlanId) {
-          vlanDocs.push(buildVlanConfigDoc(b.interface.trim(), vlanId, addresses, routes));
+        const vlans = b.vlans.filter((v) => v.vlanId.trim());
+        if (vlans.length > 0) {
+          lines.push('    vlans:');
+          for (const v of vlans) {
+            lines.push(`      - vlanId: ${v.vlanId.trim()}`);
+            if (v.dhcp) lines.push('        dhcp: true');
+            const vmtu = v.mtu.trim();
+            if (vmtu) lines.push(`        mtu: ${vmtu}`);
+            const vaddrs = v.addresses.map((a) => a.trim()).filter(Boolean);
+            if (vaddrs.length > 0) {
+              lines.push('        addresses:');
+              for (const a of vaddrs) lines.push(`          - ${a}`);
+            }
+            const vroutes = v.routes.filter((r) => r.network.trim() && r.gateway.trim());
+            if (vroutes.length > 0) {
+              lines.push('        routes:');
+              for (const r of vroutes) {
+                lines.push(`          - network: ${r.network.trim()}`);
+                lines.push(`            gateway: ${r.gateway.trim()}`);
+                if (r.metric) lines.push(`            metric: ${r.metric.trim()}`);
+              }
+            }
+          }
         }
       }
     }
@@ -125,58 +154,16 @@ export function buildNetworkHelperYaml(
     }
   }
 
-  const fragment = lines.join('\n');
-  if (!fragment) return vlanDocs.join('\n---\n');
-  if (vlanDocs.length === 0) return fragment;
-  return `${fragment}\n---\n${vlanDocs.join('\n---\n')}`;
-}
-
-/**
- * Talos 1.13+ configures VLANs with a standalone `kind: VLANConfig`
- * document; the vlan interface is named `<parent>.<vlanId>`. The block's
- * addresses and routes live here (the parent interface carries none).
- * A default route is emitted without `destination` (Talos creates a
- * default route for the gateway's address family when it is omitted).
- */
-export function buildVlanConfigDoc(
-  parent: string,
-  vlanId: string,
-  addresses: string[],
-  routes: NetRouteBlock[],
-): string {
-  const doc = [
-    'apiVersion: v1alpha1',
-    'kind: VLANConfig',
-    `name: ${parent}.${vlanId}`,
-    `vlanID: ${vlanId}`,
-    `parent: ${parent}`,
-    'up: true',
-  ];
-  if (addresses.length > 0) {
-    doc.push('addresses:');
-    for (const a of addresses) doc.push(`  - address: ${a}`);
-  }
-  if (routes.length > 0) {
-    doc.push('routes:');
-    for (const r of routes) {
-      if (r.network.trim() && r.network.trim() !== '0.0.0.0/0') {
-        doc.push(`  - destination: ${r.network.trim()}`);
-      } else {
-        doc.push('  -');
-      }
-      doc.push(`    gateway: ${r.gateway.trim()}`);
-      if (r.metric) doc.push(`    metric: ${r.metric.trim()}`);
-    }
-  }
-  return doc.join('\n');
+  return lines.join('\n');
 }
 
 /**
  * Parse a full Talos machine config YAML into builder state, so the helper
  * blocks start from the node's current values. Tolerates the MachineConfig
  * resource wrapper (`node`/`metadata`/`spec`) where the real config is an
- * opaque YAML string inside `spec`, and standalone network config docs
- * (`kind: VLANConfig`) appended after the `---` separator.
+ * opaque YAML string inside `spec`. Nested `vlans:` on an interface are read
+ * directly; standalone `kind: VLANConfig` documents are folded into their
+ * parent interface's `vlans:` list (a nested entry with the same id wins).
  */
 export function parseNetworkIntoBuilder(yamlText: string): NetworkBuilderState {
   const state: NetworkBuilderState = { interfaces: [], nameservers: [] };
@@ -191,61 +178,90 @@ export function parseNetworkIntoBuilder(yamlText: string): NetworkBuilderState {
         .filter(Boolean);
       machine = specDocs[0]?.machine as Record<string, any> | undefined;
     }
-    const vlanDocs = docs.filter((d) => d?.kind === 'VLANConfig') as Array<
-      Record<string, any>
-    >;
     const net = machine?.network;
     if (!net) return state;
 
+    const vlanDocs = docs.filter((d) => d?.kind === 'VLANConfig') as Array<Record<string, any>>;
+
+    const parseRoutes = (raw: unknown): NetRouteBlock[] =>
+      Array.isArray(raw)
+        ? raw
+            .filter((r) => r && typeof r === 'object')
+            .map((r: Record<string, unknown>) => ({
+              network: typeof r.network === 'string' ? r.network : '',
+              gateway: typeof r.gateway === 'string' ? r.gateway : '',
+              metric: r.metric != null ? String(r.metric) : '',
+            }))
+        : [];
+
+    const parseVlan = (v: Record<string, any>): NetVlanBlock => ({
+      id: newBlockId(),
+      vlanId: v.vlanId != null ? String(v.vlanId) : '',
+      mtu: v.mtu != null ? String(v.mtu) : '',
+      dhcp: Boolean(v.dhcp),
+      addresses: Array.isArray(v.addresses) ? v.addresses.map(String) : [],
+      routes: parseRoutes(v.routes),
+    });
+
+    const blocks: NetInterfaceBlock[] = [];
     if (Array.isArray(net.interfaces)) {
-      state.interfaces = net.interfaces
-        .filter((i: unknown) => i && typeof i === 'object')
-        .map((i: Record<string, unknown>) => {
-          const bond = i.bond as { interfaces?: unknown; mode?: unknown } | undefined;
-          const vlan = vlanDocs.find((v) => v.parent === i.interface);
-          const vlanAddrs = Array.isArray(vlan?.addresses)
-            ? (vlan.addresses as Array<Record<string, unknown>>)
-                .map((a) => (typeof a?.address === 'string' ? a.address : ''))
-                .filter(Boolean)
-            : [];
-          const vlanRoutes = Array.isArray(vlan?.routes)
-            ? (vlan.routes as Array<Record<string, unknown>>)
-                .filter((r) => r && typeof r === 'object')
-                .map((r) => ({
-                  network:
-                    typeof r.destination === 'string' && r.destination
-                      ? r.destination
-                      : '0.0.0.0/0',
-                  gateway: typeof r.gateway === 'string' ? r.gateway : '',
-                  metric: r.metric != null ? String(r.metric) : undefined,
-                }))
-            : [];
-          return {
-            id: newBlockId(),
-            interface: typeof i.interface === 'string' ? i.interface : '',
-            dhcp: Boolean(i.dhcp),
-            ignore: Boolean(i.ignore),
-            mtu: i.mtu != null ? String(i.mtu) : '',
-            addresses: vlan ? vlanAddrs : Array.isArray(i.addresses) ? i.addresses.map(String) : [],
-            routes: vlan
-              ? vlanRoutes
-              : Array.isArray(i.routes)
-                ? i.routes
-                    .filter((r: unknown) => r && typeof r === 'object')
-                    .map((r: Record<string, unknown>) => ({
-                      network: typeof r.network === 'string' ? r.network : '',
-                      gateway: typeof r.gateway === 'string' ? r.gateway : '',
-                      metric: r.metric != null ? String(r.metric) : undefined,
-                    }))
-                : [],
-            bondMode: bond?.mode ? String(bond.mode) : 'none',
-            bondMembers: Array.isArray(bond?.interfaces)
-              ? (bond.interfaces as unknown[]).map(String).join(', ')
-              : '',
-            vlanId: vlan?.vlanID != null ? String(vlan.vlanID) : '',
-          };
+      for (const i of net.interfaces) {
+        if (!i || typeof i !== 'object') continue;
+        const bond = i.bond as { interfaces?: unknown; mode?: unknown } | undefined;
+        const nested = Array.isArray(i.vlans)
+          ? (i.vlans as Array<Record<string, any>>)
+              .filter((v) => v && typeof v === 'object')
+              .map(parseVlan)
+          : [];
+        blocks.push({
+          id: newBlockId(),
+          interface: typeof i.interface === 'string' ? i.interface : '',
+          dhcp: Boolean(i.dhcp),
+          ignore: Boolean(i.ignore),
+          mtu: i.mtu != null ? String(i.mtu) : '',
+          addresses: Array.isArray(i.addresses) ? i.addresses.map(String) : [],
+          routes: parseRoutes(i.routes),
+          bondMode: bond?.mode ? String(bond.mode) : 'none',
+          bondMembers: Array.isArray(bond?.interfaces)
+            ? (bond.interfaces as unknown[]).map(String).join(', ')
+            : '',
+          vlans: nested,
         });
+      }
     }
+
+    // Fold standalone VLANConfig docs into their parent interface.
+    for (const doc of vlanDocs) {
+      const parent = typeof doc.parent === 'string' ? doc.parent : '';
+      const id = doc.vlanID != null ? String(doc.vlanID) : '';
+      if (!parent || !id) continue;
+      let block = blocks.find((b) => b.interface === parent);
+      if (!block) {
+        block = { ...newNetInterface(), interface: parent };
+        blocks.push(block);
+      }
+      if (block.vlans.some((v) => v.vlanId === id)) continue;
+      const addrs = Array.isArray(doc.addresses)
+        ? (doc.addresses as Array<Record<string, unknown>>)
+            .map((a) => (typeof a?.address === 'string' ? a.address : ''))
+            .filter(Boolean)
+        : [];
+      const routes: NetRouteBlock[] = Array.isArray(doc.routes)
+        ? (doc.routes as Array<Record<string, unknown>>)
+            .filter((r) => r && typeof r === 'object')
+            .map((r) => ({
+              network:
+                typeof r.destination === 'string' && r.destination
+                  ? r.destination
+                  : '0.0.0.0/0',
+              gateway: typeof r.gateway === 'string' ? r.gateway : '',
+              metric: r.metric != null ? String(r.metric) : '',
+            }))
+        : [];
+      block.vlans.push({ id: newBlockId(), vlanId: id, mtu: '', dhcp: false, addresses: addrs, routes });
+    }
+
+    state.interfaces = blocks;
 
     if (Array.isArray(net.nameservers)) {
       state.nameservers = net.nameservers.map(String);

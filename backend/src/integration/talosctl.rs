@@ -832,7 +832,56 @@ pub fn merge_yaml_docs_into_machine_config(
         }
     }
 
+    drop_redundant_standalone_vlans(&mut docs);
+
     serialize_yaml_documents(&docs)
+}
+
+/// Drop standalone `VLANConfig` docs whose VLAN is now expressed as a nested
+/// `vlans:` entry on the parent interface in the machine config. Both forms
+/// create the same `<parent>.<vlanID>` link, so keeping both makes Talos
+/// reject the config with a link conflict.
+fn drop_redundant_standalone_vlans(docs: &mut Vec<serde_yaml::Value>) {
+    let Some(primary) = docs.iter().find(|d| is_primary_machine_config_doc(d)) else {
+        return;
+    };
+    let mut nested: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    if let Some(ifaces) = primary
+        .get("machine")
+        .and_then(|m| m.get("network"))
+        .and_then(|n| n.get("interfaces"))
+        .and_then(|i| i.as_sequence())
+    {
+        for iface in ifaces {
+            let Some(name) = iface.get("interface").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(vlans) = iface.get("vlans").and_then(|v| v.as_sequence()) else {
+                continue;
+            };
+            for vlan in vlans {
+                if let Some(id) = vlan.get("vlanId").and_then(|v| v.as_u64()) {
+                    nested.insert((name.to_string(), id.to_string()));
+                }
+            }
+        }
+    }
+
+    docs.retain(|doc| {
+        if !is_standalone_config_doc(doc) {
+            return true;
+        }
+        if doc.get("kind").and_then(|v| v.as_str()) != Some("VLANConfig") {
+            return true;
+        }
+        let Some(parent) = doc.get("parent").and_then(|v| v.as_str()) else {
+            return true;
+        };
+        let Some(id) = doc.get("vlanID").and_then(|v| v.as_u64()) else {
+            return true;
+        };
+        !nested.contains(&(parent.to_string(), id.to_string()))
+    });
 }
 
 /// A standalone network config document (e.g. `kind: VLANConfig`) is
@@ -1120,5 +1169,29 @@ machine:
         assert_eq!(merged2.matches("kind: VLANConfig").count(), 1);
         assert!(merged2.contains("vlanID: 208"));
         assert!(merged2.contains("mode: active-backup"));
+    }
+
+    #[test]
+    fn merge_drops_standalone_vlan_duplicated_by_nested_vlans() {
+        // Current config carries a standalone VLANConfig for bond0.207.
+        let current = "version: v1alpha1\nmachine:\n  type: worker\n  network:\n    interfaces:\n      - interface: bond0\n        bond:\n          mode: 802.3ad\n          interfaces:\n            - eno49\n            - eno50\ncluster:\n  clusterName: demo\n---\napiVersion: v1alpha1\nkind: VLANConfig\nname: bond0.207\nvlanID: 207\nparent: bond0\nup: true\naddresses:\n- address: 162.242.191.68/26\n";
+        // Patch expresses the same vlan nested under the interface.
+        let patch = "machine:\n  network:\n    interfaces:\n      - interface: bond0\n        bond:\n          mode: 802.3ad\n          interfaces:\n            - eno49\n            - eno50\n        vlans:\n          - vlanId: 207\n            addresses:\n              - 162.242.191.68/26\n            routes:\n              - network: 0.0.0.0/0\n                gateway: 162.242.191.65\n                metric: 100\n";
+        let merged = merge_yaml_docs_into_machine_config(current, patch).unwrap();
+        assert!(merged.contains("vlans:"));
+        assert!(merged.contains("vlanId: 207"));
+        // The standalone doc for the same parent+vlan must be gone.
+        assert!(!merged.contains("kind: VLANConfig"));
+    }
+
+    #[test]
+    fn merge_keeps_standalone_vlan_not_expressed_nested() {
+        let current = "version: v1alpha1\nmachine:\n  type: worker\ncluster:\n  clusterName: demo\n---\napiVersion: v1alpha1\nkind: VLANConfig\nname: bond0.207\nvlanID: 207\nparent: bond0\n";
+        // Patch adds a different vlan nested; the existing standalone stays.
+        let patch = "machine:\n  network:\n    interfaces:\n      - interface: bond0\n        vlans:\n          - vlanId: 300\n";
+        let merged = merge_yaml_docs_into_machine_config(current, patch).unwrap();
+        assert!(merged.contains("kind: VLANConfig"));
+        assert!(merged.contains("vlanID: 207"));
+        assert!(merged.contains("vlanId: 300"));
     }
 }

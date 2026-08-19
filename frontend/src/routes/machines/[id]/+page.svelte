@@ -11,6 +11,7 @@
     BOND_MODES,
     buildNetworkHelperYaml,
     newNetInterface,
+    newNetVlan,
     parseNetworkIntoBuilder,
     type NetInterfaceBlock,
     type NetworkBuilderKeys,
@@ -209,6 +210,14 @@
 
   function removeNetInterface(id: string) {
     netInterfaces = netInterfaces.filter((b) => b.id !== id);
+  }
+
+  function addVlan(block: NetInterfaceBlock) {
+    block.vlans.push(newNetVlan());
+  }
+
+  function removeVlan(block: NetInterfaceBlock, vlanId: string) {
+    block.vlans = block.vlans.filter((v) => v.id !== vlanId);
   }
 
   function addNameServer() {
@@ -737,7 +746,7 @@
                       >
                     </div>
                     <div class="kv-row">
-                      <span class="sub">routes (network / gateway)</span>
+                      <span class="sub">routes (network / gateway / metric)</span>
                       {#each block.routes as _, i}
                         <div class="kv-row">
                           <input
@@ -752,6 +761,12 @@
                             bind:value={block.routes[i].gateway}
                             class="mono small"
                           />
+                          <input
+                            type="text"
+                            placeholder="metric"
+                            bind:value={block.routes[i].metric}
+                            class="mono small"
+                          />
                           <Button
                             variant="ghost"
                             size="sm"
@@ -763,7 +778,7 @@
                       <Button
                         variant="ghost"
                         size="sm"
-                        onclick={() => block.routes.push({ network: '', gateway: '' })}
+                        onclick={() => block.routes.push({ network: '', gateway: '', metric: '' })}
                         >+ route</Button
                       >
                     </div>
@@ -784,11 +799,89 @@
                       {/if}
                     </div>
                     <div class="kv-row">
-                      <span class="sub">vlan id</span>
-                      <input type="text" placeholder="207" bind:value={block.vlanId} class="mono small" />
-                      {#if block.vlanId.trim()}
-                        <span class="hint">addresses &amp; routes land on {block.interface.trim()}.{block.vlanId.trim()}</span>
-                      {/if}
+                      <span class="sub">vlans (nested on this interface)</span>
+                      {#each block.vlans as vlan (vlan.id)}
+                        <div class="vlan-block">
+                          <div class="kv-row">
+                            <span class="sub mono">vlan id</span>
+                            <input
+                              type="text"
+                              placeholder="207"
+                              bind:value={vlan.vlanId}
+                              class="mono small"
+                            />
+                            <input
+                              type="text"
+                              placeholder="mtu"
+                              bind:value={vlan.mtu}
+                              class="mono small"
+                            />
+                            <label class="check"
+                              ><input type="checkbox" bind:checked={vlan.dhcp} /> dhcp</label
+                            >
+                            <Button variant="ghost" size="sm" onclick={() => removeVlan(block, vlan.id)}
+                              >remove</Button
+                            >
+                          </div>
+                          <div class="kv-row">
+                            <span class="sub">addresses (CIDR)</span>
+                            {#each vlan.addresses as _, i}
+                              <div class="kv-row">
+                                <input type="text" bind:value={vlan.addresses[i]} class="mono" />
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onclick={() => vlan.addresses.splice(i, 1)}
+                                  >–</Button
+                                >
+                              </div>
+                            {/each}
+                            <Button variant="ghost" size="sm" onclick={() => vlan.addresses.push('')}
+                              >+ address</Button
+                            >
+                          </div>
+                          <div class="kv-row">
+                            <span class="sub">routes (network / gateway / metric)</span>
+                            {#each vlan.routes as _, i}
+                              <div class="kv-row">
+                                <input
+                                  type="text"
+                                  placeholder="0.0.0.0/0"
+                                  bind:value={vlan.routes[i].network}
+                                  class="mono small"
+                                />
+                                <input
+                                  type="text"
+                                  placeholder="162.242.191.65"
+                                  bind:value={vlan.routes[i].gateway}
+                                  class="mono small"
+                                />
+                                <input
+                                  type="text"
+                                  placeholder="metric"
+                                  bind:value={vlan.routes[i].metric}
+                                  class="mono small"
+                                />
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onclick={() => vlan.routes.splice(i, 1)}
+                                  >–</Button
+                                >
+                              </div>
+                            {/each}
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onclick={() => vlan.routes.push({ network: '', gateway: '', metric: '' })}
+                              >+ route</Button
+                            >
+                          </div>
+                        </div>
+                      {/each}
+                      <Button variant="ghost" size="sm" onclick={() => addVlan(block)}
+                        >+ vlan</Button
+                      >
                     </div>
                   </div>
                 </div>
@@ -1154,6 +1247,22 @@ cluster:
     background: var(--tcs-background);
     color: var(--tcs-text);
     font-size: 0.75rem;
+  }
+  .vlan-block {
+    border: 1px dashed var(--tcs-border);
+    border-radius: 6px;
+    padding: 0.4rem 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    background: var(--tcs-surface);
+  }
+  .vlan-block .check {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: 0.75rem;
+    margin: 0;
   }
   .net-preview { margin: 0.4rem 0 0.75rem; font-size: 0.8rem; }
   .net-preview pre {
