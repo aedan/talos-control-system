@@ -1,12 +1,24 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { clusters, loading, error, loadClusters, deleteCluster } from '$lib/stores/clusters';
+  import { onMount, onDestroy } from 'svelte';
+  import {
+    clusters,
+    loading,
+    error,
+    loadClusters,
+    deleteCluster,
+    startClustersPolling,
+    stopClustersPolling,
+  } from '$lib/stores/clusters';
   import { success, error as notifyError } from '$lib/stores/notifications';
   import { clusterNodeCount } from '$lib/api/types';
   import Spinner from '$lib/components/Spinner.svelte';
   import Button from '$lib/components/Button.svelte';
 
-  onMount(loadClusters);
+  onMount(() => {
+    loadClusters();
+    startClustersPolling();
+  });
+  onDestroy(stopClustersPolling);
 
   async function handleDelete(cluster: { id: string; name: string }) {
     if (!confirm(`Delete cluster "${cluster.name}"?`)) return;

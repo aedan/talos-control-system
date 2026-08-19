@@ -38,6 +38,34 @@ const RECONCILABLE: &[&str] = &[
     "offline",
 ];
 
+/// Cluster statuses the reconciler is allowed to rewrite. Transient
+/// provisioning states (`importing`, `destroying`, `failed`, ...) are left
+/// alone so we never clobber an in-flight operation.
+const CLUSTER_RECONCILABLE: &[&str] = &["pending", "unknown", "offline", "running"];
+
+/// Derive a cluster's status from the set of its machines' statuses.
+///
+/// A cluster is `running` as soon as any of its machines is up. With nothing
+/// up, an actively-transitioning machine means it is still coming up
+/// (`pending`), everything down means `offline`, and no machines at all means
+/// `unknown`.
+fn derive_cluster_status(statuses: &[&str]) -> &'static str {
+    if statuses.is_empty() {
+        return "unknown";
+    }
+    if statuses.iter().any(|s| *s == "running") {
+        return "running";
+    }
+    const TRANSITIONAL: &[&str] = &["booting", "configuring", "installing"];
+    if statuses.iter().any(|s| TRANSITIONAL.contains(s)) {
+        return "pending";
+    }
+    if statuses.iter().all(|s| *s == "offline") {
+        return "offline";
+    }
+    "pending"
+}
+
 pub fn spawn_status_reconciler(
     pool: DbPool,
     jwt_secret: String,
@@ -75,6 +103,11 @@ async fn tick(pool: &DbPool, jwt_secret: &str) -> Result<(), AppError> {
         return Ok(());
     }
 
+    let probed_cluster_ids: HashSet<Uuid> = candidates
+        .iter()
+        .filter_map(|m| m.cluster_id)
+        .collect();
+
     let sem = Arc::new(Semaphore::new(PROBE_CONCURRENCY));
     let futures = candidates.into_iter().map(|m| {
         let pool = pool.clone();
@@ -95,6 +128,45 @@ async fn tick(pool: &DbPool, jwt_secret: &str) -> Result<(), AppError> {
         }
     }
 
+    // Re-read machine rows so cluster derivation reflects the statuses the
+    // probes just wrote (the `machines` slice above is pre-probe).
+    let fresh = repos::machine::list(pool).await?;
+    reconcile_cluster_statuses(pool, &fresh, &probed_cluster_ids).await
+}
+
+/// Re-derive `clusters.status` for every cluster that had a machine probed this
+/// tick. Machine status is the source of truth; the cluster row is otherwise
+/// only written by explicit import/provision flows, so an out-of-band-built
+/// cluster stays stuck at `pending` without this.
+async fn reconcile_cluster_statuses(
+    pool: &DbPool,
+    machines: &[Machine],
+    cluster_ids: &HashSet<Uuid>,
+) -> Result<(), AppError> {
+    for cluster_id in cluster_ids {
+        let Some(cluster) = repos::cluster::get(pool, *cluster_id).await? else {
+            continue;
+        };
+        if !CLUSTER_RECONCILABLE.contains(&cluster.status.as_str()) {
+            continue;
+        }
+        let member_statuses: Vec<&str> = machines
+            .iter()
+            .filter(|m| m.cluster_id == Some(*cluster_id))
+            .map(|m| m.status.as_str())
+            .collect();
+        let derived = derive_cluster_status(&member_statuses);
+        if derived != cluster.status {
+            repos::cluster::update_status(pool, cluster.id, derived).await?;
+            info!(
+                cluster_id = %cluster_id,
+                name = %cluster.name,
+                old_status = %cluster.status,
+                new_status = derived,
+                "Cluster status reconciled"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -168,4 +240,40 @@ async fn probe_and_update(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derive_cluster_status;
+
+    #[test]
+    fn empty_is_unknown() {
+        assert_eq!(derive_cluster_status(&[]), "unknown");
+    }
+
+    #[test]
+    fn any_running_makes_cluster_running() {
+        assert_eq!(derive_cluster_status(&["running", "offline"]), "running");
+        assert_eq!(
+            derive_cluster_status(&["offline", "offline", "running"]),
+            "running"
+        );
+    }
+
+    #[test]
+    fn transitional_without_running_is_pending() {
+        assert_eq!(derive_cluster_status(&["booting", "offline"]), "pending");
+        assert_eq!(derive_cluster_status(&["installing"]), "pending");
+        assert_eq!(derive_cluster_status(&["configuring", "pending"]), "pending");
+    }
+
+    #[test]
+    fn all_offline_is_offline() {
+        assert_eq!(derive_cluster_status(&["offline", "offline"]), "offline");
+    }
+
+    #[test]
+    fn all_pending_is_pending() {
+        assert_eq!(derive_cluster_status(&["pending", "pending"]), "pending");
+    }
 }

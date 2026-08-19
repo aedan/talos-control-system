@@ -1,4 +1,4 @@
-import { writable, derived } from 'svelte/store';
+import { writable, derived, get } from 'svelte/store';
 import { client } from '$lib/api/client';
 import type { Cluster, DiscoveredCluster, ImportResult } from '$lib/api/types';
 
@@ -13,16 +13,40 @@ export const runningClusters = derived(clusters, ($c) =>
   $c.filter((c) => c.status === 'running')
 );
 
-export async function loadClusters(): Promise<void> {
-  loading.set(true);
-  error.set(null);
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Load clusters from the API. In silent mode (polling) the spinner and error
+ * banner are left alone; failures only surface when we have nothing to show,
+ * so a transient poll failure never blanks the table.
+ */
+export async function loadClusters(silent = false): Promise<void> {
+  if (!silent) {
+    loading.set(true);
+    error.set(null);
+  }
   try {
     const data = (await client.get('/clusters')) as Cluster[];
     clusters.set(Array.isArray(data) ? data : []);
   } catch (e: unknown) {
-    error.set(e instanceof Error ? e.message : 'Failed to load clusters');
+    if (!silent || get(clusters).length === 0) {
+      error.set(e instanceof Error ? e.message : 'Failed to load clusters');
+    }
   } finally {
-    loading.set(false);
+    if (!silent) loading.set(false);
+  }
+}
+
+/** Poll the cluster list in the background so status changes appear live. */
+export function startClustersPolling(intervalMs = 15000): void {
+  stopClustersPolling();
+  pollTimer = setInterval(() => void loadClusters(true), intervalMs);
+}
+
+export function stopClustersPolling(): void {
+  if (pollTimer !== null) {
+    clearInterval(pollTimer);
+    pollTimer = null;
   }
 }
 
