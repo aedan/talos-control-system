@@ -32,7 +32,7 @@ pub struct ExecArgs {
 pub async fn run(client: &Client, cluster: &str, args: &ExecArgs) -> super::super::client::CliResult<()> {
     let ns = args.namespace.clone().unwrap_or_else(|| "default".to_string());
     let cmd = if args.command.is_empty() {
-        vec!["sh".to_string(), "-c".to_string(), "exit 0".to_string()]
+        vec!["sh".to_string()]
     } else {
         args.command.clone()
     };

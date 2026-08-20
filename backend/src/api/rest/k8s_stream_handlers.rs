@@ -119,7 +119,9 @@ pub async fn exec_ws(
             }
         })
         .filter(|v: &Vec<String>| !v.is_empty())
-        .unwrap_or_else(|| vec!["sh".to_string(), "-c".to_string(), "exit 0".to_string()]);
+        // No command => an interactive `sh` (with TTY). Distroless pods have no
+        // shell; callers should pass the container's actual binary explicitly.
+        .unwrap_or_else(|| vec!["sh".to_string()]);
     let attached = client
         .exec(&q.ns, &q.name, &cmd, q.container.as_deref(), q.tty)
         .await

@@ -235,7 +235,6 @@
           <TerminalPanel
             {clusterId}
             mode="exec"
-            command={['sh', '-c', 'ls -la']}
             ns={String(selected.namespace ?? 'default')}
             name={String(selected.name)}
             containers={containers}

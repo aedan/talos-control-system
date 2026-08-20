@@ -25,6 +25,7 @@
 
   let container = $state('');
   let tty = $state(true);
+  let cmdInput = $state(command.length ? command.join(' ') : 'sh');
   let termEl: HTMLDivElement | undefined = $state();
   let status = $state<'connecting' | 'running' | 'exited'>('connecting');
 
@@ -38,10 +39,15 @@
     status = 'connecting';
     term.clear();
 
+    // exec: parse the command input. A bare "sh"/"bash" (with TTY) is an
+    // interactive shell; anything else runs that command. attach: no command.
+    const cmd =
+      mode === 'exec' ? cmdInput.trim().split(/\s+/).filter(Boolean) : undefined;
+
     socket = openSession(
       clusterId,
       mode,
-      { ns, name, container: container || undefined, tty, command: mode === 'exec' ? command : undefined },
+      { ns, name, container: container || undefined, tty, command: cmd },
       (stream, bytes) => {
         const s = new TextDecoder().decode(bytes);
         if (stream === 'stderr') term?.write(`\x1b[31m${s}\x1b[0m`);
@@ -103,11 +109,29 @@
       <input type="checkbox" bind:checked={tty} onchange={connect} />
       TTY
     </label>
+    {#if mode === 'exec'}
+      <label class="lbl cmd-lbl">
+        Command
+        <input
+          type="text"
+          bind:value={cmdInput}
+          placeholder="sh  (interactive) — or any command, e.g. /coredns -version"
+          onkeydown={(e) => e.key === 'Enter' && connect()}
+        />
+      </label>
+    {/if}
     <span class="status" class:connecting={status === 'connecting'} class:exited={status === 'exited'}>
       {status}
     </span>
-    <button class="btn" onclick={connect}>Reconnect</button>
+    <button class="btn" onclick={connect}>Connect</button>
   </div>
+  {#if mode === 'exec'}
+    <div class="term-hint">
+      Leave the command as <code>sh</code> for an interactive shell. Many system
+      pods are distroless (no <code>sh</code>/<code>bash</code>) — type the container's
+      actual binary (e.g. <code>/coredns -version</code>) to inspect it.
+    </div>
+  {/if}
   <div class="term-host" bind:this={termEl}></div>
 </div>
 
@@ -162,6 +186,29 @@
     gap: 0.3rem;
     font-size: 0.78rem;
     color: var(--tcs-text-muted);
+  }
+  .cmd-lbl input {
+    background: var(--tcs-background);
+    border: 1px solid var(--tcs-border);
+    border-radius: 5px;
+    color: var(--tcs-text);
+    padding: 0.25rem 0.4rem;
+    font-size: 0.8rem;
+    font-family: ui-monospace, monospace;
+    min-width: 220px;
+  }
+  .term-hint {
+    padding: 0.4rem 0.75rem;
+    font-size: 0.74rem;
+    color: var(--tcs-text-muted);
+    background: var(--tcs-surface);
+    border-bottom: 1px solid var(--tcs-border);
+  }
+  .term-hint code {
+    font-family: ui-monospace, monospace;
+    background: rgba(79, 139, 255, 0.12);
+    padding: 0.05rem 0.3rem;
+    border-radius: 3px;
   }
   .status {
     font-size: 0.75rem;
