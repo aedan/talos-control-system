@@ -271,14 +271,42 @@ async fn run_session(socket: WebSocket, mut attached: kube::api::AttachedProcess
         }
     }
 
+    // Capture the status future first: abort() drops the sender, which would
+    // otherwise make take_status() resolve to None.
+    let status_fut = attached.take_status();
     // Tear down: abort the process; dropping in_tx ends the stdin task.
     attached.abort();
     drop(in_tx);
     stdin_task.abort();
     out_task.abort();
-    let _ = ws_tx.send(Message::Text(
-        serde_json::json!({"type":"exit","code":0}).to_string(),
-    ))
-    .await;
+
+    // Surface the real status from the kubelet (exit code + failure message)
+    // instead of always reporting success.
+    let status = match status_fut {
+        Some(f) => f.await,
+        None => None,
+    };
+    let (code, message) = match status {
+        Some(s) if s.status.as_deref() != Some("Success") => (
+            s.code.unwrap_or(1),
+            Some(
+                s.message
+                    .clone()
+                    .or_else(|| s.reason.clone())
+                    .unwrap_or_else(|| "command failed".to_string()),
+            ),
+        ),
+        _ => (0, None),
+    };
+    if let Some(msg) = message {
+        let payload = serde_json::json!({
+            "type": "stderr",
+            "data": base64::engine::general_purpose::STANDARD.encode(format!("{msg}\n").into_bytes()),
+        });
+        let _ = ws_tx.send(Message::Text(payload.to_string())).await;
+    }
+    let _ = ws_tx
+        .send(Message::Text(serde_json::json!({"type": "exit", "code": code}).to_string()))
+        .await;
     let _ = ws_tx.close().await;
 }

@@ -41,6 +41,7 @@ pub async fn run(client: &Client, cluster: &str, args: &AttachArgs) -> super::su
     let mut err = io::stderr();
     let mut stdin = tokio::io::stdin();
     let mut buf = [0u8; 4096];
+    let mut exit_code: i32 = 0;
 
     loop {
         tokio::select! {
@@ -81,7 +82,10 @@ pub async fn run(client: &Client, cluster: &str, args: &AttachArgs) -> super::su
                                         }
                                     }
                                 }
-                                Some("exit") => break,
+                                Some("exit") => {
+                                    exit_code = v.get("code").and_then(|c| c.as_i64()).unwrap_or(0) as i32;
+                                    break;
+                                }
                                 _ => {}
                             }
                         }
@@ -94,5 +98,8 @@ pub async fn run(client: &Client, cluster: &str, args: &AttachArgs) -> super::su
     }
 
     let _ = ws.close(None).await;
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
     Ok(())
 }

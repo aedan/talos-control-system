@@ -56,16 +56,17 @@ pub async fn run(client: &Client, cluster: &str, args: &ExecArgs) -> super::supe
     let mut err = io::stderr();
     let mut stdin = tokio::io::stdin();
     let mut buf = [0u8; 4096];
+    let mut exit_code: i32 = 0;
+    let mut stdin_open = true;
 
     loop {
         tokio::select! {
-            // Read local stdin and forward to the pod.
-            r = stdin.read(&mut buf) => {
+            // Read local stdin and forward to the pod. Disabled once local
+            // stdin hits EOF (non-interactive) so we keep draining output.
+            r = stdin.read(&mut buf), if stdin_open => {
                 match r {
                     Ok(0) => {
-                        // EOF: close the stdin side and keep draining output.
-                        let _ = ws.send(WsMsg::Close(None)).await;
-                        break;
+                        stdin_open = false;
                     }
                     Ok(k) => {
                         let b64 = base64::engine::general_purpose::STANDARD.encode(&buf[..k]);
@@ -74,7 +75,7 @@ pub async fn run(client: &Client, cluster: &str, args: &ExecArgs) -> super::supe
                             break;
                         }
                     }
-                    Err(_) => break,
+                    Err(_) => stdin_open = false,
                 }
             }
             // Receive pod output.
@@ -99,7 +100,10 @@ pub async fn run(client: &Client, cluster: &str, args: &ExecArgs) -> super::supe
                                         }
                                     }
                                 }
-                                Some("exit") => break,
+                                Some("exit") => {
+                                    exit_code = v.get("code").and_then(|c| c.as_i64()).unwrap_or(0) as i32;
+                                    break;
+                                }
                                 _ => {}
                             }
                         }
@@ -112,5 +116,8 @@ pub async fn run(client: &Client, cluster: &str, args: &ExecArgs) -> super::supe
     }
 
     let _ = ws.close(None).await;
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
     Ok(())
 }
