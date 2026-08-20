@@ -15,7 +15,7 @@
   } from '$lib/api/types';
   import WorkloadsExplorer from '$lib/explorer/WorkloadsExplorer.svelte';
 
-  type Tab = 'nodes' | 'machines' | 'workloads' | 'config' | 'backups';
+  type Tab = 'nodes' | 'machines' | 'config' | 'backups';
 
   let cluster = $state<any>(null);
   let loading = $state(true);
@@ -65,21 +65,17 @@
   let savingSchedule = $state(false);
 
   // ── header actions ────────────────────────────────────────────────
-  let talosconfigText = $state('');
-  let kubeconfigText = $state('');
   let talosTestResults = $state<
     Array<{ address?: string; ok: boolean; talosVersion?: string; error?: string }>
   >([]);
   let upgradeImage = $state('ghcr.io/siderolabs/installer:v1.9.0');
   let upgradeMaxUnavail = $state(1);
   let upgradeCpLast = $state(true);
-  let desiredWorkers = $state(0);
 
   const cid = $page.params.id;
 
   async function loadCluster() {
     cluster = await client.get(`/clusters/${cid}`);
-    desiredWorkers = cluster.workerSize ?? cluster.worker_size ?? 0;
     scheduleHours = cluster.backupScheduleHours ?? 0;
     retention = cluster.backupRetention ?? 10;
   }
@@ -177,21 +173,6 @@
     }
   }
 
-  async function saveKubeconfig() {
-    if (!kubeconfigText.trim()) return;
-    busy = true;
-    try {
-      await client.put(`/clusters/${cid}/kubeconfig`, { kubeconfig: kubeconfigText });
-      await loadCluster();
-      kubeconfigText = '';
-      success('Kubeconfig saved (encrypted at rest)');
-    } catch (e: unknown) {
-      notifyError(e instanceof Error ? e.message : 'Failed to save kubeconfig');
-    } finally {
-      busy = false;
-    }
-  }
-
   async function probeVersions() {
     busy = true;
     try {
@@ -207,21 +188,6 @@
       );
     } catch (e: unknown) {
       notifyError(e instanceof Error ? e.message : 'Version probe failed');
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function saveTalosconfig() {
-    if (!talosconfigText.trim()) return;
-    busy = true;
-    try {
-      await client.put(`/clusters/${cid}/talosconfig`, { talosconfig: talosconfigText });
-      await loadCluster();
-      talosconfigText = '';
-      success('Talosconfig saved (encrypted at rest)');
-    } catch (e: unknown) {
-      notifyError(e instanceof Error ? e.message : 'Failed to save talosconfig');
     } finally {
       busy = false;
     }
@@ -243,20 +209,6 @@
       success(`Upgrade job queued${res.job?.id ? `: ${res.job.id}` : ''}`);
     } catch (e: unknown) {
       notifyError(e instanceof Error ? e.message : 'Failed to start cluster upgrade');
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function scaleWorkers() {
-    if (!confirm(`Set desired worker size to ${desiredWorkers}? (inventory only)`)) return;
-    busy = true;
-    try {
-      await client.post(`/clusters/${cid}/scale`, { desiredWorkers: Number(desiredWorkers) });
-      await loadCluster();
-      success(`Desired workers set to ${desiredWorkers}`);
-    } catch (e: unknown) {
-      notifyError(e instanceof Error ? e.message : 'Scale failed');
     } finally {
       busy = false;
     }
@@ -510,36 +462,23 @@
       </div>
     {/if}
 
-    <details class="panel">
+    <details class="panel" open>
       <summary>Cluster actions</summary>
       <div class="actions-stack">
         <div class="action-block">
-          <h3>Attach / replace talosconfig</h3>
-          <textarea bind:value={talosconfigText} rows="6" placeholder="Paste ~/.talos/config YAML"></textarea>
-          <Button variant="primary" size="sm" onclick={saveTalosconfig} disabled={busy || !talosconfigText.trim()}>
-            Save talosconfig
-          </Button>
-        </div>
-        <div class="action-block">
-          <h3>Attach / replace kubeconfig</h3>
-          <p class="hint">Needed for the Workloads explorer and “Refresh from K8s”.</p>
-          <textarea bind:value={kubeconfigText} rows="6" placeholder="Paste ~/.kube/config YAML"></textarea>
-          <Button variant="primary" size="sm" onclick={saveKubeconfig} disabled={busy || !kubeconfigText.trim()}>
-            Save kubeconfig
-          </Button>
-        </div>
-        <div class="action-block">
-          <h3>Scale workers (inventory target)</h3>
-          <div class="inline-form">
-            <label>
-              Desired workers
-              <input type="number" min="0" max="500" bind:value={desiredWorkers} />
-            </label>
-            <Button variant="primary" size="sm" onclick={scaleWorkers} disabled={busy}>
-              Update desired size
-            </Button>
-            <span class="hint">Does not provision metal — update inventory only</span>
-          </div>
+          <h3>Workloads (Kubernetes)</h3>
+          <p class="hint">
+            Browse and manage pods, deployments, services, events, and nodes for this
+            cluster. Uses this cluster's stored kubeconfig — it never leaves the server.
+          </p>
+          {#if !hasKubeconfig}
+            <div class="empty-state">
+              <p>No kubeconfig stored for this cluster</p>
+              <p class="hint">Re-import the cluster with its kubeconfig to enable the explorer.</p>
+            </div>
+          {:else}
+            <WorkloadsExplorer clusterId={cid ?? ''} />
+          {/if}
         </div>
         <div class="action-block">
           <h3>Rolling Talos upgrade</h3>
@@ -568,7 +507,6 @@
     <nav class="tabs">
       <button class:active={tab === 'nodes'} onclick={() => selectTab('nodes')}>Nodes</button>
       <button class:active={tab === 'machines'} onclick={() => selectTab('machines')}>Machines</button>
-      <button class:active={tab === 'workloads'} onclick={() => selectTab('workloads')}>Workloads</button>
       <button class:active={tab === 'config'} onclick={() => selectTab('config')}>Config</button>
       <button class:active={tab === 'backups'} onclick={() => selectTab('backups')}>Backups</button>
     </nav>
@@ -652,22 +590,6 @@
               {/each}
             </tbody>
           </table>
-        {/if}
-      </div>
-    {/if}
-
-    <!-- ── Workloads (K8s explorer) ──────────────────────────────── -->
-    {#if tab === 'workloads'}
-      <div class="tab-panel">
-        {#if !hasKubeconfig}
-          <div class="empty-state">
-            <p>No kubeconfig attached to this cluster</p>
-            <p class="hint">
-              Attach a kubeconfig under “Cluster actions” to enable the workloads explorer.
-            </p>
-          </div>
-        {:else}
-          <WorkloadsExplorer clusterId={cid ?? ''} />
         {/if}
       </div>
     {/if}
