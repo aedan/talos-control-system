@@ -34,9 +34,9 @@
   let applyResults = $state<ApplyResult[] | null>(null);
   let drainInfo = $state<{ evicted: number; skipped: number; errors: number } | null>(null);
 
-  const isDeployment = $derived(selection?.kind === 'deployment');
-  const isNode = $derived(selection?.kind === 'node');
-  const isPod = $derived(selection?.kind === 'pod');
+  const isDeployment = $derived(selection?.kind === 'deployments');
+  const isNode = $derived(selection?.kind === 'nodes');
+  const isPod = $derived(selection?.kind === 'pods');
 
   function target(): string {
     if (!selection) return '';

@@ -241,8 +241,8 @@ export async function getLogs(clusterId: string, opts: LogsOptions): Promise<str
  * Each line is delivered to `onLine`.
  */
 export function streamLogs(clusterId: string, opts: LogsOptions, onLine: (line: string) => void): () => void {
-  const o = { ...opts, follow: true };
-  const url = `${API_BASE}/clusters/${clusterId}/k8s/logs${qs(o)}${qs({ token: token() ?? undefined })}`;
+  const o = { ...opts, follow: true, token: token() ?? undefined };
+  const url = `${API_BASE}/clusters/${clusterId}/k8s/logs${qs(o)}`;
   const evt = new EventSource(url);
   evt.onmessage = (e) => {
     if (e.data) onLine(e.data);
@@ -283,7 +283,9 @@ export function openSession(
     name: opts.name,
     container: opts.container,
     tty: opts.tty,
-    command: opts.command?.join(' '),
+    // JSON array preserves quoting (e.g. sh -c "a b"); the server parses it
+    // and falls back to space-splitting for legacy string commands.
+    command: opts.command?.length ? JSON.stringify(opts.command) : undefined,
     token: token() ?? undefined,
   });
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
