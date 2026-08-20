@@ -47,9 +47,9 @@ impl Client {
         Ok(Self { http, server, token })
     }
 
-    /// Absolute URL for a path that already contains its query string (used for WebSocket).
+    /// Absolute WebSocket URL for a path that already contains its query string.
     pub fn absolute(&self, path: &str) -> String {
-        format!("{}{}", self.server.trim_end_matches('/'), path)
+        ws_url(&self.server, path)
     }
 
     /// GET a JSON endpoint, returning the parsed body.
@@ -157,4 +157,48 @@ impl Client {
 /// Index of the byte just past the end of the first complete SSE frame, or None.
 fn find_frame_end(buf: &[u8]) -> Option<usize> {
     buf.windows(2).position(|w| w == b"\n\n").map(|i| i + 1)
+}
+
+/// Build an absolute WebSocket URL from an http(s) server base + path (with query).
+/// The WS client requires a `ws://` or `wss://` scheme, so the server's http(s)
+/// scheme is upgraded accordingly.
+fn ws_url(server: &str, path: &str) -> String {
+    let base = server.trim_end_matches('/');
+    let upgraded = if let Some(rest) = base.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = base.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        base.to_string()
+    };
+    format!("{}{}", upgraded, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ws_url;
+
+    #[test]
+    fn http_upgrades_to_ws() {
+        assert_eq!(
+            ws_url("http://10.0.0.1:8081", "/api/clusters/x/k8s/exec?ns=a&name=b"),
+            "ws://10.0.0.1:8081/api/clusters/x/k8s/exec?ns=a&name=b"
+        );
+    }
+
+    #[test]
+    fn https_upgrades_to_wss() {
+        assert_eq!(
+            ws_url("https://tcs.example.com/", "/api/clusters/x/k8s/exec"),
+            "wss://tcs.example.com/api/clusters/x/k8s/exec"
+        );
+    }
+
+    #[test]
+    fn trailing_slash_stripped() {
+        assert_eq!(
+            ws_url("http://10.0.0.1:8081///", "/p"),
+            "ws://10.0.0.1:8081/p"
+        );
+    }
 }
