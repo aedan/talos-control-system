@@ -539,15 +539,17 @@ fn map_kube_err(e: kube::Error) -> AppError {
 /// Build the absolute API path for a resolved kind.
 fn url_path_for(r: &ResolvedKind, ns: Option<&str>) -> String {
     let group = if r.group.is_empty() {
-        "api".to_string()
+        "api"
     } else {
-        "apis".to_string()
+        "apis"
     };
+    // The URL version segment is the full apiVersion: "v1" for core,
+    // "apps/v1" for group resources (kube discovery keeps `version` bare).
     match ns {
-        // Namespaced: /{api|apis}/{version}/namespaces/{ns}/{plural}
-        Some(n) if r.namespaced => format!("/{group}/{}/namespaces/{}/{}", r.version, n, r.plural),
-        // Cluster-scoped (or no ns): /{api|apis}/{version}/{plural}
-        _ => format!("/{group}/{}/{}", r.version, r.plural),
+        // Namespaced: /{api|apis}/{apiVersion}/namespaces/{ns}/{plural}
+        Some(n) if r.namespaced => format!("/{group}/{}/namespaces/{}/{}", r.api_version, n, r.plural),
+        // Cluster-scoped (or no ns): /{api|apis}/{apiVersion}/{plural}
+        _ => format!("/{group}/{}/{}", r.api_version, r.plural),
     }
 }
 
@@ -1012,11 +1014,11 @@ impl Default for K8sClientPool {
 mod tests {
     use super::*;
 
-    fn rk(group: &str, version: &str, kind: &str, plural: &str, namespaced: bool) -> ResolvedKind {
+    fn rk(group: &str, version: &str, api_version: &str, kind: &str, plural: &str, namespaced: bool) -> ResolvedKind {
         ResolvedKind {
             group: group.to_string(),
             version: version.to_string(),
-            api_version: format!("{}/{}", if group.is_empty() { "v1" } else { group }, version),
+            api_version: api_version.to_string(),
             kind: kind.to_string(),
             plural: plural.to_string(),
             namespaced,
@@ -1025,26 +1027,27 @@ mod tests {
 
     #[test]
     fn path_namespaced_core() {
-        let r = rk("", "v1", "Pod", "pods", true);
+        let r = rk("", "v1", "v1", "Pod", "pods", true);
         assert_eq!(url_path_for(&r, Some("kube-system")), "/api/v1/namespaces/kube-system/pods");
     }
 
     #[test]
     fn path_namespaced_group() {
-        // kube discovery populates `version` as the full "group/version".
-        let r = rk("apps", "apps/v1", "Deployment", "deployments", true);
+        // kube discovery keeps `version` bare ("v1"); the URL needs the full
+        // apiVersion ("apps/v1").
+        let r = rk("apps", "v1", "apps/v1", "Deployment", "deployments", true);
         assert_eq!(url_path_for(&r, Some("default")), "/apis/apps/v1/namespaces/default/deployments");
     }
 
     #[test]
     fn path_cluster_scoped_ignores_ns() {
-        let r = rk("", "v1", "Node", "nodes", false);
+        let r = rk("", "v1", "v1", "Node", "nodes", false);
         assert_eq!(url_path_for(&r, Some("default")), "/api/v1/nodes");
     }
 
     #[test]
     fn path_no_namespace() {
-        let r = rk("", "v1", "Pod", "pods", true);
+        let r = rk("", "v1", "v1", "Pod", "pods", true);
         assert_eq!(url_path_for(&r, None), "/api/v1/pods");
     }
 }
