@@ -87,6 +87,7 @@
   );
   const isPod = $derived(activeKind === 'pods');
   const containers = $derived(podDetail?.summary.containers ?? []);
+  const containerDetails = $derived(podDetail?.containers ?? []);
 
   async function loadNamespaces() {
     try {
@@ -238,6 +239,7 @@
             ns={String(selected.namespace ?? 'default')}
             name={String(selected.name)}
             containers={containers}
+            {containerDetails}
           />
         {:else if detailTab === 'actions'}
           <Actions {clusterId} {selection} onMutated={loadList} />

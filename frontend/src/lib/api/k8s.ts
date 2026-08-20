@@ -77,6 +77,10 @@ export interface ContainerDetail {
   state: string;
   startedAt: string;
   lastState: string;
+  /** Container spec `command` (overrides the image entrypoint). Empty = image entrypoint runs. */
+  command: string[];
+  /** Container spec `args`. */
+  args: string[];
 }
 
 export interface PodDetail {

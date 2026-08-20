@@ -257,6 +257,11 @@ pub struct ContainerDetail {
     pub state: String,
     pub started_at: String,
     pub last_state: String,
+    /// The container spec's `command` (overrides the image entrypoint). Empty
+    /// means the image's own entrypoint runs.
+    pub command: Vec<String>,
+    /// The container spec's `args` (passed to the command/entrypoint).
+    pub args: Vec<String>,
 }
 
 fn state_str(state: &k8s_openapi::api::core::v1::ContainerState) -> String {
@@ -271,7 +276,10 @@ fn state_str(state: &k8s_openapi::api::core::v1::ContainerState) -> String {
     }
 }
 
-pub fn container_detail(cs: &k8s_openapi::api::core::v1::ContainerStatus) -> ContainerDetail {
+pub fn container_detail(
+    cs: &k8s_openapi::api::core::v1::ContainerStatus,
+    spec: Option<&k8s_openapi::api::core::v1::Container>,
+) -> ContainerDetail {
     ContainerDetail {
         name: cs.name.clone(),
         image: cs.image.clone(),
@@ -286,6 +294,8 @@ pub fn container_detail(cs: &k8s_openapi::api::core::v1::ContainerStatus) -> Con
             .map(|t| ts(t).format("%Y-%m-%dT%H:%M:%SZ").to_string())
             .unwrap_or_default(),
         last_state: cs.last_state.as_ref().map(state_str).unwrap_or_default(),
+        command: spec.and_then(|c| c.command.clone()).unwrap_or_default(),
+        args: spec.and_then(|c| c.args.clone()).unwrap_or_default(),
     }
 }
 
@@ -299,11 +309,19 @@ pub struct PodDetail {
 }
 
 pub fn pod_detail(pod: &Pod) -> PodDetail {
+    let spec_containers = pod.spec.as_ref().map(|s| s.containers.clone()).unwrap_or_default();
     let containers = pod
         .status
         .as_ref()
         .and_then(|s| s.container_statuses.clone())
-        .map(|cs| cs.iter().map(container_detail).collect())
+        .map(|cs| {
+            cs.iter()
+                .map(|c| {
+                    let spec = spec_containers.iter().find(|sc| sc.name == c.name);
+                    container_detail(c, spec)
+                })
+                .collect()
+        })
         .unwrap_or_default();
     let labels = pod.metadata.labels.clone().unwrap_or_default();
     let yaml = serde_yaml::to_string(pod).unwrap_or_default();
@@ -612,7 +630,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let d = container_detail(&cs);
+        let d = container_detail(&cs, None);
         assert_eq!(d.name, "c1");
         assert_eq!(d.image, "img:1");
         assert!(d.ready);
@@ -620,6 +638,8 @@ mod tests {
         assert_eq!(d.state, "running");
         assert!(!d.started_at.is_empty());
         assert!(d.started_at.ends_with('Z'));
+        assert!(d.command.is_empty());
+        assert!(d.args.is_empty());
     }
 
     #[test]

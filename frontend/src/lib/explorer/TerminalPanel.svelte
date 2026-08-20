@@ -3,13 +3,14 @@
   import { Terminal } from '@xterm/xterm';
   import { FitAddon } from '@xterm/addon-fit';
   import '@xterm/xterm/css/xterm.css';
-  import { openSession, type TermSocket } from '$lib/api/k8s';
+  import { openSession, type TermSocket, type ContainerDetail } from '$lib/api/k8s';
 
   let {
     clusterId,
     ns,
     name,
     containers = [],
+    containerDetails = [],
     mode = 'exec',
     command = [],
     onExit,
@@ -18,6 +19,7 @@
     ns: string;
     name: string;
     containers?: string[];
+    containerDetails?: ContainerDetail[];
     mode?: 'exec' | 'attach';
     command?: string[];
     onExit?: (code: number) => void;
@@ -28,6 +30,13 @@
   let cmdInput = $state(command.length ? command.join(' ') : 'sh');
   let termEl: HTMLDivElement | undefined = $state();
   let status = $state<'connecting' | 'running' | 'exited'>('connecting');
+
+  // The container currently targeted (by name, else the first). Used to surface
+  // its real entrypoint so distroless pods (no sh/bash) are actionable.
+  const activeDetail = $derived(
+    containerDetails.find((c) => c.name === container) ?? containerDetails[0] ?? null
+  );
+  const entrypoint = $derived(activeDetail?.command?.[0] ?? null);
 
   let term: Terminal | undefined;
   let fit: FitAddon | undefined;
@@ -127,9 +136,25 @@
   </div>
   {#if mode === 'exec'}
     <div class="term-hint">
-      Leave the command as <code>sh</code> for an interactive shell. Many system
-      pods are distroless (no <code>sh</code>/<code>bash</code>) — type the container's
-      actual binary (e.g. <code>/coredns -version</code>) to inspect it.
+      {#if activeDetail}
+        <span class="hint-img" title="Container image">
+          <code>{activeDetail.image}</code>
+        </span>
+      {/if}
+      <span>
+        Leave the command as <code>sh</code> for an interactive shell. If that fails —
+        distroless images have no <code>sh</code>/<code>bash</code> — run a specific
+        command instead, or use the Logs tab for output.
+      </span>
+      {#if entrypoint}
+        <button
+          class="fill-btn"
+          title="Fill the command field with this container's entrypoint"
+          onclick={() => (cmdInput = entrypoint)}
+        >
+          Use {entrypoint}
+        </button>
+      {/if}
     </div>
   {/if}
   <div class="term-host" bind:this={termEl}></div>
@@ -198,17 +223,39 @@
     min-width: 220px;
   }
   .term-hint {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.5rem;
     padding: 0.4rem 0.75rem;
     font-size: 0.74rem;
     color: var(--tcs-text-muted);
     background: var(--tcs-surface);
     border-bottom: 1px solid var(--tcs-border);
   }
+  .term-hint .hint-img {
+    opacity: 0.85;
+  }
+  .term-hint .hint-img code {
+    font-size: 0.72rem;
+  }
   .term-hint code {
     font-family: ui-monospace, monospace;
     background: rgba(79, 139, 255, 0.12);
     padding: 0.05rem 0.3rem;
     border-radius: 3px;
+  }
+  .term-hint .fill-btn {
+    background: none;
+    border: 1px solid var(--tcs-border);
+    border-radius: 4px;
+    color: var(--tcs-secondary);
+    font-size: 0.72rem;
+    padding: 0.1rem 0.45rem;
+    cursor: pointer;
+  }
+  .term-hint .fill-btn:hover {
+    border-color: var(--tcs-secondary);
   }
   .status {
     font-size: 0.75rem;
