@@ -68,12 +68,14 @@ pub async fn log_action(
         "Audit"
     );
 
+    // The column is TEXT; store the hyphenated string (not a Uuid BLOB) so
+    // reads back as String work on both SQLite and Postgres.
     if let Err(e) = pool
         .execute(
             "INSERT INTO audit_logs (id, user_id, resource_type, resource_id, action, details, created_at)
              VALUES (?, NULL, ?, ?, ?, ?, ?)",
             &[
-                SqlVal::Uuid(id),
+                SqlVal::text(id.to_string()),
                 SqlVal::text(resource),
                 SqlVal::text(""),
                 SqlVal::text(action),

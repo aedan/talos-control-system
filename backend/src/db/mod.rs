@@ -128,5 +128,18 @@ pub async fn run_migrations(pool: &DbPool) -> Result<(), AppError> {
         tracing::info!(file = %name, "Migration applied");
     }
 
+    // One-time repair: audit_logs.id was historically written as a raw 16-byte
+    // BLOB on SQLite (SqlVal::Uuid) but the column is TEXT and is read back as
+    // String. Convert any legacy BLOB ids to hyphenated text. No-op on
+    // Postgres (uuid params auto-cast to text) and idempotent once fixed.
+    if !pool.is_postgres() {
+        let _ = pool
+            .execute(
+                "UPDATE audit_logs SET id = substr(hex(id),1,8) || '-' || substr(hex(id),9,4) || '-' || substr(hex(id),13,4) || '-' || substr(hex(id),17,4) || '-' || substr(hex(id),21,12) WHERE typeof(id) = 'blob'",
+                &[],
+            )
+            .await;
+    }
+
     Ok(())
 }
