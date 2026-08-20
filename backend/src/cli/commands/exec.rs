@@ -17,7 +17,7 @@ use base64::Engine as _;
 pub struct ExecArgs {
     /// Pod name.
     pub pod: String,
-    #[arg(short, long)]
+    #[arg(short, long, alias = "ns")]
     pub namespace: Option<String>,
     #[arg(short, long)]
     pub container: Option<String>,

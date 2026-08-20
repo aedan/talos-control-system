@@ -8,7 +8,7 @@ use super::client::Client;
 pub struct ScaleArgs {
     /// Deployment name.
     pub deployment: String,
-    #[arg(short, long)]
+    #[arg(short, long, alias = "ns")]
     pub namespace: Option<String>,
     /// Target replica count.
     #[arg(short, long)]

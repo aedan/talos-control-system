@@ -17,7 +17,7 @@ pub struct GetArgs {
     #[arg(value_name = "NAME")]
     pub name: Option<String>,
     /// Namespace (defaults to all for namespaced kinds).
-    #[arg(short, long)]
+    #[arg(short, long, alias = "ns")]
     pub namespace: Option<String>,
     /// Output format: table, wide, json, yaml.
     #[arg(short = 'o', long, default_value = "table")]
