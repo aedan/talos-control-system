@@ -109,7 +109,15 @@ pub async fn exec_ws(
     let cmd: Vec<String> = q
         .command
         .as_deref()
-        .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
+        .map(|c| {
+            // Prefer a JSON array (preserves quoting, e.g. sh -c "a b");
+            // fall back to space-splitting for legacy clients.
+            if let Ok(arr) = serde_json::from_str::<Vec<String>>(c) {
+                arr
+            } else {
+                c.split_whitespace().map(|s| s.to_string()).collect()
+            }
+        })
         .filter(|v: &Vec<String>| !v.is_empty())
         .unwrap_or_else(|| vec!["sh".to_string(), "-c".to_string(), "exit 0".to_string()]);
     let attached = client

@@ -46,7 +46,7 @@ pub async fn run(client: &Client, cluster: &str, args: &ExecArgs) -> super::supe
     if let Some(c) = &args.container {
         q.push_str(&format!("&container={c}"));
     }
-    q.push_str(&format!("&command={}", urlencoding::encode(&cmd.join(" "))));
+    q.push_str(&format!("&command={}", urlencoding::encode(&serde_json::to_string(&cmd).unwrap_or_default())));
 
     let (mut ws, _) = connect_async(client.absolute(&q))
         .await
