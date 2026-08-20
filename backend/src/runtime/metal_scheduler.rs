@@ -518,7 +518,6 @@ async fn load_config_yaml(
                         &all_addresses,
                         &cp_addresses,
                         "cluster.local",
-                        None, // uses DEFAULT_SYSTEM_EXTENSIONS
                     )
                     .await?;
 

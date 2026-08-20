@@ -44,13 +44,6 @@ pub struct NetworkConfigParams {
     pub hostname: String,
 }
 
-/// Default kernel module extensions for metal provisioning.
-pub const DEFAULT_SYSTEM_EXTENSIONS: &[&str] = &[
-    "siderolabs/bnx2-bnx2x",
-    "siderolabs/iscsi-tools",
-    "siderolabs/util-linux-tools",
-];
-
 impl ProvisionController {
     pub fn new(pool: DbPool, jwt_secret: String) -> Self {
         Self { pool, jwt_secret }
@@ -70,7 +63,6 @@ impl ProvisionController {
         cert_sans: &[String],
         cp_addresses: &[String],
         cluster_domain: &str,
-        system_extensions: Option<Vec<String>>,
     ) -> Result<ProvisionArtifact, AppError> {
         if name.trim().is_empty() || endpoint.trim().is_empty() {
             return Err(AppError::InvalidInput(
@@ -78,10 +70,6 @@ impl ProvisionController {
             ));
         }
 
-        let ext_refs: Vec<String> = system_extensions
-            .clone()
-            .unwrap_or_else(|| DEFAULT_SYSTEM_EXTENSIONS.iter().map(|s| (*s).to_owned()).collect());
-        let ext_slice: Vec<&str> = ext_refs.iter().map(|s| s.as_str()).collect();
         let secrets = generate_talos_secrets(
             name,
             endpoint,
@@ -93,7 +81,6 @@ impl ProvisionController {
             cert_sans,
             cp_addresses,
             cluster_domain,
-            &ext_slice,
         )?;
 
         let secrets_enc = secrets::encrypt(&self.jwt_secret, &secrets.talosconfig_yaml)?;
@@ -181,7 +168,6 @@ fn generate_talos_secrets(
     cert_sans: &[String],
     cp_addresses: &[String],
     cluster_domain: &str,
-    _system_extensions: &[&str],
 ) -> Result<GeneratedSecrets, AppError> {
     let ep = endpoint
         .trim_start_matches("https://")
@@ -265,7 +251,6 @@ fn generate_talos_secrets(
         &cert_san_list,
         cp_addresses,
         cluster_domain,
-        _system_extensions,
     );
 
     let worker_yaml = build_worker_yaml(
@@ -283,7 +268,6 @@ fn generate_talos_secrets(
         wipe,
         &cert_san_list,
         cluster_domain,
-        _system_extensions,
     );
 
     let talosconfig_yaml = build_talosconfig_yaml(
@@ -556,7 +540,6 @@ fn build_controlplane_yaml(
     cert_sans: &[String],
     cp_addresses: &[String],
     cluster_domain: &str,
-    _system_extensions: &[&str],
 ) -> String {
     let k8s_ver = k8s_version.strip_prefix('v').unwrap_or(k8s_version);
     let sa_key_b64 = base64::engine::general_purpose::STANDARD.encode(sa_key.as_bytes());
@@ -729,7 +712,6 @@ fn build_worker_yaml(
     wipe: bool,
     cert_sans: &[String],
     cluster_domain: &str,
-    _system_extensions: &[&str],
 ) -> String {
     let cert_sans_yaml = if cert_sans.is_empty() {
         "  certSANs: []".to_string()
