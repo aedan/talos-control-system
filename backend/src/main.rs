@@ -87,7 +87,7 @@ fn print_help() {
                                            env: TCS_SQLITE_PATH, TCS_POSTGRES_URL\n\
            tcs help                        Show this message\n\n\
          CLI (kubectl-like, thin client over the TCS API):\n\
-           tcs login <email> <password>\n\
+           tcs login [email] [password]   (or --email/--password; prompts if omitted)\n\
            tcs clusters\n\
            tcs get <kind> [name] [--ns] [-o table|wide|json|yaml]\n\
            tcs describe <kind> <name> [--ns]\n\

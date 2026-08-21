@@ -26,7 +26,7 @@ pub struct Cli {
     /// Bearer token (overrides TCS_TOKEN and config).
     #[arg(short, long, global = true)]
     pub token: Option<String>,
-    /// Default cluster id (overrides TCS_CLUSTER and config).
+    /// Default cluster (name or UUID; overrides TCS_CLUSTER and config).
     #[arg(short, long, global = true)]
     pub cluster: Option<String>,
 
@@ -39,11 +39,21 @@ pub enum Command {
     /// Start the TCS control-plane server (used by the systemd unit).
     Serve,
     /// Authenticate and store a token in ~/.tcs/config.
+    ///
+    /// With no arguments, prompts for email and password interactively.
     Login {
-        /// Email address.
-        email: String,
-        /// Password.
-        password: String,
+        /// Email address (or use --email / interactive prompt).
+        #[arg(value_name = "EMAIL")]
+        email: Option<String>,
+        /// Password (or use --password / interactive prompt).
+        #[arg(value_name = "PASSWORD")]
+        password: Option<String>,
+        /// Email address (alternative to the positional EMAIL).
+        #[arg(long = "email")]
+        flag_email: Option<String>,
+        /// Password (alternative to the positional PASSWORD).
+        #[arg(long = "password")]
+        flag_password: Option<String>,
     },
     /// List clusters.
     Clusters,
@@ -77,14 +87,21 @@ pub async fn run_cli(cli: Cli) -> CliResult<()> {
         return Err(CliError::Other("no command given".into()));
     };
     match command {
-        Command::Login { email, password } => do_login(&cli.server, email, password).await,
+        Command::Login { email, password, flag_email, flag_password } => {
+            do_login(
+                &cli.server,
+                flag_email.or(email),
+                flag_password.or(password),
+            )
+            .await
+        }
         Command::Clusters => {
             let client = Client::new(cli.server.as_deref(), cli.token.as_deref())?;
             do_clusters(&client).await
         }
         _ => {
             let client = Client::new(cli.server.as_deref(), cli.token.as_deref())?;
-            let cluster = commands::require_cluster(&client, cli.cluster.as_deref())?;
+            let cluster = commands::require_cluster(&client, cli.cluster.as_deref()).await?;
             match &command {
                 Command::Get(a) => get::run(&client, &cluster, a).await,
                 Command::Describe(a) => describe::run(&client, &cluster, a).await,
@@ -103,7 +120,19 @@ pub async fn run_cli(cli: Cli) -> CliResult<()> {
     }
 }
 
-async fn do_login(server_flag: &Option<String>, email: String, password: String) -> CliResult<()> {
+async fn do_login(
+    server_flag: &Option<String>,
+    email: Option<String>,
+    password: Option<String>,
+) -> CliResult<()> {
+    let email = match email {
+        Some(e) if !e.trim().is_empty() => e,
+        _ => prompt_line("Email: ")?,
+    };
+    let password = match password {
+        Some(p) if !p.trim().is_empty() => p,
+        _ => prompt_password("Password: ")?,
+    };
     let server = config::CliConfig::resolve_server(server_flag.as_deref());
     let http = reqwest::Client::new();
     let res = http
@@ -154,4 +183,30 @@ async fn do_clusters(client: &Client) -> CliResult<()> {
     }
     println!("{}", output::render(&out, output::Format::Table));
     Ok(())
+}
+
+/// Prompt for a line of input (visible), reading from stdin.
+fn prompt_line(label: &str) -> CliResult<String> {
+    use std::io::{Read, Write};
+    print!("{label}");
+    std::io::stdout().flush().map_err(CliError::Io)?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).map_err(CliError::Io)?;
+    let line = line.trim().to_string();
+    if line.is_empty() {
+        return Err(CliError::Other("no input provided".into()));
+    }
+    Ok(line)
+}
+
+/// Prompt for a password (hidden), reading from the tty.
+fn prompt_password(label: &str) -> CliResult<String> {
+    print!("{label}");
+    std::io::Write::flush(&mut std::io::stdout()).map_err(CliError::Io)?;
+    let pw = rpassword::read_password().map_err(CliError::Io)?;
+    println!();
+    if pw.trim().is_empty() {
+        return Err(CliError::Other("no input provided".into()));
+    }
+    Ok(pw)
 }

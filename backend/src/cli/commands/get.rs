@@ -19,6 +19,9 @@ pub struct GetArgs {
     /// Namespace (defaults to all for namespaced kinds).
     #[arg(short, long, alias = "ns")]
     pub namespace: Option<String>,
+    /// List across all namespaces (default for list; kept for kubectl parity).
+    #[arg(short = 'A', long = "all-namespaces")]
+    pub all_namespaces: bool,
     /// Output format: table, wide, json, yaml.
     #[arg(short = 'o', long, default_value = "table")]
     pub output: String,

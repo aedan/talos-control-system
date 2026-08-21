@@ -31,9 +31,48 @@ pub struct CommonArgs {
 }
 
 /// Resolve the target cluster id from `--cluster`/env/config, erroring if absent.
-pub fn require_cluster(client: &Client, cluster_flag: Option<&str>) -> super::client::CliResult<String> {
-    let _ = client;
-    let c = super::config::CliConfig::resolve_cluster(cluster_flag)
+///
+/// Accepts a full UUID, a unique UUID prefix, or a cluster name, and returns the
+/// canonical UUID (the server routes are keyed by UUID).
+pub async fn require_cluster(client: &Client, cluster_flag: Option<&str>) -> super::client::CliResult<String> {
+    let want = super::config::CliConfig::resolve_cluster(cluster_flag)
         .ok_or(super::client::CliError::NoCluster)?;
-    Ok(c)
+
+    // Fast path: already a full UUID.
+    if let Ok(uuid) = uuid::Uuid::parse_str(&want) {
+        return Ok(uuid.to_string());
+    }
+
+    // Otherwise, look it up by name or unique UUID prefix.
+    let res = client.get_json("/api/clusters").await?;
+    let rows = res
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    let mut matches: Vec<(String, String)> = Vec::new();
+    for c in &rows {
+        let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if id == want || name == want {
+            matches.push((id, name));
+        } else if id.starts_with(&want) {
+            matches.push((id, name));
+        }
+    }
+
+    match matches.len() {
+        0 => Err(super::client::CliError::Other(format!(
+            "no cluster matches '{want}' (try `tcs clusters`)"
+        ))),
+        1 => Ok(matches.remove(0).0),
+        _ => Err(super::client::CliError::Other(format!(
+            "cluster '{want}' is ambiguous: {}",
+            matches
+                .iter()
+                .map(|(id, name)| format!("{name} ({id})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
 }

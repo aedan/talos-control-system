@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.4.7] — 2026-08-21
+
+### Added
+- **Interactive `tcs login`** — run bare `tcs login` to be prompted for email (visible) and password (hidden). Positional `tcs login <email> <password>` and `--email`/`--password` flags still work.
+- **`--cluster` accepts names** — `tcs --cluster kronos get pods` now resolves the cluster by name or unique UUID prefix (the server routes are keyed by UUID). Full UUIDs still work.
+- **`-A`/`--all-namespaces`** on `tcs get` for kubectl parity (lists across all namespaces, which is already the default).
+
+### Changed
+- `tcs login` no longer requires both positional args; missing values fall back to prompts.
+
 ## [0.4.6] — 2026-08-20
 
 ### Added
