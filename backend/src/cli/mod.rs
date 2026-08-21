@@ -20,7 +20,7 @@ use commands::{
 #[derive(Parser, Debug)]
 #[command(name = "tcs", version, about = "Talos Control System CLI")]
 pub struct Cli {
-    /// TCS server URL (default http://localhost:8081).
+    /// TCS server URL (default: local server config, else http://localhost:8081).
     #[arg(short, long, global = true)]
     pub server: Option<String>,
     /// Bearer token (overrides TCS_TOKEN and config).
@@ -36,6 +36,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Start the TCS control-plane server (used by the systemd unit).
+    Serve,
     /// Authenticate and store a token in ~/.tcs/config.
     Login {
         /// Email address.
@@ -95,7 +97,7 @@ pub async fn run_cli(cli: Cli) -> CliResult<()> {
                 Command::Uncordon(a) => cordon::run_uncordon(&client, &cluster, a).await,
                 Command::Drain(a) => drain::run(&client, &cluster, a).await,
                 Command::Apply(a) => apply::run(&client, &cluster, a).await,
-                Command::Login { .. } | Command::Clusters => unreachable!(),
+                Command::Login { .. } | Command::Clusters | Command::Serve => unreachable!(),
             }
         }
     }

@@ -42,8 +42,8 @@
   <div class="page-header">
     <h1>Dashboard</h1>
     <div class="header-actions">
-      <a href="/clusters/import"><Button variant="ghost">Import Cluster</Button></a>
-      <a href="/clusters/create"><Button variant="primary">Add inventory</Button></a>
+      <a href="/clusters/import"><Button variant="ghost" title="Import an existing Talos cluster by pasting its kubeconfig">Import Cluster</Button></a>
+      <a href="/clusters/create"><Button variant="primary" title="Register new bare-metal machines into TCS inventory">Add inventory</Button></a>
     </div>
   </div>
 
@@ -91,7 +91,7 @@
               <td>{clusterNodeCount(cluster)}</td>
               <td>{cluster.createdAt ? new Date(cluster.createdAt).toLocaleDateString() : '—'}</td>
               <td>
-                <Button variant="danger" size="sm" onclick={() => handleDelete(cluster)}>Delete</Button>
+                <Button variant="danger" size="sm" title="Remove this cluster from TCS (does not delete the running cluster)" onclick={() => handleDelete(cluster)}>Delete</Button>
               </td>
             </tr>
           {/each}

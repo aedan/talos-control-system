@@ -205,7 +205,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${TCS_BIN}
+ExecStart=${TCS_BIN} serve
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536

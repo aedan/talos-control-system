@@ -227,6 +227,7 @@
           <input
             id="currentPassword"
             type="password"
+            title="Your current account password"
             bind:value={passwordForm.currentPassword}
             autocomplete="current-password"
           />
@@ -237,6 +238,7 @@
           <input
             id="newPassword"
             type="password"
+            title="The new password to set"
             bind:value={passwordForm.newPassword}
             autocomplete="new-password"
           />
@@ -247,12 +249,13 @@
           <input
             id="confirmPassword"
             type="password"
+            title="Re-enter the new password to confirm"
             bind:value={passwordForm.confirmPassword}
             autocomplete="new-password"
           />
         </div>
 
-        <Button variant="primary" onclick={changePassword} disabled={changingPassword}>
+        <Button variant="primary" title="Change the password for your current account" onclick={changePassword} disabled={changingPassword}>
           {changingPassword ? 'Changing...' : 'Change Password'}
         </Button>
       </div>
@@ -270,7 +273,7 @@
           <div class="card-header">
             <h2>LDAP / Active Directory</h2>
             <label class="toggle">
-              <input type="checkbox" checked={config.ldap.enabled} onchange={() => config.ldap.enabled = !config.ldap.enabled} />
+              <input type="checkbox" title="Enable LDAP / Active Directory authentication" checked={config.ldap.enabled} onchange={() => config.ldap.enabled = !config.ldap.enabled} />
               <span class="toggle-track">
                 <span class="toggle-thumb"></span>
               </span>
@@ -283,6 +286,7 @@
               <input
                 id="ldapServer"
                 type="text"
+                title="LDAP server URL, e.g. ldap://dc.example.com:389"
                 bind:value={config.ldap.serverUrl}
                 placeholder="ldap://dc.example.com:389"
               />
@@ -293,6 +297,7 @@
               <input
                 id="bindDn"
                 type="text"
+                title="DN of the service account used to search the directory"
                 bind:value={config.ldap.bindDn}
                 placeholder="cn=binduser,ou=users,dc=example,dc=com"
               />
@@ -303,6 +308,7 @@
               <input
                 id="bindPassword"
                 type="password"
+                title="Password for the bind account"
                 bind:value={config.ldap.bindPassword}
                 placeholder="Bind account password"
               />
@@ -313,6 +319,7 @@
               <input
                 id="userSearchBase"
                 type="text"
+                title="Base DN to search for users"
                 bind:value={config.ldap.userSearchBase}
                 placeholder="ou=users,dc=example,dc=com"
               />
@@ -323,6 +330,7 @@
               <input
                 id="userSearchFilter"
                 type="text"
+                title={String.raw`LDAP filter to match users, e.g. (mail={user})`}
                 bind:value={config.ldap.userSearchFilter}
                 placeholder="(mail=USERNAME)"
               />
@@ -331,7 +339,7 @@
 
             <div class="form-group">
               <label for="defaultRole">Default Role</label>
-              <select id="defaultRole" bind:value={config.ldap.defaultRole}>
+              <select id="defaultRole" title="Role assigned to LDAP users without a group mapping" bind:value={config.ldap.defaultRole}>
                 <option value="reader">Reader</option>
                 <option value="operator">Operator</option>
                 <option value="admin">Admin</option>
@@ -341,7 +349,7 @@
             <div class="group-mappings">
               <div class="mapping-header">
                 <h3>Group-to-Role Mappings</h3>
-                <Button variant="ghost" size="sm" onclick={addGroupMapping}>+ Add</Button>
+                <Button variant="ghost" size="sm" title="Add a group-to-role mapping" onclick={addGroupMapping}>+ Add</Button>
               </div>
 
               {#each config.ldap.groupRoleMappings as mapping, index}
@@ -349,11 +357,12 @@
                   <div class="form-group mapping-input">
                     <input
                       type="text"
+                      title="Group DN pattern to match"
                       bind:value={mapping.groupDnPattern}
                       placeholder="Group DN pattern (e.g., cn=admins,ou=groups,dc=example,dc=com)"
                     />
                   </div>
-                  <select bind:value={mapping.role}>
+                  <select title="Role granted to members of this group" bind:value={mapping.role}>
                     <option value="reader">Reader</option>
                     <option value="operator">Operator</option>
                     <option value="admin">Admin</option>
@@ -378,7 +387,7 @@
           <div class="card-header">
             <h2>OpenID Connect (OIDC)</h2>
             <label class="toggle">
-              <input type="checkbox" checked={config.oidc.enabled} onchange={() => config.oidc.enabled = !config.oidc.enabled} />
+              <input type="checkbox" title="Enable OpenID Connect (OIDC) authentication" checked={config.oidc.enabled} onchange={() => config.oidc.enabled = !config.oidc.enabled} />
               <span class="toggle-track">
                 <span class="toggle-thumb"></span>
               </span>
@@ -391,6 +400,7 @@
               <input
                 id="issuerUrl"
                 type="url"
+                title="OIDC issuer URL"
                 bind:value={config.oidc.issuerUrl}
                 placeholder="https://auth.example.com/realms/tcs"
               />
@@ -401,6 +411,7 @@
               <input
                 id="clientId"
                 type="text"
+                title="OIDC client ID"
                 bind:value={config.oidc.clientId}
                 placeholder="tcs-client"
               />
@@ -411,6 +422,7 @@
               <input
                 id="clientSecret"
                 type="password"
+                title="OIDC client secret"
                 bind:value={config.oidc.clientSecret}
                 placeholder="OIDC client secret"
               />
@@ -421,6 +433,7 @@
               <input
                 id="redirectUrl"
                 type="url"
+                title="URL the IdP redirects back to after login"
                 bind:value={config.oidc.redirectUrl}
                 placeholder="https://tcs.example.com/api/auth/oidc/callback"
               />
@@ -431,6 +444,7 @@
               <input
                 id="scopes"
                 type="text"
+                title="Comma-separated OAuth scopes to request"
                 bind:value={config.oidc.scopes}
                 placeholder="openid,profile,email"
               />
@@ -453,15 +467,15 @@
           {#if config.saml?.enabled}
             <div class="form-group">
               <label>SP Entity ID</label>
-              <input type="text" value={config.saml.spEntityId || ''} readonly />
+              <input type="text" title="SAML service provider entity ID (from config.toml)" value={config.saml.spEntityId || ''} readonly />
             </div>
             <div class="form-group">
               <label>ACS URL</label>
-              <input type="text" value={config.saml.acsUrl || ''} readonly />
+              <input type="text" title="Assertion Consumer Service URL (from config.toml)" value={config.saml.acsUrl || ''} readonly />
             </div>
             <div class="form-group">
               <label>IdP metadata URL</label>
-              <input type="text" value={config.saml.idpMetadataUrl || ''} readonly />
+              <input type="text" title="Identity provider metadata URL (from config.toml)" value={config.saml.idpMetadataUrl || ''} readonly />
             </div>
             <p class="hint">
               Metadata: <code>/api/auth/saml/metadata</code> · Login: <code>/api/auth/saml/login</code> ·
@@ -478,7 +492,7 @@ default_role = "reader"</pre>
           {/if}
         </div>
 
-        <Button variant="primary" onclick={saveConfig} disabled={saving}>
+        <Button variant="primary" title="Save the LDAP and OIDC authentication configuration" onclick={saveConfig} disabled={saving}>
           {saving ? 'Saving...' : 'Save Configuration'}
         </Button>
       </div>

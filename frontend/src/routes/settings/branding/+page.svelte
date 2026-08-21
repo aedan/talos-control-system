@@ -65,15 +65,15 @@
         <h2>Identity</h2>
         <div class="form-group">
           <label for="name">Platform Name</label>
-          <input id="name" type="text" bind:value={form.name} />
+          <input id="name" type="text" title="Full product name shown in the UI header and pages" bind:value={form.name} />
         </div>
         <div class="form-group">
           <label for="shortName">Short Name</label>
-          <input id="shortName" type="text" bind:value={form.shortName} />
+          <input id="shortName" type="text" title="Abbreviated name used in compact UI spots" bind:value={form.shortName} />
         </div>
         <div class="form-group">
           <label for="tagline">Tagline</label>
-          <input id="tagline" type="text" bind:value={form.tagline} />
+          <input id="tagline" type="text" title="Tagline shown on the login page and preview" bind:value={form.tagline} />
         </div>
       </div>
       
@@ -83,29 +83,29 @@
           <div class="form-group">
             <label for="primary">Primary</label>
             <div class="color-input">
-              <input id="primary" type="color" bind:value={form.primaryColor} />
-              <input type="text" bind:value={form.primaryColor} />
+              <input id="primary" type="color" title="Primary accent color (buttons, links, highlights)" bind:value={form.primaryColor} />
+              <input type="text" title="Primary color as a hex value, e.g. #4F8BFF" bind:value={form.primaryColor} />
             </div>
           </div>
           <div class="form-group">
             <label for="secondary">Secondary</label>
             <div class="color-input">
-              <input id="secondary" type="color" bind:value={form.secondaryColor} />
-              <input type="text" bind:value={form.secondaryColor} />
+              <input id="secondary" type="color" title="Secondary accent color (icons, badges, hover states)" bind:value={form.secondaryColor} />
+              <input type="text" title="Secondary color as a hex value, e.g. #4F8BFF" bind:value={form.secondaryColor} />
             </div>
           </div>
           <div class="form-group">
             <label for="bg">Background</label>
             <div class="color-input">
-              <input id="bg" type="color" bind:value={form.backgroundColor} />
-              <input type="text" bind:value={form.backgroundColor} />
+              <input id="bg" type="color" title="Page background color" bind:value={form.backgroundColor} />
+              <input type="text" title="Background color as a hex value, e.g. #0A0A0A" bind:value={form.backgroundColor} />
             </div>
           </div>
           <div class="form-group">
             <label for="surface">Surface</label>
             <div class="color-input">
-              <input id="surface" type="color" bind:value={form.surfaceColor} />
-              <input type="text" bind:value={form.surfaceColor} />
+              <input id="surface" type="color" title="Card and panel surface color" bind:value={form.surfaceColor} />
+              <input type="text" title="Surface color as a hex value, e.g. #1A1A1A" bind:value={form.surfaceColor} />
             </div>
           </div>
         </div>
@@ -115,7 +115,7 @@
         <h2>Typography</h2>
         <div class="form-group">
           <label for="font">Font Family</label>
-          <input id="font" type="text" bind:value={form.fontFamily} />
+          <input id="font" type="text" title="CSS font-family stack used across the UI" bind:value={form.fontFamily} />
         </div>
       </div>
       
@@ -123,11 +123,11 @@
         <h2>Links</h2>
         <div class="form-group">
           <label for="docs">Documentation URL</label>
-          <input id="docs" type="url" bind:value={form.docsUrl} placeholder="Leave empty to hide" />
+          <input id="docs" type="url" title="Link to your documentation site; leave empty to hide" bind:value={form.docsUrl} placeholder="Leave empty to hide" />
         </div>
         <div class="form-group">
           <label for="support">Support URL</label>
-          <input id="support" type="url" bind:value={form.supportUrl} placeholder="Leave empty to hide" />
+          <input id="support" type="url" title="Link to your support page; leave empty to hide" bind:value={form.supportUrl} placeholder="Leave empty to hide" />
         </div>
       </div>
     </div>
@@ -146,10 +146,10 @@
       </div>
       
       <div class="actions">
-        <Button variant="primary" onclick={save} disabled={saving}>
+        <Button variant="primary" title="Save the branding changes and apply them live" onclick={save} disabled={saving}>
           {saving ? 'Saving...' : 'Save Changes'}
         </Button>
-        <Button variant="ghost" onclick={reset}>Reset to Defaults</Button>
+        <Button variant="ghost" title="Restore the default TCS branding values" onclick={reset}>Reset to Defaults</Button>
       </div>
     </div>
   </div>

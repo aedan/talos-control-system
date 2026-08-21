@@ -95,7 +95,7 @@
     {#if containers.length > 1}
       <label class="lbl">
         Container
-        <select bind:value={container}>
+        <select title="Container to show logs for" bind:value={container}>
           <option value="">(default)</option>
           {#each containers as c (c)}
             <option value={c}>{c}</option>
@@ -105,17 +105,17 @@
     {/if}
     <label class="lbl">
       Tail
-      <input type="number" min="1" bind:value={tail} />
+      <input type="number" min="1" title="Number of recent log lines to fetch" bind:value={tail} />
     </label>
     <label class="chk">
-      <input type="checkbox" bind:checked={previous} />
+      <input type="checkbox" title="Show logs from the previous container instance" bind:checked={previous} />
       Previous
     </label>
-    <button class="btn" class:active={follow} onclick={() => setFollow(!follow)}>
+    <button class="btn" class:active={follow} title="Stream logs live / stop following" onclick={() => setFollow(!follow)}>
       {follow ? 'Stop following' : 'Follow'}
     </button>
-    <button class="btn" onclick={loadOnce}>Refresh</button>
-    <button class="btn" onclick={() => (text = '')}>Clear</button>
+    <button class="btn" title="Reload logs once" onclick={loadOnce}>Refresh</button>
+    <button class="btn" title="Clear the log output" onclick={() => (text = '')}>Clear</button>
   </div>
 
   {#if error}

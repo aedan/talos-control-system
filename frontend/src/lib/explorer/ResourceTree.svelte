@@ -35,6 +35,7 @@
           <button
             class="kind-btn"
             class:active={activeKind === k.id}
+            title="Show {k.label}"
             onclick={() => {
               onSelectKind(k.id);
               if (!k.namespaced) onSelectNs(undefined);
@@ -55,6 +56,7 @@
           <button
             class="ns-btn"
             class:active={activeNs === undefined}
+            title="Show resources across all namespaces"
             onclick={() => onSelectNs(undefined)}
           >
             all
@@ -65,6 +67,7 @@
             <button
               class="ns-btn"
               class:active={activeNs === ns}
+              title="Filter to namespace {ns}"
               onclick={() => onSelectNs(ns)}
             >
               {ns}

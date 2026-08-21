@@ -157,37 +157,37 @@
         <p class="ok">Live apply available</p>
       {/if}
       <div class="form-grid">
-        <label class="check"><input type="checkbox" bind:checked={enabled} /> Metal master enable</label>
-        <label class="check"><input type="checkbox" bind:checked={dhcpEnabled} /> DHCP enabled</label>
-        <label class="check"><input type="checkbox" bind:checked={pxeEnabled} /> PXE HTTP enabled</label>
-        <label>DHCP interface<input bind:value={dhcpIface} placeholder="eth1" /></label>
-        <label>DHCP bind IP<input bind:value={dhcpBindIp} placeholder="optional" /></label>
-        <label>Subnet CIDR<input bind:value={dhcpSubnet} /></label>
-        <label>Range start<input bind:value={dhcpStart} /></label>
-        <label>Range end<input bind:value={dhcpEnd} /></label>
-        <label>Gateway<input bind:value={dhcpGw} /></label>
-        <label>DNS (comma-separated)<input bind:value={dhcpDns} /></label>
+        <label class="check"><input type="checkbox" title="Enable the metal provisioning master" bind:checked={enabled} /> Metal master enable</label>
+        <label class="check"><input type="checkbox" title="Enable the DHCP server for PXE boot" bind:checked={dhcpEnabled} /> DHCP enabled</label>
+        <label class="check"><input type="checkbox" title="Enable the PXE HTTP asset server" bind:checked={pxeEnabled} /> PXE HTTP enabled</label>
+        <label>DHCP interface<input title="Network interface the DHCP server binds to" bind:value={dhcpIface} placeholder="eth1" /></label>
+        <label>DHCP bind IP<input title="Specific IP for the DHCP server (optional)" bind:value={dhcpBindIp} placeholder="optional" /></label>
+        <label>Subnet CIDR<input title="Provision VLAN subnet in CIDR notation" bind:value={dhcpSubnet} /></label>
+        <label>Range start<input title="First IP in the DHCP lease range" bind:value={dhcpStart} /></label>
+        <label>Range end<input title="Last IP in the DHCP lease range" bind:value={dhcpEnd} /></label>
+        <label>Gateway<input title="Gateway handed out by DHCP" bind:value={dhcpGw} /></label>
+        <label>DNS (comma-separated)<input title="DNS servers handed out by DHCP" bind:value={dhcpDns} /></label>
         <label class="check"
-          ><input type="checkbox" bind:checked={dhcpAllowUnknown} /> Allow unknown MACs</label
+          ><input type="checkbox" title="Allow DHCP leases for MACs not in inventory" bind:checked={dhcpAllowUnknown} /> Allow unknown MACs</label
         >
-        <label>PXE HTTP port<input type="number" bind:value={pxePort} /></label>
-        <label>Asset dir<input bind:value={pxeAssetDir} /></label>
-        <label>Default Talos version<input bind:value={pxeTalos} /></label>
+        <label>PXE HTTP port<input type="number" title="HTTP port serving PXE assets" bind:value={pxePort} /></label>
+        <label>Asset dir<input title="Directory storing downloaded PXE assets" bind:value={pxeAssetDir} /></label>
+        <label>Default Talos version<input title="Default Talos version for PXE profiles" bind:value={pxeTalos} /></label>
       </div>
       <div class="row">
-        <Button variant="primary" onclick={applyConfig} disabled={saving}>
+        <Button variant="primary" title="Save and apply the metal/DHCP/PXE config live (no process restart)" onclick={applyConfig} disabled={saving}>
           {saving ? 'Applying…' : 'Apply (no service restart)'}
         </Button>
-        <Button variant="ghost" onclick={refresh}>Refresh</Button>
+        <Button variant="ghost" title="Reload the current metal configuration and status" onclick={refresh}>Refresh</Button>
       </div>
     </section>
 
     <section class="card">
       <h2>PXE profiles</h2>
       <div class="row">
-        <input bind:value={newName} placeholder="name" />
-        <input bind:value={newVersion} placeholder="v1.13.7" />
-        <Button variant="secondary" size="sm" onclick={createProfile}>Add profile</Button>
+        <input title="Name for the new PXE profile" bind:value={newName} placeholder="name" />
+        <input title="Talos version for the new PXE profile" bind:value={newVersion} placeholder="v1.13.7" />
+        <Button variant="secondary" size="sm" title="Create a new PXE profile" onclick={createProfile}>Add profile</Button>
       </div>
       <table class="data-table">
         <thead>
@@ -204,6 +204,7 @@
                 <Button
                   variant="secondary"
                   size="sm"
+                  title="Download the Talos PXE assets for this profile"
                   disabled={syncing === p.id}
                   onclick={() => syncProfile(p.id)}
                 >

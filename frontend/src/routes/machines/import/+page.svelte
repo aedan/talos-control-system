@@ -95,7 +95,7 @@ machines:
 <div class="import-page">
   <div class="page-header">
     <h1>Import machine inventory</h1>
-    <a href="/"><Button variant="ghost" size="sm">Back to Dashboard</Button></a>
+    <a href="/"><Button variant="ghost" size="sm" title="Return to the dashboard">Back to Dashboard</Button></a>
   </div>
   <p class="hint">
     Bulk-add servers for PXE provisioning (MAC + BMC) or address-based assisted install.
@@ -105,31 +105,31 @@ machines:
   <div class="row">
     <label>
       Format
-      <select bind:value={format}>
+      <select title="Inventory format: YAML (canonical) or CSV" bind:value={format}>
         <option value="yaml">YAML</option>
         <option value="csv">CSV</option>
       </select>
     </label>
     <label>
       File
-      <input type="file" accept=".yaml,.yml,.csv,text/*" onchange={onFile} />
+      <input type="file" title="Load an inventory file (YAML or CSV) into the editor" accept=".yaml,.yml,.csv,text/*" onchange={onFile} />
     </label>
   </div>
 
-  <textarea bind:value={content} rows="16" spellcheck="false"></textarea>
+  <textarea title="Machine inventory to import (YAML or CSV)" bind:value={content} rows="16" spellcheck="false"></textarea>
 
   <div class="row">
     <label class="check">
-      <input type="checkbox" bind:checked={createCluster} disabled={!!clusterId} />
+      <input type="checkbox" title="Create a cluster from the YAML name when no existing cluster is selected" bind:checked={createCluster} disabled={!!clusterId} />
       Create cluster from YAML name (if no cluster selected)
     </label>
     <label>
       Cluster name override
-      <input type="text" bind:value={createClusterName} placeholder="optional" />
+      <input type="text" title="Override the name of the cluster to create" bind:value={createClusterName} placeholder="optional" />
     </label>
     <label>
       Attach to existing cluster
-      <select bind:value={clusterId}>
+      <select title="Attach imported machines to an existing cluster" bind:value={clusterId}>
         <option value="">— none / create —</option>
         {#each clusters as c (c.id)}
           <option value={c.id}>{c.name}</option>
@@ -139,8 +139,8 @@ machines:
   </div>
 
   <div class="actions">
-    <Button variant="secondary" onclick={doPreview} disabled={busy}>Preview</Button>
-    <Button variant="primary" onclick={doImport} disabled={busy}>Import</Button>
+    <Button variant="secondary" title="Parse the inventory and show a preview without importing" onclick={doPreview} disabled={busy}>Preview</Button>
+    <Button variant="primary" title="Import the machines into TCS" onclick={doImport} disabled={busy}>Import</Button>
   </div>
 
   {#if preview}
@@ -200,6 +200,7 @@ machines:
         <Button
           variant="primary"
           size="sm"
+          title="Open the cluster these machines were imported into"
           onclick={() => goto(`/clusters/${result.clusterId}`)}
         >
           Open cluster

@@ -106,7 +106,7 @@
     {#if containers.length > 1}
       <label class="lbl">
         Container
-        <select bind:value={container} onchange={connect}>
+        <select title="Container to connect to" bind:value={container} onchange={connect}>
           <option value="">(default)</option>
           {#each containers as c (c)}
             <option value={c}>{c}</option>
@@ -115,7 +115,7 @@
       </label>
     {/if}
     <label class="chk">
-      <input type="checkbox" bind:checked={tty} onchange={connect} />
+      <input type="checkbox" title="Allocate a pseudo-TTY (needed for interactive shells)" bind:checked={tty} onchange={connect} />
       TTY
     </label>
     {#if mode === 'exec'}
@@ -123,6 +123,7 @@
         Command
         <input
           type="text"
+          title="Command to run in the container; 'sh' for an interactive shell"
           bind:value={cmdInput}
           placeholder="sh  (interactive) — or any command, e.g. /coredns -version"
           onkeydown={(e) => e.key === 'Enter' && connect()}
@@ -132,7 +133,7 @@
     <span class="status" class:connecting={status === 'connecting'} class:exited={status === 'exited'}>
       {status}
     </span>
-    <button class="btn" onclick={connect}>Connect</button>
+    <button class="btn" title="Connect (re) to the terminal session" onclick={connect}>Connect</button>
   </div>
   {#if mode === 'exec'}
     <div class="term-hint">

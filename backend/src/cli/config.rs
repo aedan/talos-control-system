@@ -54,12 +54,46 @@ impl CliConfig {
         Ok(())
     }
 
-    /// Resolve the server URL (flags > env > config > default).
+    /// Resolve the server URL (flags > env > config > local server > default).
+    ///
+    /// When nothing is set explicitly, we try to discover the URL of a TCS
+    /// server running on this host (so `tcs login` works out of the box on the
+    /// control-plane box). We read the local config's `server.advertised_url`,
+    /// or fall back to `bind_addr:8081` when the bind address is a concrete IP
+    /// (not `0.0.0.0`). Otherwise we default to `http://localhost:8081`.
     pub fn resolve_server(flag: Option<&str>) -> String {
         flag.map(|s| s.to_string())
             .or_else(|| std::env::var("TCS_SERVER").ok())
             .or_else(|| Self::load().server)
+            .or_else(Self::local_server_url)
             .unwrap_or_else(|| "http://localhost:8081".to_string())
+    }
+
+    /// Best-effort discovery of a local TCS server URL from the host config.
+    fn local_server_url() -> Option<String> {
+        let path = std::env::var("TCS_CONFIG")
+            .unwrap_or_else(|_| "/etc/tcs/config.toml".to_string());
+        let raw = std::fs::read_to_string(path).ok()?;
+        let val: toml::Value = raw.parse().ok()?;
+        let server = val.get("server")?;
+
+        // Prefer an explicit advertised URL.
+        if let Some(url) = server
+            .get("advertised_url")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(url.to_string());
+        }
+
+        // Otherwise, if the server binds a concrete IP, target it on the http port.
+        let bind = server.get("bind_addr").and_then(|v| v.as_str()).unwrap_or("0.0.0.0");
+        if bind == "0.0.0.0" || bind.is_empty() {
+            return None;
+        }
+        let port = server.get("http_port").and_then(|v| v.as_integer()).unwrap_or(8081);
+        Some(format!("http://{}:{}", bind, port))
     }
 
     /// Resolve the bearer token (flags > env > config).

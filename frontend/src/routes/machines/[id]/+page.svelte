@@ -543,12 +543,12 @@
       <div class="header-actions">
         <span class="status-badge">{machine.status}</span>
         <span class="type-badge">{machine.machineType}</span>
-        <Button variant="secondary" size="sm" onclick={probeVersion} disabled={actionBusy}>Version</Button>
-        <Button variant="secondary" size="sm" onclick={loadHostname} disabled={actionBusy}>Hostname</Button>
-        <Button variant="secondary" size="sm" onclick={loadServices} disabled={actionBusy}>Services</Button>
-        <Button variant="secondary" size="sm" onclick={bootstrap} disabled={actionBusy}>Bootstrap</Button>
-        <Button variant="danger" size="sm" onclick={reboot} disabled={actionBusy}>Reboot</Button>
-        <Button variant="danger" size="sm" onclick={resetMachine} disabled={actionBusy}>Reset</Button>
+        <Button variant="secondary" size="sm" title="Probe the node for its running Talos version" onclick={probeVersion} disabled={actionBusy}>Version</Button>
+        <Button variant="secondary" size="sm" title="Fetch the node's live hostname from Talos" onclick={loadHostname} disabled={actionBusy}>Hostname</Button>
+        <Button variant="secondary" size="sm" title="List the Talos services running on this node and their health" onclick={loadServices} disabled={actionBusy}>Services</Button>
+        <Button variant="secondary" size="sm" title="Bootstrap this control-plane node (initial etcd formation)" onclick={bootstrap} disabled={actionBusy}>Bootstrap</Button>
+        <Button variant="danger" size="sm" title="Reboot this machine via the Talos API" onclick={reboot} disabled={actionBusy}>Reboot</Button>
+        <Button variant="danger" size="sm" title="DESTRUCTIVE: factory-reset and wipe this machine via Talos" onclick={resetMachine} disabled={actionBusy}>Reset</Button>
       </div>
     </div>
 
@@ -560,12 +560,12 @@
         <div class="info-row"><span class="label">Talos</span><span class="value">{machine.talosVersion || '—'}</span></div>
         <div class="info-row"><span class="label">Created</span><span class="value">{machine.createdAt ? new Date(machine.createdAt).toLocaleString() : '—'}</span></div>
         <div class="form-row">
-          <label>Hostname<input type="text" bind:value={editHostname} placeholder="cp-1" /></label>
+          <label>Hostname<input type="text" title="Node hostname as it appears in Talos" bind:value={editHostname} placeholder="cp-1" /></label>
         </div>
         <div class="form-row">
           <label>
             Role
-            <select bind:value={editMachineType}>
+            <select title="Node role: control-plane or worker" bind:value={editMachineType}>
               <option value="controlplane">controlplane</option>
               <option value="control-plane">control-plane</option>
               <option value="worker">worker</option>
@@ -575,7 +575,7 @@
         <div class="form-row">
           <label>
             Cluster
-            <select bind:value={editClusterId}>
+            <select title="Cluster this machine belongs to" bind:value={editClusterId}>
               <option value="">— none —</option>
               {#each clusters as c (c.id)}
                 <option value={c.id}>{c.name}</option>
@@ -584,15 +584,15 @@
           </label>
         </div>
         <div class="form-row">
-          <label>MAC<input type="text" bind:value={editMac} placeholder="aa:bb:cc:dd:ee:ff" /></label>
+          <label>MAC<input type="text" title="Primary NIC MAC address (used for PXE/metal matching)" bind:value={editMac} placeholder="aa:bb:cc:dd:ee:ff" /></label>
         </div>
         <div class="form-row">
-          <label>Address<input type="text" bind:value={editAddress} placeholder="10.0.0.2 or host:50000" /></label>
+          <label>Address<input type="text" title="Node API endpoint, e.g. 10.0.0.2 or host:50000" bind:value={editAddress} placeholder="10.0.0.2 or host:50000" /></label>
         </div>
         <div class="form-row">
-          <label>Install disk<input type="text" bind:value={editInstallDisk} placeholder="/dev/sda" /></label>
+          <label>Install disk<input type="text" title="Block device Talos installs to, e.g. /dev/sda" bind:value={editInstallDisk} placeholder="/dev/sda" /></label>
         </div>
-        <Button variant="primary" size="sm" onclick={saveInventory} disabled={actionBusy}>Save inventory</Button>
+        <Button variant="primary" size="sm" title="Save inventory changes (hostname, role, cluster, MAC, address, disk)" onclick={saveInventory} disabled={actionBusy}>Save inventory</Button>
       </div>
 
       <div class="info-section">
@@ -600,9 +600,9 @@
         <div class="form-row">
           <label>
             Upgrade image
-            <input type="text" bind:value={upgradeImage} placeholder="ghcr.io/siderolabs/installer:v1.8.0" />
+            <input type="text" title="Talos installer image to upgrade this single node to" bind:value={upgradeImage} placeholder="ghcr.io/siderolabs/installer:v1.8.0" />
           </label>
-          <Button variant="secondary" size="sm" onclick={upgrade} disabled={actionBusy}>Upgrade</Button>
+          <Button variant="secondary" size="sm" title="Upgrade this node to the image above" onclick={upgrade} disabled={actionBusy}>Upgrade</Button>
         </div>
         <p class="muted-hint">
           Per-node network, mounts, and install image: use the <strong>Machine config</strong>
@@ -624,42 +624,42 @@
           <div class="error" style="margin:0.5rem 0">{bmcStatus.error}</div>
         {/if}
         <div class="form-row">
-          <label>BMC address<input type="text" bind:value={bmcAddress} placeholder="192.168.1.100" /></label>
+          <label>BMC address<input type="text" title="Out-of-band management IP (IPMI/Redfish)" bind:value={bmcAddress} placeholder="192.168.1.100" /></label>
         </div>
         <div class="form-row">
-          <label>BMC user<input type="text" bind:value={bmcUsername} /></label>
-          <label>BMC password<input type="password" bind:value={bmcPassword} placeholder="••••••••" /></label>
+          <label>BMC user<input type="text" title="BMC management username" bind:value={bmcUsername} /></label>
+          <label>BMC password<input type="password" title="BMC management password (leave blank to keep current)" bind:value={bmcPassword} placeholder="••••••••" /></label>
         </div>
         <div class="form-row">
           <label>
             Type
-            <select bind:value={bmcType}>
+            <select title="BMC protocol: auto-detect, Redfish, or IPMI" bind:value={bmcType}>
               <option value="auto">auto</option>
               <option value="redfish">redfish</option>
               <option value="ipmi">ipmi</option>
             </select>
           </label>
-          <Button variant="secondary" size="sm" onclick={saveBmc} disabled={actionBusy}>Save BMC</Button>
+          <Button variant="secondary" size="sm" title="Save BMC connection settings" onclick={saveBmc} disabled={actionBusy}>Save BMC</Button>
         </div>
         <div class="header-actions" style="margin-top:0.5rem">
-          <Button variant="secondary" size="sm" onclick={() => powerAction('on')} disabled={actionBusy}>On</Button>
-          <Button variant="secondary" size="sm" onclick={() => powerAction('off')} disabled={actionBusy}>Off</Button>
-          <Button variant="secondary" size="sm" onclick={() => powerAction('cycle')} disabled={actionBusy}>Cycle</Button>
-          <Button variant="secondary" size="sm" onclick={bootPxe} disabled={actionBusy}>PXE once</Button>
+          <Button variant="secondary" size="sm" title="Power on the machine via BMC" onclick={() => powerAction('on')} disabled={actionBusy}>On</Button>
+          <Button variant="secondary" size="sm" title="Power off the machine via BMC" onclick={() => powerAction('off')} disabled={actionBusy}>Off</Button>
+          <Button variant="secondary" size="sm" title="Power-cycle the machine via BMC" onclick={() => powerAction('cycle')} disabled={actionBusy}>Cycle</Button>
+          <Button variant="secondary" size="sm" title="Set the machine to boot from PXE once, then fall back to disk" onclick={bootPxe} disabled={actionBusy}>PXE once</Button>
         </div>
         <div class="form-row" style="margin-top:0.75rem; padding-top:0.75rem; border-top:1px solid var(--tcs-border)">
           <label>ISO URL
-            <input type="text" bind:value={isoUrl} placeholder="http://localhost:6969/iso/talos-amd64.iso" />
+            <input type="text" title="URL of the ISO image to mount over the BMC virtual media" bind:value={isoUrl} placeholder="http://localhost:6969/iso/talos-amd64.iso" />
           </label>
           <label>Media
-            <select bind:value={isoMedia}>
+            <select title="Virtual media device type for the ISO" bind:value={isoMedia}>
               <option value="CD">CD</option>
               <option value="DVD">DVD</option>
               <option value="Floppy">Floppy</option>
             </select>
           </label>
-          <Button variant="secondary" size="sm" onclick={mountIso} disabled={actionBusy}>Mount ISO</Button>
-          <Button variant="secondary" size="sm" onclick={unmountIso} disabled={actionBusy}>Unmount</Button>
+          <Button variant="secondary" size="sm" title="Mount the ISO to the machine's virtual media" onclick={mountIso} disabled={actionBusy}>Mount ISO</Button>
+          <Button variant="secondary" size="sm" title="Unmount the virtual media ISO" onclick={unmountIso} disabled={actionBusy}>Unmount</Button>
         </div>
       </div>
     </div>
@@ -681,6 +681,7 @@
             Install image (factory / custom installer)
             <input
               type="text"
+              title="Talos installer image to set under machine.install.image"
               bind:value={installImageHelper}
               placeholder="factory.talos.dev/metal-installer/<schematic-id>:v1.13.7"
             />
@@ -689,12 +690,12 @@
             Network blocks (deep-merged under machine.network)
             <div class="net-keys-row">
               <label class="check"
-                ><input type="checkbox" bind:checked={netKeys.interfaces} /> interfaces</label
+                ><input type="checkbox" title="Include the interface blocks in the merged network config" bind:checked={netKeys.interfaces} /> interfaces</label
               >
               <label class="check"
-                ><input type="checkbox" bind:checked={netKeys.nameservers} /> nameservers</label
+                ><input type="checkbox" title="Include the nameservers in the merged network config" bind:checked={netKeys.nameservers} /> nameservers</label
               >
-              <Button variant="ghost" size="sm" onclick={loadCurrentIntoBuilder} disabled={configBusy}
+              <Button variant="ghost" size="sm" title="Pull the current config's interfaces and nameservers into the helper fields" onclick={loadCurrentIntoBuilder} disabled={configBusy}
                 >Load current values</Button
               >
             </div>
@@ -707,23 +708,25 @@
                   <div class="net-block-row">
                     <input
                       type="text"
+                      title="Interface name, e.g. eno1"
                       placeholder="interface (e.g. eno1)"
                       bind:value={block.interface}
                       class="mono"
                     />
                     <label class="check"
-                      ><input type="checkbox" bind:checked={block.dhcp} /> dhcp</label
+                      ><input type="checkbox" title="Use DHCP on this interface" bind:checked={block.dhcp} /> dhcp</label
                     >
                     <label class="check"
-                      ><input type="checkbox" bind:checked={block.ignore} /> ignore</label
+                      ><input type="checkbox" title="Ignore this interface in the generated config" bind:checked={block.ignore} /> ignore</label
                     >
                     <input
                       type="text"
+                      title="MTU for this interface (optional)"
                       placeholder="mtu"
                       bind:value={block.mtu}
                       class="mono small"
                     />
-                    <Button variant="ghost" size="sm" onclick={() => removeNetInterface(block.id)}
+                    <Button variant="ghost" size="sm" title="Remove this interface block" onclick={() => removeNetInterface(block.id)}
                       >remove</Button
                     >
                   </div>
@@ -732,16 +735,17 @@
                       <span class="sub">addresses (CIDR)</span>
                       {#each block.addresses as _, i}
                         <div class="kv-row">
-                          <input type="text" bind:value={block.addresses[i]} class="mono" />
+                          <input type="text" title="Interface address in CIDR form, e.g. 192.168.1.200/24" bind:value={block.addresses[i]} class="mono" />
                           <Button
                             variant="ghost"
                             size="sm"
+                            title="Remove this interface address"
                             onclick={() => block.addresses.splice(i, 1)}
                             >–</Button
                           >
                         </div>
                       {/each}
-                      <Button variant="ghost" size="sm" onclick={() => block.addresses.push('')}
+                      <Button variant="ghost" size="sm" title="Add another address to this interface" onclick={() => block.addresses.push('')}
                         >+ address</Button
                       >
                     </div>
@@ -749,42 +753,47 @@
                       <span class="sub">routes (network / gateway / metric)</span>
                       {#each block.routes as _, i}
                         <div class="kv-row">
-                          <input
-                            type="text"
-                            placeholder="0.0.0.0/0"
-                            bind:value={block.routes[i].network}
-                            class="mono small"
-                          />
-                          <input
-                            type="text"
-                            placeholder="192.168.1.2"
-                            bind:value={block.routes[i].gateway}
-                            class="mono small"
-                          />
-                          <input
-                            type="text"
-                            placeholder="metric"
-                            bind:value={block.routes[i].metric}
-                            class="mono small"
-                          />
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onclick={() => block.routes.splice(i, 1)}
-                            >–</Button
-                          >
+                            <input
+                              type="text"
+                              title="Destination network, e.g. 0.0.0.0/0"
+                              placeholder="0.0.0.0/0"
+                              bind:value={block.routes[i].network}
+                              class="mono small"
+                            />
+                            <input
+                              type="text"
+                              title="Gateway IP for this route"
+                              placeholder="192.168.1.2"
+                              bind:value={block.routes[i].gateway}
+                              class="mono small"
+                            />
+                            <input
+                              type="text"
+                              title="Route metric (optional)"
+                              placeholder="metric"
+                              bind:value={block.routes[i].metric}
+                              class="mono small"
+                            />
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              title="Remove this route"
+                              onclick={() => block.routes.splice(i, 1)}
+                              >–</Button
+                            >
                         </div>
                       {/each}
                       <Button
                         variant="ghost"
                         size="sm"
+                        title="Add another route to this interface"
                         onclick={() => block.routes.push({ network: '', gateway: '', metric: '' })}
                         >+ route</Button
                       >
                     </div>
                     <div class="kv-row">
                       <span class="sub">bond</span>
-                      <select bind:value={block.bondMode}>
+                      <select title="Bond mode for this interface (none = plain interface)" bind:value={block.bondMode}>
                         {#each BOND_MODES as mode}
                           <option value={mode}>{mode}</option>
                         {/each}
@@ -792,6 +801,7 @@
                       {#if block.bondMode !== 'none'}
                         <input
                           type="text"
+                          title="Comma-separated bond member interfaces, e.g. eno49, eno50"
                           placeholder="members (e.g. eno49, eno50)"
                           bind:value={block.bondMembers}
                           class="mono"
@@ -806,20 +816,22 @@
                             <span class="sub mono">vlan id</span>
                             <input
                               type="text"
+                              title="VLAN ID, e.g. 207"
                               placeholder="207"
                               bind:value={vlan.vlanId}
                               class="mono small"
                             />
                             <input
                               type="text"
+                              title="MTU for this VLAN (optional)"
                               placeholder="mtu"
                               bind:value={vlan.mtu}
                               class="mono small"
                             />
                             <label class="check"
-                              ><input type="checkbox" bind:checked={vlan.dhcp} /> dhcp</label
+                              ><input type="checkbox" title="Use DHCP on this VLAN" bind:checked={vlan.dhcp} /> dhcp</label
                             >
-                            <Button variant="ghost" size="sm" onclick={() => removeVlan(block, vlan.id)}
+                            <Button variant="ghost" size="sm" title="Remove this VLAN" onclick={() => removeVlan(block, vlan.id)}
                               >remove</Button
                             >
                           </div>
@@ -827,16 +839,17 @@
                             <span class="sub">addresses (CIDR)</span>
                             {#each vlan.addresses as _, i}
                               <div class="kv-row">
-                                <input type="text" bind:value={vlan.addresses[i]} class="mono" />
+                                <input type="text" title="VLAN address in CIDR form, e.g. 162.242.191.68/26" bind:value={vlan.addresses[i]} class="mono" />
                                 <Button
                                   variant="ghost"
                                   size="sm"
+                                  title="Remove this VLAN address"
                                   onclick={() => vlan.addresses.splice(i, 1)}
                                   >–</Button
                                 >
                               </div>
                             {/each}
-                            <Button variant="ghost" size="sm" onclick={() => vlan.addresses.push('')}
+                            <Button variant="ghost" size="sm" title="Add another address to this VLAN" onclick={() => vlan.addresses.push('')}
                               >+ address</Button
                             >
                           </div>
@@ -844,49 +857,54 @@
                             <span class="sub">routes (network / gateway / metric)</span>
                             {#each vlan.routes as _, i}
                               <div class="kv-row">
-                                <input
-                                  type="text"
-                                  placeholder="0.0.0.0/0"
-                                  bind:value={vlan.routes[i].network}
-                                  class="mono small"
-                                />
-                                <input
-                                  type="text"
-                                  placeholder="162.242.191.65"
-                                  bind:value={vlan.routes[i].gateway}
-                                  class="mono small"
-                                />
-                                <input
-                                  type="text"
-                                  placeholder="metric"
-                                  bind:value={vlan.routes[i].metric}
-                                  class="mono small"
-                                />
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onclick={() => vlan.routes.splice(i, 1)}
-                                  >–</Button
-                                >
+                                  <input
+                                    type="text"
+                                    title="Destination network, e.g. 0.0.0.0/0"
+                                    placeholder="0.0.0.0/0"
+                                    bind:value={vlan.routes[i].network}
+                                    class="mono small"
+                                  />
+                                  <input
+                                    type="text"
+                                    title="Gateway IP for this route"
+                                    placeholder="162.242.191.65"
+                                    bind:value={vlan.routes[i].gateway}
+                                    class="mono small"
+                                  />
+                                  <input
+                                    type="text"
+                                    title="Route metric (optional)"
+                                    placeholder="metric"
+                                    bind:value={vlan.routes[i].metric}
+                                    class="mono small"
+                                  />
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    title="Remove this route"
+                                    onclick={() => vlan.routes.splice(i, 1)}
+                                    >–</Button
+                                  >
                               </div>
                             {/each}
                             <Button
                               variant="ghost"
                               size="sm"
+                              title="Add another route to this VLAN"
                               onclick={() => vlan.routes.push({ network: '', gateway: '', metric: '' })}
                               >+ route</Button
                             >
                           </div>
                         </div>
                       {/each}
-                      <Button variant="ghost" size="sm" onclick={() => addVlan(block)}
+                      <Button variant="ghost" size="sm" title="Add a nested VLAN to this interface" onclick={() => addVlan(block)}
                         >+ vlan</Button
                       >
                     </div>
                   </div>
                 </div>
               {/each}
-              <Button variant="secondary" size="sm" onclick={addNetInterface}
+              <Button variant="secondary" size="sm" title="Add a new interface block to the network helper" onclick={addNetInterface}
                 >+ Add interface block</Button
               >
             </div>
@@ -899,13 +917,13 @@
                   <span class="sub">nameservers</span>
                   {#each netNameservers as _, i}
                     <div class="kv-row">
-                      <input type="text" bind:value={netNameservers[i]} class="mono" />
-                      <Button variant="ghost" size="sm" onclick={() => removeNameServer(i)}
+                      <input type="text" title="DNS server IP, e.g. 8.8.8.8" bind:value={netNameservers[i]} class="mono" />
+                      <Button variant="ghost" size="sm" title="Remove this nameserver" onclick={() => removeNameServer(i)}
                         >–</Button
                       >
                     </div>
                   {/each}
-                  <Button variant="ghost" size="sm" onclick={addNameServer}>+ nameserver</Button>
+                  <Button variant="ghost" size="sm" title="Add another nameserver" onclick={addNameServer}>+ nameserver</Button>
                 </div>
               </div>
             </div>
@@ -918,6 +936,7 @@
           <label>
             Extra mounts (kubelet.extraMounts list)
             <textarea
+              title="YAML list of kubelet extraMounts entries to deep-merge into the config"
               bind:value={mountsYamlHelper}
               rows="6"
               spellcheck="false"
@@ -930,31 +949,31 @@
     - rw"
             ></textarea>
           </label>
-          <Button variant="secondary" size="sm" onclick={applyHelpers} disabled={configBusy}>
+          <Button variant="secondary" size="sm" title="Merge the helper fields (image, network, mounts, hostname) into the config editor" onclick={applyHelpers} disabled={configBusy}>
             Merge helpers into editor
           </Button>
         </div>
         <div class="info-section full">
           <div class="config-toolbar">
-            <Button variant="secondary" size="sm" onclick={() => loadLiveConfig()} disabled={configBusy}
+            <Button variant="secondary" size="sm" title="Fetch the node's current live config and load it into the editor" onclick={() => loadLiveConfig()} disabled={configBusy}
               >Load live from node</Button
             >
-            <Button variant="secondary" size="sm" onclick={loadDesiredConfig} disabled={configBusy}
+            <Button variant="secondary" size="sm" title="Reload the saved desired config into the editor" onclick={loadDesiredConfig} disabled={configBusy}
               >Reload desired</Button
             >
-            <Button variant="secondary" size="sm" onclick={saveDesiredConfig} disabled={configBusy}
+            <Button variant="secondary" size="sm" title="Save the editor contents as the desired config (not applied yet)" onclick={saveDesiredConfig} disabled={configBusy}
               >Save desired</Button
             >
             <label class="check"
-              ><input type="checkbox" bind:checked={applyMergeLive} /> Merge with live on apply</label
+              ><input type="checkbox" title="Deep-merge the node's live config before applying" bind:checked={applyMergeLive} /> Merge with live on apply</label
             >
             <label class="check"
-              ><input type="checkbox" bind:checked={applyReboot} /> Reboot after apply</label
+              ><input type="checkbox" title="Reboot the node after applying the config" bind:checked={applyReboot} /> Reboot after apply</label
             >
-            <Button variant="ghost" size="sm" onclick={() => applyConfig(true)} disabled={configBusy}
+            <Button variant="ghost" size="sm" title="Validate the config against the node without applying it" onclick={() => applyConfig(true)} disabled={configBusy}
               >Dry-run</Button
             >
-            <Button variant="primary" size="sm" onclick={() => applyConfig(false)} disabled={configBusy}
+            <Button variant="primary" size="sm" title="Apply the editor config to the node" onclick={() => applyConfig(false)} disabled={configBusy}
               >Apply to node</Button
             >
           </div>
@@ -966,6 +985,7 @@
           {/if}
           <textarea
             class="config-yaml"
+            title="Full Talos machine config YAML for this node"
             bind:value={configYaml}
             rows="22"
             spellcheck="false"

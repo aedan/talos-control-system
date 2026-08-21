@@ -228,7 +228,7 @@
 
         <div class="form-group">
           <label for="mode">Certificate Mode</label>
-          <select id="mode" bind:value={config.mode}>
+          <select id="mode" title="How the TLS certificate is sourced: Let's Encrypt, self-signed, uploaded, or disabled" bind:value={config.mode}>
             <option value="letsencrypt">Let's Encrypt (Automated)</option>
             <option value="self-signed">Self-Signed</option>
             <option value="provided">Provided (Upload)</option>
@@ -246,6 +246,7 @@
             <input
               id="domains"
               type="text"
+              title="Comma-separated domains to secure with Let's Encrypt"
               bind:value={domainsInput}
               placeholder="example.com, api.example.com"
             />
@@ -257,6 +258,7 @@
             <input
               id="adminEmail"
               type="email"
+              title="Let's Encrypt account email for expiry notifications"
               bind:value={config.adminEmail}
               placeholder="admin@example.com"
             />
@@ -265,7 +267,7 @@
 
           <div class="form-group">
             <label for="challengeType">Challenge Type</label>
-            <select id="challengeType" bind:value={config.challengeType}>
+            <select id="challengeType" title="How Let's Encrypt validates domain ownership: HTTP-01 (port 80) or DNS-01 (TXT record)" bind:value={config.challengeType}>
               <option value="http-01">HTTP-01 (Port 80)</option>
               <option value="dns-01">DNS-01 (DNS TXT record)</option>
             </select>
@@ -275,7 +277,7 @@
             <div class="dns-section">
               <div class="form-group">
                 <label for="dnsProvider">DNS Provider</label>
-                <select id="dnsProvider" bind:value={config.dnsProvider}>
+                <select id="dnsProvider" title="DNS provider used for DNS-01 challenge validation" bind:value={config.dnsProvider}>
                   <option value="cloudflare">Cloudflare</option>
                   <option value="godaddy">GoDaddy</option>
                   <option value="route53">AWS Route53</option>
@@ -288,6 +290,7 @@
                   <input
                     id="dnsApiToken"
                     type="password"
+                    title="Cloudflare API token with DNS edit permission"
                     bind:value={config.dnsApiToken}
                     placeholder="Cloudflare API Token"
                   />
@@ -297,6 +300,7 @@
                   <input
                     id="dnsZoneId"
                     type="text"
+                    title="Cloudflare zone ID for the domain"
                     bind:value={config.dnsZoneId}
                     placeholder="Cloudflare Zone ID"
                   />
@@ -307,6 +311,7 @@
                   <input
                     id="dnsApiKey"
                     type="password"
+                    title="GoDaddy API key"
                     bind:value={config.dnsApiKey}
                     placeholder="GoDaddy API Key"
                   />
@@ -316,6 +321,7 @@
                   <input
                     id="dnsApiSecret"
                     type="password"
+                    title="GoDaddy API secret"
                     bind:value={config.dnsApiSecret}
                     placeholder="GoDaddy API Secret"
                   />
@@ -326,6 +332,7 @@
                   <input
                     id="dnsApiKey"
                     type="password"
+                    title="AWS access key ID for Route53"
                     bind:value={config.dnsApiKey}
                     placeholder="AWS Access Key ID"
                   />
@@ -335,6 +342,7 @@
                   <input
                     id="dnsApiSecret"
                     type="password"
+                    title="AWS secret access key for Route53"
                     bind:value={config.dnsApiSecret}
                     placeholder="AWS Secret Access Key"
                   />
@@ -352,6 +360,7 @@
             <input
               id="domains-signed"
               type="text"
+              title="Comma-separated domains for the self-signed certificate"
               bind:value={domainsInput}
               placeholder="localhost, tcs.internal"
             />
@@ -367,6 +376,7 @@
             <input
               id="certPath"
               type="text"
+              title="Server path to the PEM certificate file"
               bind:value={config.certPath}
               placeholder="/path/to/certificate.pem"
             />
@@ -378,6 +388,7 @@
             <input
               id="keyPath"
               type="text"
+              title="Server path to the PEM private key file"
               bind:value={config.keyPath}
               placeholder="/path/to/private-key.pem"
             />
@@ -386,11 +397,11 @@
         {/if}
 
         <div class="actions">
-          <Button variant="primary" onclick={applyConfig} disabled={saving}>
+          <Button variant="primary" title="Save and apply the certificate configuration (applies live when HTTPS is running)" onclick={applyConfig} disabled={saving}>
             {saving ? 'Applying...' : 'Apply'}
           </Button>
           {#if config.mode === 'letsencrypt'}
-            <Button variant="secondary" onclick={renewNow} disabled={renewing}>
+            <Button variant="secondary" title="Request a Let's Encrypt renewal immediately" onclick={renewNow} disabled={renewing}>
               {renewing ? 'Renewing...' : 'Renew Now'}
             </Button>
           {/if}

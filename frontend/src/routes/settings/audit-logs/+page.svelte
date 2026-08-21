@@ -108,7 +108,7 @@
     </div>
     <div class="header-actions">
       <span class="count">{total} total entries</span>
-      <Button variant="danger" onclick={clearLogs} disabled={clearing}>
+      <Button variant="danger" title="Permanently delete all audit log entries" onclick={clearLogs} disabled={clearing}>
         {clearing ? 'Clearing...' : 'Clear Logs'}
       </Button>
     </div>
@@ -118,28 +118,32 @@
     <div class="filter-row">
       <input
         type="text"
+        title="Filter entries by the user who performed the action"
         placeholder="Filter by user..."
         bind:value={filterUser}
         class="filter-input"
       />
       <input
         type="text"
+        title="Filter entries by action type (e.g. login, create, delete)"
         placeholder="Filter by action..."
         bind:value={filterAction}
         class="filter-input"
       />
       <input
         type="datetime-local"
+        title="Show entries from this date and time onward"
         bind:value={filterFrom}
         class="filter-input"
       />
       <input
         type="datetime-local"
+        title="Show entries up to this date and time"
         bind:value={filterTo}
         class="filter-input"
       />
-      <Button variant="secondary" onclick={handleFilter}>Apply</Button>
-      <Button variant="ghost" onclick={resetFilters}>Reset</Button>
+      <Button variant="secondary" title="Apply the filter fields above" onclick={handleFilter}>Apply</Button>
+      <Button variant="ghost" title="Clear all filters and reload every entry" onclick={resetFilters}>Reset</Button>
     </div>
   </div>
 
@@ -181,6 +185,7 @@
       <Button
         variant="ghost"
         size="sm"
+        title="Go to the previous page of audit entries"
         disabled={page <= 1}
         onclick={() => { page--; loadEntries(); }}
       >
@@ -192,6 +197,7 @@
       <Button
         variant="ghost"
         size="sm"
+        title="Go to the next page of audit entries"
         disabled={page * perPage >= total}
         onclick={() => { page++; loadEntries(); }}
       >

@@ -186,7 +186,7 @@
       {#if activeNs !== undefined}
         <span class="mid-ns">{activeNs ?? 'all namespaces'}</span>
       {/if}
-      <button class="refresh" onclick={loadList}>↻</button>
+      <button class="refresh" title="Reload the resource list" onclick={loadList}>↻</button>
     </div>
     {#if listError}
       <div class="list-error">{listError}</div>
@@ -211,12 +211,12 @@
     {:else}
       <div class="detail-head">
         <div class="detail-tabs">
-          <button class:active={detailTab === 'yaml'} onclick={() => (detailTab = 'yaml')}>YAML</button>
+          <button class:active={detailTab === 'yaml'} title="View the resource's YAML" onclick={() => (detailTab = 'yaml')}>YAML</button>
           {#if isPod}
-            <button class:active={detailTab === 'logs'} onclick={() => (detailTab = 'logs')}>Logs</button>
-            <button class:active={detailTab === 'terminal'} onclick={() => (detailTab = 'terminal')}>Terminal</button>
+            <button class:active={detailTab === 'logs'} title="View container logs" onclick={() => (detailTab = 'logs')}>Logs</button>
+            <button class:active={detailTab === 'terminal'} title="Open a terminal into the pod" onclick={() => (detailTab = 'terminal')}>Terminal</button>
           {/if}
-          <button class:active={detailTab === 'actions'} onclick={() => (detailTab = 'actions')}>Actions</button>
+          <button class:active={detailTab === 'actions'} title="Run actions on the selected resource" onclick={() => (detailTab = 'actions')}>Actions</button>
         </div>
       </div>
 

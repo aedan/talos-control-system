@@ -385,6 +385,7 @@
       <button
         class="step-btn {i === currentStep ? 'active' : ''} {i < currentStep ? 'done' : ''}"
         class:disabled={!canProceed(i)}
+        title="Step {i + 1}: {step}"
         onclick={() => {
           if (i <= currentStep || canProceed(i)) currentStep = i;
         }}
@@ -404,7 +405,7 @@
       <div class="form-grid">
         <div class="form-group">
           <label for="name">Cluster Name</label>
-          <input id="name" type="text" bind:value={name} placeholder="kronos" required />
+          <input id="name" type="text" title="Internal name for this cluster in TCS" bind:value={name} placeholder="kronos" required />
         </div>
 
         <div class="form-group">
@@ -412,6 +413,7 @@
           <input
             id="endpoint"
             type="text"
+            title="Kubernetes API endpoint for the new cluster"
             bind:value={endpoint}
             placeholder="https://162.242.191.68:6443"
           />
@@ -419,12 +421,12 @@
 
         <div class="form-group">
           <label for="domain">Cluster Domain</label>
-          <input id="domain" type="text" bind:value={clusterDomain} placeholder="cluster.local" />
+          <input id="domain" type="text" title="Kubernetes cluster domain" bind:value={clusterDomain} placeholder="cluster.local" />
         </div>
 
         <div class="form-group">
           <label for="k8sVersion">Kubernetes Version</label>
-          <select id="k8sVersion" bind:value={controlPlaneVersion}>
+          <select id="k8sVersion" title="Kubernetes version for the control plane" bind:value={controlPlaneVersion}>
             <option value="v1.36.3">v1.36.3</option>
             <option value="v1.35.1">v1.35.1</option>
             <option value="v1.34.0">v1.34.0</option>
@@ -436,7 +438,7 @@
 
         <div class="form-group">
           <label for="talosVersion">Talos Version</label>
-          <select id="talosVersion" bind:value={talosVersion}>
+          <select id="talosVersion" title="Talos Linux version to install on nodes" bind:value={talosVersion}>
             <option value="v1.13.7">v1.13.7</option>
             <option value="v1.12.0">v1.12.0</option>
             <option value="v1.11.0">v1.11.0</option>
@@ -447,8 +449,8 @@
       </div>
 
       <div class="form-actions">
-        <Button variant="ghost" onclick={() => window.history.back()}>Cancel</Button>
-        <Button variant="primary" onclick={() => currentStep = 1} disabled={!canProceed(0)}>
+        <Button variant="ghost" title="Cancel and go back" onclick={() => window.history.back()}>Cancel</Button>
+        <Button variant="primary" title="Continue to network configuration" onclick={() => currentStep = 1} disabled={!canProceed(0)}>
           Next: Network →
         </Button>
       </div>
@@ -465,7 +467,7 @@
       </p>
 
       <label class="toggle-row">
-        <input type="checkbox" bind:checked={networkEnabled} />
+        <input type="checkbox" title="Enable a custom bond + VLAN network for the nodes" bind:checked={networkEnabled} />
         <span>Configure custom network (bond + VLAN)</span>
       </label>
 
@@ -476,15 +478,15 @@
             <div class="form-grid">
               <div class="form-group">
                 <label for="bondName">Bond Name</label>
-                <input id="bondName" type="text" bind:value={bondName} />
+                <input id="bondName" type="text" title="Name of the bond interface" bind:value={bondName} />
               </div>
               <div class="form-group">
                 <label for="bondIfaces">Slave Interfaces</label>
-                <input id="bondIfaces" type="text" bind:value={bondInterfaces} placeholder="eno49, eno50" />
+                <input id="bondIfaces" type="text" title="Comma-separated NICs to bond, e.g. eno49, eno50" bind:value={bondInterfaces} placeholder="eno49, eno50" />
               </div>
               <div class="form-group">
                 <label for="bondMode">Bond Mode</label>
-                <select id="bondMode" bind:value={bondMode}>
+                <select id="bondMode" title="Bonding mode (802.3ad = LACP)" bind:value={bondMode}>
                   <option value="802.3ad">802.3ad (LACP)</option>
                   <option value="active-backup">Active-Backup</option>
                   <option value="balance-rr">Balance-RR</option>
@@ -492,11 +494,11 @@
               </div>
               <div class="form-group">
                 <label for="bondMiimon">Miimon (ms)</label>
-                <input id="bondMiimon" type="number" bind:value={bondMiimon} />
+                <input id="bondMiimon" type="number" title="Bond link monitoring interval in milliseconds" bind:value={bondMiimon} />
               </div>
               <div class="form-group">
                 <label for="lacpRate">LACP Rate</label>
-                <select id="lacpRate" bind:value={bondLacpRate}>
+                <select id="lacpRate" title="LACP negotiation rate" bind:value={bondLacpRate}>
                   <option value="fast">Fast (1s)</option>
                   <option value="slow">Slow (30s)</option>
                 </select>
@@ -509,27 +511,27 @@
             <div class="form-grid">
               <div class="form-group">
                 <label for="vlanName">VLAN Interface</label>
-                <input id="vlanName" type="text" bind:value={vlanName} />
+                <input id="vlanName" type="text" title="Name of the VLAN interface, e.g. bond0.207" bind:value={vlanName} />
               </div>
               <div class="form-group">
                 <label for="vlanId">VLAN ID</label>
-                <input id="vlanId" type="number" bind:value={vlanId} />
+                <input id="vlanId" type="number" title="VLAN ID to tag the bond interface with" bind:value={vlanId} />
               </div>
               <div class="form-group">
                 <label for="subnet">Subnet</label>
-                <input id="subnet" type="text" bind:value={subnet} placeholder="162.242.191.0/26" />
+                <input id="subnet" type="text" title="VLAN subnet in CIDR notation" bind:value={subnet} placeholder="162.242.191.0/26" />
               </div>
               <div class="form-group">
                 <label for="gateway">Gateway</label>
-                <input id="gateway" type="text" bind:value={gateway} />
+                <input id="gateway" type="text" title="Default gateway on the VLAN subnet" bind:value={gateway} />
               </div>
               <div class="form-group">
                 <label for="dns">DNS Servers</label>
-                <input id="dns" type="text" bind:value={dnsServers} placeholder="172.24.16.254" />
+                <input id="dns" type="text" title="Comma-separated DNS servers for the nodes" bind:value={dnsServers} placeholder="172.24.16.254" />
               </div>
               <div class="form-group">
                 <label for="mtu">MTU (optional)</label>
-                <input id="mtu" type="text" bind:value={mtu} placeholder="1500" />
+                <input id="mtu" type="text" title="Optional MTU for the VLAN interface" bind:value={mtu} placeholder="1500" />
               </div>
             </div>
           </div>
@@ -537,8 +539,8 @@
       {/if}
 
       <div class="form-actions">
-        <Button variant="ghost" onclick={() => currentStep = 0}>← Back</Button>
-        <Button variant="primary" onclick={() => currentStep = 2}>Next: Machines →</Button>
+        <Button variant="ghost" title="Go back to cluster details" onclick={() => currentStep = 0}>← Back</Button>
+        <Button variant="primary" title="Continue to machine registration" onclick={() => currentStep = 2}>Next: Machines →</Button>
       </div>
     </div>
   {/if}
@@ -556,11 +558,12 @@
         <h3>Import from YAML</h3>
         <textarea
           class="yaml-textarea"
+          title="Machine inventory YAML to import"
           bind:value={yamlImportText}
           placeholder="# Paste your machine inventory YAML here"
           rows={6}
         ></textarea>
-        <Button variant="secondary" size="sm" onclick={importYaml} disabled={importing || !yamlImportText.trim()}>
+        <Button variant="secondary" size="sm" title="Import machines from the YAML above" onclick={importYaml} disabled={importing || !yamlImportText.trim()}>
           {importing ? 'Importing...' : 'Import YAML'}
         </Button>
       </div>
@@ -569,17 +572,17 @@
       <div class="add-section">
         <h3>Add Machine</h3>
         <div class="add-row">
-          <input class="addr-input" type="text" bind:value={newMachineHostname} placeholder="Hostname (optional)" />
-          <input class="addr-input" type="text" bind:value={newMachineAddress} placeholder="Address" />
-          <input class="addr-input" type="text" bind:value={newMachineMac} placeholder="MAC" />
-          <input class="addr-input" type="text" bind:value={newMachineBmc} placeholder="BMC IP" />
-          <input class="addr-input" type="text" bind:value={newMachineBmcUser} placeholder="BMC user" />
-          <input class="addr-input" type="password" bind:value={newMachineBmcPass} placeholder="BMC pass" />
-          <select bind:value={newMachineType}>
+          <input class="addr-input" type="text" title="Node hostname (optional)" bind:value={newMachineHostname} placeholder="Hostname (optional)" />
+          <input class="addr-input" type="text" title="Node API address, e.g. 10.0.0.2" bind:value={newMachineAddress} placeholder="Address" />
+          <input class="addr-input" type="text" title="Primary NIC MAC address" bind:value={newMachineMac} placeholder="MAC" />
+          <input class="addr-input" type="text" title="Out-of-band BMC management IP" bind:value={newMachineBmc} placeholder="BMC IP" />
+          <input class="addr-input" type="text" title="BMC management username" bind:value={newMachineBmcUser} placeholder="BMC user" />
+          <input class="addr-input" type="password" title="BMC management password" bind:value={newMachineBmcPass} placeholder="BMC pass" />
+          <select title="Node role: control-plane or worker" bind:value={newMachineType}>
             <option value="controlplane">Control</option>
             <option value="worker">Worker</option>
           </select>
-          <Button variant="secondary" size="sm" onclick={addMachine} disabled={addingMachine}>
+          <Button variant="secondary" size="sm" title="Register this machine into the cluster" onclick={addMachine} disabled={addingMachine}>
             {addingMachine ? 'Adding...' : 'Add'}
           </Button>
         </div>
@@ -607,7 +610,7 @@
                 </div>
                 <div class="machine-actions">
                   {#if !m.installDisk && m.status === 'pending'}
-                    <Button variant="secondary" size="sm" onclick={() => discoverDisks(i)} disabled={m.loadingDisks}>
+                    <Button variant="secondary" size="sm" title="Query the node for disks and select the largest as the install disk" onclick={() => discoverDisks(i)} disabled={m.loadingDisks}>
                       {m.loadingDisks ? 'Discovering...' : 'Discover disk'}
                     </Button>
                   {/if}
@@ -619,8 +622,8 @@
       {/if}
 
       <div class="form-actions">
-        <Button variant="ghost" onclick={() => currentStep = 1}>← Back</Button>
-        <Button variant="primary" onclick={() => currentStep = 3} disabled={!canProceed(2)}>
+        <Button variant="ghost" title="Go back to network configuration" onclick={() => currentStep = 1}>← Back</Button>
+        <Button variant="primary" title="Continue to config generation and provisioning" onclick={() => currentStep = 3} disabled={!canProceed(2)}>
           Next: Provision →
         </Button>
       </div>
@@ -670,6 +673,7 @@
 
         <Button
           variant="primary"
+          title="Generate cluster PKI and per-role Talos machine configs"
           onclick={generateConfigs}
           disabled={generating}
         >
@@ -689,12 +693,12 @@
           </div>
           <div class="dl-row">
             {#if generated.controlplaneConfig}
-              <Button variant="secondary" size="sm" onclick={() => download(`${name}-controlplane.yaml`, generated!.controlplaneConfig!)}>
+              <Button variant="secondary" size="sm" title="Download the control-plane Talos machine config" onclick={() => download(`${name}-controlplane.yaml`, generated!.controlplaneConfig!)}>
                 Download CP config
               </Button>
             {/if}
             {#if generated.workerConfig}
-              <Button variant="secondary" size="sm" onclick={() => download(`${name}-worker.yaml`, generated!.workerConfig!)}>
+              <Button variant="secondary" size="sm" title="Download the worker Talos machine config" onclick={() => download(`${name}-worker.yaml`, generated!.workerConfig!)}>
                 Download Worker config
               </Button>
             {/if}
@@ -712,7 +716,7 @@
                 <li>Bootstrap first control plane node</li>
                 <li>Continue provisioning remaining machines</li>
               </ul>
-              <Button variant="danger" onclick={startMetalProvision} disabled={provisionBusy}>
+              <Button variant="danger" title="Start the automated PXE/BMC provision job for all registered machines" onclick={startMetalProvision} disabled={provisionBusy}>
                 {provisionBusy ? 'Starting...' : '🚀 Start Provision Job'}
               </Button>
             </div>
@@ -729,7 +733,7 @@
               {jobStatus}
             </div>
             {#if jobStatus !== 'succeeded' && jobStatus !== 'cancelled'}
-              <Button variant="danger" size="sm" onclick={cancelJob}>Cancel</Button>
+              <Button variant="danger" size="sm" title="Cancel the running provision job" onclick={cancelJob}>Cancel</Button>
             {/if}
           </div>
 
@@ -755,7 +759,7 @@
             <div class="success-banner full">
               🎉 Cluster provisioned successfully!
               <div class="dl-row" style="margin-top: 1rem;">
-                <Button variant="primary" onclick={() => goto(clusterId ? `/clusters/${clusterId}` : '/')}>View Cluster</Button>
+                <Button variant="primary" title="Open the newly provisioned cluster" onclick={() => goto(clusterId ? `/clusters/${clusterId}` : '/')}>View Cluster</Button>
               </div>
             </div>
           {/if}
@@ -786,9 +790,9 @@
       {/if}
 
       <div class="form-actions">
-        <Button variant="ghost" onclick={() => currentStep = 2}>← Back</Button>
+        <Button variant="ghost" title="Go back to machine registration" onclick={() => currentStep = 2}>← Back</Button>
         {#if generated}
-          <Button variant="secondary" onclick={() => goto('/')}>Back to Dashboard</Button>
+          <Button variant="secondary" title="Return to the dashboard" onclick={() => goto('/')}>Back to Dashboard</Button>
         {/if}
       </div>
     </div>

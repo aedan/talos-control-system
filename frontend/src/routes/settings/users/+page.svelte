@@ -146,7 +146,7 @@
 <div class="users-page">
   <div class="page-header">
     <h1>Users</h1>
-    <Button variant="primary" onclick={() => { showAddForm = !showAddForm; }}>
+    <Button variant="primary" title={showAddForm ? 'Close the new user form' : 'Create a new TCS user account'} onclick={() => { showAddForm = !showAddForm; }}>
       {showAddForm ? 'Cancel' : 'Add User'}
     </Button>
   </div>
@@ -157,15 +157,15 @@
       <div class="form-row">
         <div class="form-group">
           <label for="add-email">Email</label>
-          <input id="add-email" type="email" bind:value={addForm.email} placeholder="user@example.com" required />
+          <input id="add-email" type="email" title="Login email for the new user" bind:value={addForm.email} placeholder="user@example.com" required />
         </div>
         <div class="form-group">
           <label for="add-name">Display Name</label>
-          <input id="add-name" type="text" bind:value={addForm.displayName} placeholder="John Doe" required />
+          <input id="add-name" type="text" title="Display name shown in the UI for this user" bind:value={addForm.displayName} placeholder="John Doe" required />
         </div>
         <div class="form-group">
           <label for="add-role">Role</label>
-          <select id="add-role" bind:value={addForm.role}>
+          <select id="add-role" title="Access level: Reader (view), Editor (modify), Admin (full)" bind:value={addForm.role}>
             <option value="reader">Reader</option>
             <option value="editor">Editor</option>
             <option value="admin">Admin</option>
@@ -173,12 +173,12 @@
         </div>
         <div class="form-group">
           <label for="add-password">Password</label>
-          <input id="add-password" type="password" bind:value={addForm.password} placeholder="Leave empty for no password" />
+          <input id="add-password" type="password" title="Initial password; leave empty to create the user without one" bind:value={addForm.password} placeholder="Leave empty for no password" />
         </div>
       </div>
       <div class="form-actions">
-        <Button variant="primary" onclick={handleAddUser}>Create User</Button>
-        <Button variant="ghost" onclick={() => showAddForm = false}>Cancel</Button>
+        <Button variant="primary" title="Create the new user with the details entered above" onclick={handleAddUser}>Create User</Button>
+        <Button variant="ghost" title="Close the new user form without saving" onclick={() => showAddForm = false}>Cancel</Button>
       </div>
     </div>
   {/if}
@@ -213,11 +213,11 @@
                   <div class="form-row">
                     <div class="form-group">
                       <label>Display Name</label>
-                      <input type="text" bind:value={editForm.displayName} />
+                      <input type="text" title="Display name shown in the UI for this user" bind:value={editForm.displayName} />
                     </div>
                     <div class="form-group">
                       <label>Role</label>
-                      <select bind:value={editForm.role}>
+                      <select title="Access level: Reader (view), Editor (modify), Admin (full)" bind:value={editForm.role}>
                         <option value="reader">Reader</option>
                         <option value="editor">Editor</option>
                         <option value="admin">Admin</option>
@@ -225,12 +225,12 @@
                     </div>
                     <div class="form-group">
                       <label>New Password</label>
-                      <input type="password" bind:value={editForm.password} placeholder="Leave empty to keep current" />
+                      <input type="password" title="Set a new password; leave empty to keep the current one" bind:value={editForm.password} placeholder="Leave empty to keep current" />
                     </div>
                   </div>
                   <div class="form-actions">
-                    <Button variant="primary" size="sm" onclick={handleEditUser}>Save</Button>
-                    <Button variant="ghost" size="sm" onclick={cancelEdit}>Cancel</Button>
+                    <Button variant="primary" size="sm" title="Save changes to this user" onclick={handleEditUser}>Save</Button>
+                    <Button variant="ghost" size="sm" title="Discard changes and close the editor" onclick={cancelEdit}>Cancel</Button>
                   </div>
                 </div>
               </td>
@@ -241,7 +241,7 @@
               <td>{user.email}</td>
               <td><span class="role-badge {user.role}">{user.role}</span></td>
               <td>
-                <label class="toggle">
+                <label class="toggle" title="Enable or disable this user's account">
                   <input type="checkbox" checked={user.isActive} onchange={() => toggleActive(user)} />
                   <span class="toggle-track">
                     <span class="toggle-thumb"></span>
@@ -251,9 +251,9 @@
               <td>{formatDate(user.lastLogin)}</td>
               <td>
                 <div class="actions">
-                  <Button variant="ghost" size="sm" onclick={() => startEdit(user)}>Edit</Button>
-                  <Button variant="ghost" size="sm" onclick={() => resetPassword(user)}>Reset PW</Button>
-                  <Button variant="danger" size="sm" onclick={() => deleteUser(user)}>Delete</Button>
+                  <Button variant="ghost" size="sm" title="Edit this user's display name, role, or password" onclick={() => startEdit(user)}>Edit</Button>
+                  <Button variant="ghost" size="sm" title="Generate and display a new password for this user" onclick={() => resetPassword(user)}>Reset PW</Button>
+                  <Button variant="danger" size="sm" title="Permanently delete this user account" onclick={() => deleteUser(user)}>Delete</Button>
                 </div>
               </td>
             </tr>

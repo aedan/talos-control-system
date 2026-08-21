@@ -74,6 +74,7 @@
         <input
           id="email"
           type="email"
+          title="Your TCS account email"
           bind:value={email}
           placeholder="admin@example.com"
           autocomplete="email"
@@ -86,6 +87,7 @@
         <input
           id="password"
           type="password"
+          title="Your TCS account password"
           bind:value={password}
           placeholder="Enter your password"
           autocomplete="current-password"
@@ -97,6 +99,7 @@
         variant="primary"
         size="lg"
         type="submit"
+        title="Sign in to TCS with your email and password"
         disabled={loading}
         class="submit-btn"
       >
@@ -111,7 +114,7 @@
 
       <div class="alt-auth">
         {#if oidcEnabled}
-          <a href="/api/auth/oidc" class="alt-btn oidc">
+          <a href="/api/auth/oidc" title="Sign in using your OpenID Connect (OIDC) identity provider" class="alt-btn oidc">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="10"/>
               <path d="M2 12h20"/>
@@ -121,7 +124,7 @@
           </a>
         {/if}
         {#if samlEnabled}
-          <a href="/api/auth/saml/login" class="alt-btn saml">
+          <a href="/api/auth/saml/login" title="Sign in using your SAML identity provider" class="alt-btn saml">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
               <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
               <path d="M7 11V7a5 5 0 0 1 10 0v4"/>

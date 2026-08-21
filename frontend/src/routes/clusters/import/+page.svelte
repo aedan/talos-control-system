@@ -80,7 +80,7 @@
       <p class="subtitle">Import an existing Talos Linux cluster using its kubeconfig</p>
     </div>
     <a href="/">
-      <Button variant="ghost">Back to Dashboard</Button>
+      <Button variant="ghost" title="Return to the dashboard">Back to Dashboard</Button>
     </a>
   </div>
 
@@ -99,6 +99,7 @@
         <input
           id="cluster-name"
           type="text"
+          title="Internal name for this cluster in TCS"
           bind:value={name}
           placeholder="my-talos-cluster"
           class="input"
@@ -109,6 +110,7 @@
         <label for="kubeconfig">Kubeconfig YAML</label>
         <textarea
           id="kubeconfig"
+          title="Kubeconfig YAML for the cluster to import (usually ~/.kube/config)"
           bind:value={kubeconfig}
           placeholder="apiVersion: v1
 kind: Config
@@ -128,6 +130,7 @@ clusters:
         </p>
         <textarea
           id="talosconfig"
+          title="Talosconfig YAML (~/.talos/config) enabling Talos API operations"
           bind:value={talosconfig}
           placeholder="context: my-cluster
 contexts:
@@ -148,9 +151,9 @@ contexts:
 
       <div class="form-actions">
         <a href="/">
-          <Button variant="ghost">Cancel</Button>
+          <Button variant="ghost" title="Cancel and return to the dashboard">Cancel</Button>
         </a>
-        <Button variant="primary" disabled={$storeLoading} onclick={handlePreview}>
+        <Button variant="primary" title="Validate the kubeconfig and preview the discovered cluster" disabled={$storeLoading} onclick={handlePreview}>
           {$storeLoading ? 'Validating...' : 'Validate & Preview'}
         </Button>
       </div>
@@ -160,7 +163,7 @@ contexts:
     <div class="form-card">
       <div class="preview-header">
         <h2>Discovered Cluster</h2>
-        <Button variant="ghost" onclick={() => step = 'input'}>← Edit</Button>
+        <Button variant="ghost" title="Go back and edit the kubeconfig" onclick={() => step = 'input'}>← Edit</Button>
       </div>
 
       {#if preview}
@@ -251,10 +254,11 @@ contexts:
 
         <div class="form-actions">
           <a href="/">
-            <Button variant="ghost">Cancel</Button>
+            <Button variant="ghost" title="Cancel the import">Cancel</Button>
           </a>
           <Button
             variant="primary"
+            title="Import this cluster and its machines into TCS"
             disabled={$storeLoading}
             onclick={handleImport}
           >
@@ -284,11 +288,11 @@ contexts:
       {/if}
       <div class="form-actions">
         <a href="/">
-          <Button variant="ghost">View All Clusters</Button>
+          <Button variant="ghost" title="Return to the dashboard">View All Clusters</Button>
         </a>
         {#if importResult}
           <a href="/clusters/{importResult.cluster.id}">
-            <Button variant="primary">View Cluster</Button>
+            <Button variant="primary" title="Open the imported cluster">View Cluster</Button>
           </a>
         {/if}
       </div>

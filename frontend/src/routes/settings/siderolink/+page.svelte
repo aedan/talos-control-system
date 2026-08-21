@@ -62,13 +62,13 @@
     <div class="form-row">
       <label>
         Label
-        <input type="text" bind:value={label} placeholder="lab-batch-1" />
+        <input type="text" title="Optional label to identify this join token" bind:value={label} placeholder="lab-batch-1" />
       </label>
       <label class="num">
         Expires (hours)
-        <input type="number" min="1" bind:value={expiresHours} />
+        <input type="number" title="Hours until this join token expires" min="1" bind:value={expiresHours} />
       </label>
-      <Button variant="primary" onclick={createToken} disabled={busy}>Create token</Button>
+      <Button variant="primary" title="Create a join token machines use to register with Siderolink" onclick={createToken} disabled={busy}>Create token</Button>
     </div>
     {#if lastToken}
       <p class="token-out">

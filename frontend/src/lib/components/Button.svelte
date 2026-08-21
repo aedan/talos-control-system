@@ -8,7 +8,8 @@
     type = 'button',
     onclick,
     children,
-    class: extraClass = ''
+    class: extraClass = '',
+    title
   }: {
     variant?: 'primary' | 'secondary' | 'ghost' | 'danger';
     size?: 'sm' | 'md' | 'lg';
@@ -17,6 +18,7 @@
     onclick?: (e: MouseEvent) => void;
     children?: Snippet;
     class?: string;
+    title?: string;
   } = $props();
 
   const variantClasses = {
@@ -33,6 +35,7 @@
         {type}
         {disabled}
         {onclick}
+        {title}
         class:opacity-50={disabled}
         class:pointer-events-none={disabled}>
   {#if children}

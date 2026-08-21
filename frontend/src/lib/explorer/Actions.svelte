@@ -120,19 +120,19 @@
     <div class="btn-row">
       {#if isDeployment}
         <div class="scale-group">
-          <input type="number" min="0" bind:value={replicas} />
-          <Button variant="secondary" size="sm" onclick={doScale} disabled={busy}>Scale</Button>
+          <input type="number" min="0" title="Desired replica count for this deployment" bind:value={replicas} />
+          <Button variant="secondary" size="sm" title="Scale this deployment to the replica count above" onclick={doScale} disabled={busy}>Scale</Button>
         </div>
       {/if}
       {#if isNode}
-        <Button variant="secondary" size="sm" onclick={() => doCordon(true)} disabled={busy}>Cordon</Button>
-        <Button variant="secondary" size="sm" onclick={() => doCordon(false)} disabled={busy}>Uncordon</Button>
-        <Button variant="danger" size="sm" onclick={doDrain} disabled={busy}>Drain</Button>
+        <Button variant="secondary" size="sm" title="Cordon this node so no new pods are scheduled on it" onclick={() => doCordon(true)} disabled={busy}>Cordon</Button>
+        <Button variant="secondary" size="sm" title="Uncordon this node to allow new pod scheduling" onclick={() => doCordon(false)} disabled={busy}>Uncordon</Button>
+        <Button variant="danger" size="sm" title="Evict non-DaemonSet pods from this node" onclick={doDrain} disabled={busy}>Drain</Button>
       {/if}
       {#if isPod || isDeployment}
-        <Button variant="danger" size="sm" onclick={doDelete} disabled={busy}>Delete</Button>
+        <Button variant="danger" size="sm" title="Delete this resource (cannot be undone)" onclick={doDelete} disabled={busy}>Delete</Button>
       {/if}
-      <Button variant="ghost" size="sm" onclick={() => (showApply = !showApply)} disabled={busy}>
+      <Button variant="ghost" size="sm" title="Show/hide the YAML manifest apply panel" onclick={() => (showApply = !showApply)} disabled={busy}>
         {showApply ? 'Hide Apply' : 'Apply YAML'}
       </Button>
     </div>
@@ -146,13 +146,14 @@
     {#if showApply}
       <div class="apply">
         <textarea
+          title="Kubernetes manifest(s) to server-side apply; separate multiple documents with ---"
           bind:value={manifest}
           rows="8"
           placeholder="apiVersion: apps/v1&#10;kind: Deployment&#10;metadata:&#10;  name: …&#10;spec: …"
         ></textarea>
         <div class="apply-foot">
           <span class="hint">Server-side apply. Multiple documents separated by `---`.</span>
-          <Button variant="primary" size="sm" onclick={doApply} disabled={busy || !manifest.trim()}>
+          <Button variant="primary" size="sm" title="Server-side apply the manifest(s) above" onclick={doApply} disabled={busy || !manifest.trim()}>
             {busy ? 'Applying…' : 'Apply'}
           </Button>
         </div>

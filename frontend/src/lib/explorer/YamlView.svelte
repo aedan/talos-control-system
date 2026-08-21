@@ -39,7 +39,7 @@
 <div class="yaml-view">
   <div class="yaml-head">
     <span class="yaml-title">{title}</span>
-    <button class="copy-btn" onclick={copy}>Copy</button>
+    <button class="copy-btn" title="Copy the YAML to clipboard" onclick={copy}>Copy</button>
   </div>
   <pre class="yaml-pre"><code>{text}</code></pre>
 </div>

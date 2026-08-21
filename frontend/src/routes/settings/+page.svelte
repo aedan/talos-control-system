@@ -6,7 +6,7 @@
   <p class="description">Manage your TCS deployment configuration.</p>
   
   <div class="settings-grid">
-    <a href="/settings/branding" class="settings-card">
+    <a href="/settings/branding" title="Customize colors, logo, and identity of your deployment" class="settings-card">
       <div class="card-icon">
         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>
@@ -17,7 +17,7 @@
       <span class="card-arrow">&rarr;</span>
     </a>
     
-    <a href="/settings/users" class="settings-card">
+    <a href="/settings/users" title="Manage user accounts and access control" class="settings-card">
       <div class="card-icon">
         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
@@ -31,7 +31,7 @@
       <span class="card-arrow">&rarr;</span>
     </a>
     
-    <a href="/settings/certificates" class="settings-card">
+    <a href="/settings/certificates" title="Manage TLS certificates and Let's Encrypt integration" class="settings-card">
       <div class="card-icon">
         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
@@ -42,7 +42,7 @@
       <span class="card-arrow">&rarr;</span>
     </a>
     
-    <a href="/settings/auth" class="settings-card">
+    <a href="/settings/auth" title="Configure OIDC, LDAP, SAML status, and local auth" class="settings-card">
       <div class="card-icon">
         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
@@ -56,7 +56,7 @@
       <span class="card-arrow">&rarr;</span>
     </a>
 
-    <a href="/settings/siderolink" class="settings-card">
+    <a href="/settings/siderolink" title="Join tokens and registered peer inventory" class="settings-card">
       <div class="card-icon">
         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
@@ -68,7 +68,21 @@
       <span class="card-arrow">&rarr;</span>
     </a>
 
-    <a href="/settings/audit-logs" class="settings-card">
+    <a href="/settings/metal" title="Configure the metal provisioning server (DHCP/PXE) for bare-metal installs" class="settings-card">
+      <div class="card-icon">
+        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/>
+          <rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
+          <line x1="6" y1="6" x2="6.01" y2="6"/>
+          <line x1="6" y1="18" x2="6.01" y2="18"/>
+        </svg>
+      </div>
+      <h3>Metal / PXE</h3>
+      <p>Configure the metal provisioning server (DHCP/PXE) for bare-metal installs.</p>
+      <span class="card-arrow">&rarr;</span>
+    </a>
+
+    <a href="/settings/audit-logs" title="View and export system audit trail" class="settings-card">
       <div class="card-icon">
         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -82,7 +96,7 @@
       <span class="card-arrow">&rarr;</span>
     </a>
 
-    <a href="/settings/system" class="settings-card">
+    <a href="/settings/system" title="View TCS version, uptime, database, and runtime info" class="settings-card">
       <div class="card-icon">
         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="12" cy="12" r="3"/>

@@ -399,7 +399,7 @@
     <div class="header-row">
       <h1>{cluster.name}</h1>
       <div class="actions">
-        <Button variant="secondary" size="sm" onclick={refresh} disabled={busy}>Refresh from K8s</Button>
+        <Button variant="secondary" size="sm" title="Re-read node inventory and versions from the cluster's stored kubeconfig" onclick={refresh} disabled={busy}>Refresh from K8s</Button>
       </div>
     </div>
 
@@ -453,17 +453,17 @@
           <div class="inline-form">
             <label>
               Installer image
-              <input type="text" bind:value={upgradeImage} placeholder="ghcr.io/siderolabs/installer:v1.x" />
+              <input type="text" title="Talos installer image to roll out, e.g. ghcr.io/siderolabs/installer:v1.9.0" bind:value={upgradeImage} placeholder="ghcr.io/siderolabs/installer:v1.x" />
             </label>
             <label class="num">
               Max unavailable
-              <input type="number" min="1" max="20" bind:value={upgradeMaxUnavail} />
+              <input type="number" title="How many nodes may be upgraded concurrently" min="1" max="20" bind:value={upgradeMaxUnavail} />
             </label>
             <label class="check">
-              <input type="checkbox" bind:checked={upgradeCpLast} />
+              <input type="checkbox" title="Upgrade workers before control-plane nodes for safety" bind:checked={upgradeCpLast} />
               Workers first (control plane last)
             </label>
-            <Button variant="primary" size="sm" onclick={startClusterUpgrade} disabled={busy}>
+            <Button variant="primary" size="sm" title="Queue a rolling Talos upgrade across this cluster's nodes" onclick={startClusterUpgrade} disabled={busy}>
               Start rolling upgrade
             </Button>
           </div>
@@ -488,12 +488,12 @@
                     <tr>
                       <td class="mono">{job.image || '—'}</td>
                       <td><span class="status-badge {job.status}">{job.status}</span></td>
-                      <td>{job.createdAt || job.created_at ? new Date(job.createdAt || job.created_at).toLocaleString() : '—'}</td>
+                      <td>{job.createdAt || job.created_at ? new Date(job.createdAt || job.created_at || '').toLocaleString() : '—'}</td>
                       <td>
                         <div class="row-actions">
-                          <Button variant="ghost" size="sm" onclick={() => openUpgradeJob(job.id)}>Details</Button>
+                          <Button variant="ghost" size="sm" title="View the full status and progress of this upgrade job" onclick={() => openUpgradeJob(job.id)}>Details</Button>
                           {#if job.status === 'pending' || job.status === 'running'}
-                            <Button variant="danger" size="sm" onclick={() => cancelUpgradeJob(job.id)}>Cancel</Button>
+                            <Button variant="danger" size="sm" title="Request cancellation of this running upgrade job" onclick={() => cancelUpgradeJob(job.id)}>Cancel</Button>
                           {/if}
                         </div>
                       </td>
@@ -506,7 +506,7 @@
               <div class="job-detail">
                 <div class="job-detail-header">
                   <h4>Job {upgradeJobDetail.job?.id || upgradeJobDetail.id}</h4>
-                  <Button variant="ghost" size="sm" onclick={() => (upgradeJobDetail = null)}>Close</Button>
+                  <Button variant="ghost" size="sm" title="Close this job detail view" onclick={() => (upgradeJobDetail = null)}>Close</Button>
                 </div>
                 <pre class="job-json">{JSON.stringify(upgradeJobDetail, null, 2)}</pre>
               </div>
@@ -517,9 +517,9 @@
     </details>
 
     <nav class="tabs">
-      <button class:active={tab === 'machines'} onclick={() => selectTab('machines')}>Machines</button>
-      <button class:active={tab === 'config'} onclick={() => selectTab('config')}>Config</button>
-      <button class:active={tab === 'backups'} onclick={() => selectTab('backups')}>Backups</button>
+      <button class:active={tab === 'machines'} title="Node inventory for this cluster" onclick={() => selectTab('machines')}>Machines</button>
+      <button class:active={tab === 'config'} title="Cluster-wide Talos config patches" onclick={() => selectTab('config')}>Config</button>
+      <button class:active={tab === 'backups'} title="Etcd snapshots and disaster recovery" onclick={() => selectTab('backups')}>Backups</button>
     </nav>
 
     <!-- ── Machines ──────────────────────────────────────────────── -->
@@ -579,11 +579,11 @@
             reachability to node :50000.
           </p>
           <div class="actions">
-            <Button variant="ghost" size="sm" onclick={() => applyAll(true)} disabled={applying || patches.length === 0}>Dry-run</Button>
-            <Button variant="secondary" size="sm" onclick={() => applyAll(false)} disabled={applying || patches.length === 0}>
+            <Button variant="ghost" size="sm" title="Validate patches against nodes without applying them" onclick={() => applyAll(true)} disabled={applying || patches.length === 0}>Dry-run</Button>
+            <Button variant="secondary" size="sm" title="Apply all stored patches to every node in the cluster" onclick={() => applyAll(false)} disabled={applying || patches.length === 0}>
               {applying ? 'Applying…' : 'Apply to cluster'}
             </Button>
-            <Button variant="primary" size="sm" onclick={() => (showEditor = !showEditor)}>
+            <Button variant="primary" size="sm" title="Add a new config patch" onclick={() => (showEditor = !showEditor)}>
               {showEditor ? 'Cancel' : 'Add Patch'}
             </Button>
           </div>
@@ -613,19 +613,19 @@
             <div class="form-row">
               <div class="form-group">
                 <label>Document Path</label>
-                <input type="text" bind:value={newPatch.path} placeholder="/machine/sysctls/net.ipv4.ip_forward" />
+                <input type="text" title="Talos config path to patch, e.g. /machine/sysctls/net.ipv4.ip_forward" bind:value={newPatch.path} placeholder="/machine/sysctls/net.ipv4.ip_forward" />
               </div>
               <div class="form-group narrow">
                 <label>Priority</label>
-                <input type="number" bind:value={newPatch.priority} />
+                <input type="number" title="Higher priority patches are applied later (override)" bind:value={newPatch.priority} />
               </div>
             </div>
             <div class="form-group">
               <label>Value (YAML)</label>
-              <textarea bind:value={newPatch.value} rows="5" placeholder="true"></textarea>
+              <textarea title="The YAML value to set at the path above" bind:value={newPatch.value} rows="5" placeholder="true"></textarea>
             </div>
             <div class="editor-actions">
-              <Button variant="primary" size="sm" onclick={addPatch} disabled={saving}>
+              <Button variant="primary" size="sm" title="Save this patch to the cluster" onclick={addPatch} disabled={saving}>
                 {saving ? 'Saving…' : 'Apply Patch'}
               </Button>
             </div>
@@ -649,7 +649,7 @@
                   <code class="patch-path">{patch.path}</code>
                   <span class="scope-badge {patch.scope}">{patch.scope}</span>
                   <span class="priority">Priority: {patch.priority}</span>
-                  <Button variant="danger" size="sm" onclick={() => deletePatch(patch.id)}>Remove</Button>
+                  <Button variant="danger" size="sm" title="Delete this config patch" onclick={() => deletePatch(patch.id)}>Remove</Button>
                 </div>
                 <pre class="patch-value"><code>{patch.value}</code></pre>
               </div>
@@ -664,7 +664,7 @@
       <div class="tab-panel">
         <div class="panel-header">
           <h2>Etcd snapshots</h2>
-          <Button variant="primary" size="sm" onclick={createBackup} disabled={creating}>
+          <Button variant="primary" size="sm" title="Take a new etcd snapshot of the cluster control plane" onclick={createBackup} disabled={creating}>
             {creating ? 'Creating…' : 'Create Backup'}
           </Button>
         </div>
@@ -675,13 +675,13 @@
           <div class="inline-form">
             <label>
               Interval (hours, 0 = off)
-              <input type="number" min="0" max="168" bind:value={scheduleHours} />
+              <input type="number" title="Hours between automatic snapshots; 0 disables the schedule" min="0" max="168" bind:value={scheduleHours} />
             </label>
             <label>
               Retention (ready backups to keep)
-              <input type="number" min="1" max="100" bind:value={retention} />
+              <input type="number" title="Number of ready snapshots to retain before pruning" min="1" max="100" bind:value={retention} />
             </label>
-            <Button variant="secondary" size="sm" onclick={saveSchedule} disabled={savingSchedule}>
+            <Button variant="secondary" size="sm" title="Save the automatic backup schedule" onclick={saveSchedule} disabled={savingSchedule}>
               {savingSchedule ? 'Saving…' : 'Save schedule'}
             </Button>
           </div>
@@ -698,7 +698,7 @@
         <section class="panel">
           <h3>Restore target</h3>
           <p class="hint">Control-plane node used for disaster recovery restore.</p>
-          <select bind:value={restoreMachineId}>
+          <select title="Control-plane node that will perform the etcd restore" bind:value={restoreMachineId}>
             <option value="">Auto (first control-plane / talosconfig endpoint)</option>
             {#each controlPlanes as m (m.id)}
               <option value={m.id}>{machineLabel(m)} — {m.address || 'no address'}</option>
@@ -735,11 +735,11 @@
                   <td>{backup.createdAt ? new Date(backup.createdAt).toLocaleString() : '—'}</td>
                   <td>
                     <div class="row-actions">
-                      <Button variant="ghost" size="sm" onclick={() => downloadBackup(backup)} disabled={backup.status !== 'ready'}>Download</Button>
-                      <Button variant="secondary" size="sm" onclick={() => restoreBackup(backup)} disabled={backup.status !== 'ready' || restoringId === backup.id}>
+                      <Button variant="ghost" size="sm" title="Download this etcd snapshot file" onclick={() => downloadBackup(backup)} disabled={backup.status !== 'ready'}>Download</Button>
+                      <Button variant="secondary" size="sm" title="Restore the cluster control plane from this snapshot (disaster recovery)" onclick={() => restoreBackup(backup)} disabled={backup.status !== 'ready' || restoringId === backup.id}>
                         {restoringId === backup.id ? 'Restoring…' : 'Restore'}
                       </Button>
-                      <Button variant="danger" size="sm" onclick={() => deleteBackup(backup)}>Delete</Button>
+                      <Button variant="danger" size="sm" title="Permanently delete this snapshot" onclick={() => deleteBackup(backup)}>Delete</Button>
                     </div>
                   </td>
                 </tr>

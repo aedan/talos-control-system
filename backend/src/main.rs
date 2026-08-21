@@ -44,48 +44,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             return Ok(());
         }
         if cmd == "--help" || cmd == "-h" || cmd == "help" {
-            eprintln!(
-                "tcs — Talos Control System\n\n\
-                 Commands:\n\
-                   (default)                   Start the control plane\n\
-                   migrate-sqlite-to-postgres  Copy SQLite data into Postgres\n\
-                                               env: TCS_SQLITE_PATH, TCS_POSTGRES_URL\n\
-                   help                        Show this message\n\n\
-                 CLI (kubectl-like, thin client over the TCS API):\n\
-                   tcs login <email> <password>\n\
-                   tcs clusters\n\
-                   tcs get <kind> [name] [--ns] [-o table|wide|json|yaml]\n\
-                   tcs describe <kind> <name> [--ns]\n\
-                   tcs logs <pod> [--ns] [-f] [--tail N] [-c CONTAINER]\n\
-                   tcs exec <pod> [--ns] [-c CONTAINER] [-t] -- <command...>\n\
-                   tcs attach <pod> [--ns] [-c CONTAINER] [-t]\n\
-                   tcs delete <kind> <name> [--ns] [-f]\n\
-                   tcs scale <deployment> [--ns] --replicas N\n\
-                   tcs cordon <node> | uncordon <node>\n\
-                   tcs drain <node> [-f]\n\
-                   tcs apply -f <file|->\n\n\
-                 Global flags: --server URL --token JWT --cluster ID\n\
-                 Auth: `tcs login`, TCS_TOKEN, or ~/.tcs/config\n"
-            );
+            print_help();
             return Ok(());
         }
     }
 
-    // CLI verbs (tcs get / logs / exec / ...) vs. the server (bare `tcs`).
+    // The binary is a CLI by default. The control plane is only started when
+    // invoked explicitly with `tcs serve` (the systemd unit does this).
     //
-    // The control plane is always started with no subcommand, so:
-    //   * parse Ok + a subcommand present  -> run the CLI and exit
-    //   * parse Ok + no subcommand         -> fall through and start the server
+    //   * parse Ok + a subcommand present  -> run that command (serve boots the server)
+    //   * parse Ok + no subcommand         -> print help (CLI is the default)
     //   * parse Err (help/version/typo)    -> clap already printed the message; exit
     match talos_control_system::cli::Cli::try_parse_from(&argv) {
         Ok(cli) => {
-            if cli.command.is_some() {
+            if let Some(ref command) = cli.command {
+                if matches!(command, talos_control_system::cli::Command::Serve) {
+                    return run_server().await;
+                }
                 if let Err(e) = talos_control_system::cli::run_cli(cli).await {
                     eprintln!("error: {e}");
                     std::process::exit(1);
                 }
                 return Ok(());
             }
+            print_help();
+            return Ok(());
         }
         Err(e) => {
             // `try_parse_from` does not print the message itself (unlike `parse_from`);
@@ -93,7 +76,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             e.exit();
         }
     }
+}
 
+fn print_help() {
+    eprintln!(
+        "tcs — Talos Control System\n\n\
+         Server:\n\
+           tcs serve                       Start the control plane (systemd unit)\n\
+           tcs migrate-sqlite-to-postgres  Copy SQLite data into Postgres\n\
+                                           env: TCS_SQLITE_PATH, TCS_POSTGRES_URL\n\
+           tcs help                        Show this message\n\n\
+         CLI (kubectl-like, thin client over the TCS API):\n\
+           tcs login <email> <password>\n\
+           tcs clusters\n\
+           tcs get <kind> [name] [--ns] [-o table|wide|json|yaml]\n\
+           tcs describe <kind> <name> [--ns]\n\
+           tcs logs <pod> [--ns] [-f] [--tail N] [-c CONTAINER]\n\
+           tcs exec <pod> [--ns] [-c CONTAINER] [-t] -- <command...>\n\
+           tcs attach <pod> [--ns] [-c CONTAINER] [-t]\n\
+           tcs delete <kind> <name> [--ns] [-f]\n\
+           tcs scale <deployment> [--ns] --replicas N\n\
+           tcs cordon <node> | uncordon <node>\n\
+           tcs drain <node> [-f]\n\
+           tcs apply -f <file|->\n\n\
+         Global flags: --server URL --token JWT --cluster ID\n\
+         Auth: `tcs login`, TCS_TOKEN, or ~/.tcs/config\n"
+    );
+}
+
+/// Boot the TCS control-plane server (invoked via `tcs serve`).
+async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use talos_control_system::auth::jwt::set_jwt_secret;
     init_tracing();
     talos_control_system::api::rest::handlers::record_start_time();
