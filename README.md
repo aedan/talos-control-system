@@ -1,6 +1,6 @@
 # Talos Control System
 
-**Status: Alpha (v0.4.2)** — see [docs/STATUS.md](docs/STATUS.md) and [CHANGELOG.md](CHANGELOG.md).
+**Status: Alpha (v0.4.5)** — see [docs/STATUS.md](docs/STATUS.md) and [CHANGELOG.md](CHANGELOG.md).
 
 **Talos Control System (TCS)** is a self-hosted web UI for managing [Talos Linux](https://www.talos.dev/) clusters. Import existing clusters, inventory machines, apply config patches, take etcd snapshots, and run limited machine actions over the Talos gRPC API.
 
@@ -16,7 +16,8 @@ TCS runs **on a management host** (systemd binary). It is **not** deployed with 
 - Config patches applied via Talos (pure-Rust COSI merge + ApplyConfiguration)
 - Real etcd snapshots (download, schedule, retention, disaster-recovery restore)
 - Machine version probe, reboot, upgrade
-- Cluster / fleet **rolling upgrade jobs** (max-unavailable, control-plane-last)
+- **Per-cluster rolling upgrade jobs** (max-unavailable, control-plane-last)
+- Dashboard-centric UI: clusters + machine counts on the home page, Settings as a top-bar dropdown
 - Greenfield config factory + apply/bootstrap/scale helpers (metal still external)
 - Machine reset (Talos wipe) with confirm
 - Siderolink inventory + **WireGuard** (host `wg`/`ip` when available)

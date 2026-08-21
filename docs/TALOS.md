@@ -58,9 +58,9 @@ PUT /api/machines/{id}
 | Reset / wipe machine | `POST /api/machines/{id}/reset` | `{ "confirm": true, "graceful": true, "reboot": true }` |
 | Bootstrap control plane | `POST /api/machines/{id}/bootstrap` | initial etcd formation |
 | Rolling upgrade (cluster) | `POST /api/clusters/{id}/upgrade` | `{ "image", "maxUnavailable", "controlPlaneLast" }` |
-| Rolling upgrade (fleet) | `POST /api/fleets/upgrades` | `{ "clusterIds", "image", ... }` |
 | Scale workers (desired) | `POST /api/clusters/{id}/scale` | `{ "desiredWorkers": N }` inventory target |
-| Upgrade job status | `GET /api/upgrade-jobs`, `GET /api/upgrade-jobs/{id}` | cancel via `POST .../cancel` |
+| Cluster upgrade jobs | `GET /api/clusters/{id}/upgrade-jobs` | jobs targeting this cluster |
+| Upgrade job status | `GET /api/upgrade-jobs/{id}` | cancel via `POST /api/upgrade-jobs/{id}/cancel` |
 | Generate machine configs | `POST /api/clusters/generate-config` | greenfield assist (`talosctl` or stub) |
 | Apply provision config | `POST /api/provision/apply-config` | `{ "machineId", "configYaml" }` |
 | Apply config patches | `POST /api/clusters/{id}/config/apply` | optional `{ "dry_run": true }` |

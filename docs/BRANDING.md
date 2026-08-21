@@ -109,7 +109,8 @@ docs_url = "https://docs.yourcompany.com/kubernetes"
 support_url = "https://support.yourcompany.com"
 ```
 
-These appear as links in the application sidebar and footer.
+These are editable on the **Settings → Branding** page. (The current shell has no
+sidebar or footer, so they are stored and served but not rendered as links yet.)
 
 ## Per-Tenant Branding
 

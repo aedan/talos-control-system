@@ -159,13 +159,18 @@ mkdir -p frontend/src/routes/my-feature/
 touch frontend/src/routes/my-feature/+page.svelte
 ```
 
-### 2. Add to sidebar navigation
+### 2. Add to the Settings dropdown
 
-Edit `frontend/src/routes/+layout.svelte`:
+There is no sidebar. Top-level pages live in the top bar. To surface a new
+settings page, add a link in the Settings dropdown in
+`frontend/src/routes/+layout.svelte`:
 
 ```svelte
-<li><a href="/my-feature">My Feature</a></li>
+<li><a href="/settings/my-feature">My Feature</a></li>
 ```
+
+For a standalone top-level page, add a link in the top bar or link to it from
+the Dashboard.
 
 ### 3. Create API endpoint (if needed)
 

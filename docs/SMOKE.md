@@ -28,15 +28,15 @@ curl -sk -H "Authorization: Bearer $TOKEN" https://127.0.0.1/api/settings/system
 
 | # | Step | Pass? |
 |---|------|-------|
-| 1 | Login works; **sidebar appears immediately** (no reload required) | |
-| 2 | Overview shows cluster/machine counts | |
+| 1 | Login works; **top bar + Settings dropdown appear immediately** (no reload required) | |
+| 2 | Dashboard shows cluster/machine counts + cluster list | |
 | 3 | **Import** cluster with kubeconfig + talosconfig (or existing inventory OK) | |
-| 4 | Cluster **Test Talos** / **Probe versions** | |
+| 4 | Cluster **Refresh from K8s** | |
 | 5 | Machine **Version** / **Services** / **Hostname** | |
 | 6 | **Create Backup** → ready; **Download** | |
 | 7 | Config patch dry-run / apply | |
 | 8 | **Generate machine configs** (create wizard) | |
-| 9 | Rolling upgrade UI (cluster or `/upgrades`) — optional cancel | |
+| 9 | Per-cluster rolling upgrade (cluster page) + inline job list — optional cancel | |
 | 10 | Scale workers (inventory) | |
 | 11 | Siderolink: create join token | |
 | 12 | Users: **Reset PW** for a local user | |
