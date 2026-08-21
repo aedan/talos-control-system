@@ -7,7 +7,7 @@ use clap::Args;
 pub struct LogsArgs {
     /// Pod name.
     pub pod: String,
-    #[arg(short, long, alias = "ns")]
+    #[arg(short = 'n', long = "namespace", alias = "ns")]
     pub namespace: Option<String>,
     #[arg(short, long)]
     pub container: Option<String>,

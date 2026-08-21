@@ -10,7 +10,7 @@ use super::client::Client;
 pub struct DeleteArgs {
     pub kind: String,
     pub name: String,
-    #[arg(short, long, alias = "ns")]
+    #[arg(short = 'n', long = "namespace", alias = "ns")]
     pub namespace: Option<String>,
     /// Skip confirmation prompt.
     #[arg(short, long)]

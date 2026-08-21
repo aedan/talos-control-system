@@ -8,10 +8,10 @@ use super::client::Client;
 pub struct ScaleArgs {
     /// Deployment name.
     pub deployment: String,
-    #[arg(short, long, alias = "ns")]
+    #[arg(short = 'n', long = "namespace", alias = "ns")]
     pub namespace: Option<String>,
     /// Target replica count.
-    #[arg(short, long)]
+    #[arg(short = 'r', long = "replicas")]
     pub replicas: u32,
 }
 

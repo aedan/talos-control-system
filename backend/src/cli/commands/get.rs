@@ -17,7 +17,7 @@ pub struct GetArgs {
     #[arg(value_name = "NAME")]
     pub name: Option<String>,
     /// Namespace (defaults to all for namespaced kinds).
-    #[arg(short, long, alias = "ns")]
+    #[arg(short = 'n', long = "namespace", alias = "ns")]
     pub namespace: Option<String>,
     /// List across all namespaces (default for list; kept for kubectl parity).
     #[arg(short = 'A', long = "all-namespaces")]

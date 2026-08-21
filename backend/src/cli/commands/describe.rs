@@ -7,7 +7,7 @@ use clap::Args;
 pub struct DescribeArgs {
     pub kind: String,
     pub name: String,
-    #[arg(short, long, alias = "ns")]
+    #[arg(short = 'n', long = "namespace", alias = "ns")]
     pub namespace: Option<String>,
 }
 

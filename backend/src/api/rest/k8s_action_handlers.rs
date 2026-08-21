@@ -29,7 +29,6 @@ pub struct DeleteQuery {
     kind: String,
     #[serde(default)]
     ns: Option<String>,
-    name: String,
 }
 
 /// DELETE /clusters/:id/k8s/resource/:name?kind=&ns=

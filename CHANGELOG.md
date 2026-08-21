@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.4.8] — 2026-08-21
+
+### Fixed
+- **`tcs get <kind> <name>`, `describe`, and `delete`** — these failed with `missing field 'name'` because the server's `get_resource`/`delete_resource` query structs declared a `name` field that is actually in the URL path. Removed the bogus field so single-object fetches, describes, and deletes reach the API.
+- **`tcs scale`** — failed with 404/400. The request targeted the wrong path and used server-side apply, which the `/scale` subresource rejects. It now merge-patches the `spec.replicas` on the deployment's `/scale` subresource.
+- **`tcs delete`** — failed to deserialize the API response (the API returns the deleted object, not a `Status`). Now deserializes loosely so both shapes work.
+- **Short kind names** — `get svc`, `get ns`, `get po`, `get deploy`, etc. now resolve via a kubectl short-name map (the discovery `ApiResource` type carries no short names).
+
+### Added
+- **`-n`/`--namespace`** short flag on `get`, `describe`, `logs`, `exec`, `attach`, `delete`, and `scale` for kubectl parity (`--ns` still works).
+
 ## [0.4.7] — 2026-08-21
 
 ### Added

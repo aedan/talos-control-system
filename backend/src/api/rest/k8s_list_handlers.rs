@@ -149,7 +149,6 @@ pub struct KindNameQuery {
     kind: String,
     #[serde(default)]
     ns: Option<String>,
-    name: String,
 }
 
 /// GET /clusters/:id/k8s/resource/:name?kind=&ns= — get one object of an arbitrary kind.

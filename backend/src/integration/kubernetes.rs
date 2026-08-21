@@ -553,6 +553,51 @@ fn url_path_for(r: &ResolvedKind, ns: Option<&str>) -> String {
     }
 }
 
+/// Map kubectl-style short names to their canonical plural resource name.
+/// Only the common core aliases are covered; anything else is returned as-is
+/// and matched against kind/plural/prefix during resolution.
+fn short_name_to_plural(norm: &str) -> Option<&'static str> {
+    Some(match norm {
+        "po" => "pods",
+        "pods" => "pods",
+        "svc" => "services",
+        "services" => "services",
+        "ns" => "namespaces",
+        "namespaces" => "namespaces",
+        "deploy" => "deployments",
+        "deployments" => "deployments",
+        "rs" => "replicasets",
+        "replicasets" => "replicasets",
+        "sts" => "statefulsets",
+        "statefulsets" => "statefulsets",
+        "ds" => "daemonsets",
+        "daemonsets" => "daemonsets",
+        "job" => "jobs",
+        "jobs" => "jobs",
+        "cj" => "cronjobs",
+        "cronjobs" => "cronjobs",
+        "cm" => "configmaps",
+        "configmaps" => "configmaps",
+        "se" => "secrets",
+        "secrets" => "secrets",
+        "no" => "nodes",
+        "nodes" => "nodes",
+        "ing" => "ingresses",
+        "ingresses" => "ingresses",
+        "pv" => "persistentvolumes",
+        "persistentvolumes" => "persistentvolumes",
+        "pvc" => "persistentvolumeclaims",
+        "persistentvolumeclaims" => "persistentvolumeclaims",
+        "sa" => "serviceaccounts",
+        "serviceaccounts" => "serviceaccounts",
+        "ep" => "endpoints",
+        "endpoints" => "endpoints",
+        "events" => "events",
+        "ev" => "events",
+        _ => return None,
+    })
+}
+
 /// A typed + dynamic Kubernetes client bound to one stored cluster kubeconfig.
 #[derive(Clone)]
 pub struct K8sClient {
@@ -585,6 +630,8 @@ impl K8sClient {
     pub fn resolve(&self, kind: &str) -> Result<ResolvedKind, AppError> {
         let norm = kind.to_lowercase().trim().to_string();
         let norm = norm.chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+        // Expand kubectl-style short names (po, svc, ns, ...) to their plural.
+        let norm = short_name_to_plural(&norm).map(str::to_string).unwrap_or(norm);
 
         let mut best: Option<(ResolvedKind, usize)> = None;
         for group in self.discovery.groups_alphabetical() {
@@ -625,7 +672,6 @@ impl K8sClient {
     }
 
     // ---- typed core lists (fast path for the explorer) --------------------
-
     pub async fn list_namespaces(&self) -> Result<Vec<k8s_openapi::api::core::v1::Namespace>, AppError> {
         let api = kube::Api::<k8s_openapi::api::core::v1::Namespace>::all(self.client.clone());
         Ok(api.list(&kube::api::ListParams::default()).await.map_err(map_kube_err)?.items)
@@ -705,17 +751,21 @@ impl K8sClient {
         let req = kube::core::Request::new(path)
             .delete(name, &dp)
             .map_err(|e| AppError::Internal(format!("build delete request: {e}")))?;
-        self.client.request::<kube::core::Status>(req).await.map_err(map_kube_err)?;
+        // The API returns the deleted object (or a Status for some kinds), not
+        // always a Status — deserialize loosely so both work.
+        self.client.request::<serde_json::Value>(req).await.map_err(map_kube_err)?;
         Ok(())
     }
 
     /// Scale a Deployment to `replicas`.
     pub async fn scale_deployment(&self, ns: &str, name: &str, replicas: i32) -> Result<(), AppError> {
-        let path = format!("/apis/apps/v1/namespaces/{ns}/deployments/{name}/scale");
+        let path = format!("/apis/apps/v1/namespaces/{ns}/deployments");
+        // The /scale subresource does not support server-side apply; use a
+        // merge patch on the subresource with just the desired replica count.
         let body = serde_json::json!({ "spec": { "replicas": replicas } });
-        let pp = kube::api::PatchParams::apply("tcs");
+        let pp = kube::api::PatchParams::default();
         let req = kube::core::Request::new(path)
-            .patch(name, &pp, &kube::api::Patch::Apply(&body))
+            .patch_subresource("scale", name, &pp, &kube::api::Patch::Merge(&body))
             .map_err(|e| AppError::Internal(format!("build scale request: {e}")))?;
         self.client.request::<serde_json::Value>(req).await.map_err(map_kube_err)?;
         Ok(())
