@@ -75,6 +75,18 @@ impl Client {
         self.json(res).await
     }
 
+    /// POST a JSON body with NO client timeout (for long-running tool commands).
+    pub async fn post_json_long(&self, path: &str, body: &serde_json::Value) -> CliResult<serde_json::Value> {
+        let http = reqwest::Client::new();
+        let res = http
+            .post(format!("{}{}", self.server.trim_end_matches('/'), path))
+            .bearer_auth(&self.token)
+            .json(body)
+            .send()
+            .await?;
+        self.json(res).await
+    }
+
     /// DELETE an endpoint, returning the parsed response.
     pub async fn delete_json(&self, path: &str) -> CliResult<serde_json::Value> {
         let res = self

@@ -13,6 +13,7 @@ pub mod k8s_action_handlers;
 pub mod k8s_common;
 pub mod k8s_list_handlers;
 pub mod k8s_stream_handlers;
+pub mod k8s_tool_handlers;
 pub mod middleware;
 
 pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router {
@@ -237,6 +238,9 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route("/clusters/:id/k8s/uncordon", post(k8s_action_handlers::uncordon_node))
         .route("/clusters/:id/k8s/drain", post(k8s_action_handlers::drain_node))
         .route("/clusters/:id/k8s/apply", post(k8s_action_handlers::apply_manifest))
+        // Real kubectl / helm / talosctl passthrough (run server-side; creds never leave)
+        .route("/clusters/:id/tool", post(k8s_tool_handlers::run_tool))
+        .route("/clusters/:id/tool/tty", get(k8s_tool_handlers::tool_tty))
         .layer(from_fn_with_state(
             state.clone(),
             middleware::rbac_middleware,

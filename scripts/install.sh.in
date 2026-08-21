@@ -146,6 +146,86 @@ install_talosctl() {
 
 install_talosctl
 
+# ─── Install / update kubectl ─────────────────────────────────────────
+KUBECTL_VERSION="1.31.4"
+KUBECTL_BIN="/usr/local/bin/kubectl"
+
+install_kubectl() {
+  local need_install=1
+  if [ -x "$KUBECTL_BIN" ]; then
+    local existing_ver
+    existing_ver="$($KUBECTL_BIN version --client -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('clientVersion',{}).get('gitVersion',''))" 2>/dev/null || true)"
+    if [ "$existing_ver" = "v${KUBECTL_VERSION}" ]; then
+      info "kubectl v${KUBECTL_VERSION} already installed at ${KUBECTL_BIN}"
+      need_install=0
+    fi
+  fi
+
+  if [ "$need_install" = "1" ]; then
+    info "Installing kubectl v${KUBECTL_VERSION}..."
+    local karch
+    case "$ARCH" in
+      x86_64)   karch="amd64" ;;
+      aarch64)  karch="arm64" ;;
+    esac
+    local kurl="https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/${karch}/kubectl"
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL -o "${EXTRACT_DIR}/kubectl" "$kurl"
+    elif command -v wget >/dev/null 2>&1; then
+      wget -q -O "${EXTRACT_DIR}/kubectl" "$kurl"
+    else
+      warn "Cannot install kubectl: no curl or wget. Install manually from dl.k8s.io."
+      return
+    fi
+    chmod +x "${EXTRACT_DIR}/kubectl"
+    install -m 0755 "${EXTRACT_DIR}/kubectl" "$KUBECTL_BIN"
+    info "Installed kubectl → ${KUBECTL_BIN}"
+  fi
+}
+
+install_kubectl
+
+# ─── Install / update helm ────────────────────────────────────────────
+HELM_VERSION="3.16.2"
+HELM_BIN="/usr/local/bin/helm"
+
+install_helm() {
+  local need_install=1
+  if [ -x "$HELM_BIN" ]; then
+    local existing_ver
+    existing_ver="$($HELM_BIN version -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('version',''))" 2>/dev/null || true)"
+    if [ "$existing_ver" = "v${HELM_VERSION}" ]; then
+      info "helm v${HELM_VERSION} already installed at ${HELM_BIN}"
+      need_install=0
+    fi
+  fi
+
+  if [ "$need_install" = "1" ]; then
+    info "Installing helm v${HELM_VERSION}..."
+    local harch
+    case "$ARCH" in
+      x86_64)   harch="amd64" ;;
+      aarch64)  harch="arm64" ;;
+    esac
+    local htar="helm-v${HELM_VERSION}-linux-${harch}.tar.gz"
+    local hurl="https://get.helm.sh/${htar}"
+    local htmp="${EXTRACT_DIR}/helm.tgz"
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL -o "$htmp" "$hurl"
+    elif command -v wget >/dev/null 2>&1; then
+      wget -q -O "$htmp" "$hurl"
+    else
+      warn "Cannot install helm: no curl or wget. Install manually from get.helm.sh."
+      return
+    fi
+    tar xzf "$htmp" -C "${EXTRACT_DIR}" "linux-${harch}/helm"
+    install -m 0755 "${EXTRACT_DIR}/linux-${harch}/helm" "$HELM_BIN"
+    info "Installed helm → ${HELM_BIN}"
+  fi
+}
+
+install_helm
+
 install -d -m 0755 "$TCS_CONFIG_DIR" "$TCS_DATA" "${TCS_DATA}/certs" "${TCS_DATA}/backups"
 
 if [ ! -f "$TCS_CONFIG" ]; then

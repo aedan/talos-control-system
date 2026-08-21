@@ -47,6 +47,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             print_help();
             return Ok(());
         }
+        // Tool passthrough: `tcs [global flags] kubectl|helm|talosctl <raw args...>`.
+        // Scanned past the global flags (which consume a value) so the tool verb
+        // can appear anywhere before the tool's own args.
+        if let Some((tool_name, tool_pos)) = find_tool_verb(&argv) {
+            return run_tool_passthrough(&tool_name, tool_pos, &argv).await;
+        }
     }
 
     // The binary is a CLI by default. The control plane is only started when
@@ -78,6 +84,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 }
 
+/// Tool passthrough: `tcs [global flags] kubectl|helm|talosctl <raw args...>`.
+///
+/// Long-form TCS global flags (`--server`, `--token`, `--cluster`) are pulled
+/// out wherever they appear; everything else is passed verbatim to the real
+/// binary. Short flags belong to the tool itself (e.g. `kubectl -c`), so they
+/// are never consumed.
+async fn run_tool_passthrough(
+    tool_name: &str,
+    tool_pos: usize,
+    argv: &[String],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use talos_control_system::cli::client::Client;
+    use talos_control_system::cli::commands::{require_cluster, tool};
+
+    let mut server: Option<String> = None;
+    let mut token: Option<String> = None;
+    let mut cluster: Option<String> = None;
+    let mut tool_args: Vec<String> = Vec::new();
+    let mut i = 1usize;
+    while i < argv.len() {
+        if i == tool_pos {
+            // Everything from here on (after the tool verb) is the tool's argv.
+            tool_args = argv[i + 1..].to_vec();
+            break;
+        }
+        match argv[i].as_str() {
+            "--server" | "-s" => {
+                i += 1;
+                server = argv.get(i).cloned();
+            }
+            "--token" | "-t" => {
+                i += 1;
+                token = argv.get(i).cloned();
+            }
+            "--cluster" | "-c" => {
+                i += 1;
+                cluster = argv.get(i).cloned();
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let client = Client::new(server.as_deref(), token.as_deref())?;
+    let cluster_id = require_cluster(&client, cluster.as_deref()).await?;
+    tool::run(&client, &cluster_id, tool_name, &tool_args).await?;
+    Ok(())
+}
+
+/// Locate the tool verb (kubectl/helm/talosctl) in argv, skipping the TCS
+/// global flags (which consume a value). Returns the verb and its index.
+fn find_tool_verb(argv: &[String]) -> Option<(String, usize)> {
+    let mut i = 1usize;
+    while i < argv.len() {
+        match argv[i].as_str() {
+            "kubectl" | "helm" | "talosctl" => return Some((argv[i].clone(), i)),
+            // Global flags that take a following value: skip the value too.
+            "--server" | "-s" | "--token" | "-t" | "--cluster" | "-c" => i += 2,
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 fn print_help() {
     eprintln!(
         "tcs — Talos Control System\n\n\
@@ -97,8 +167,11 @@ fn print_help() {
            tcs delete <kind> <name> [--ns] [-f]\n\
            tcs scale <deployment> [--ns] --replicas N\n\
            tcs cordon <node> | uncordon <node>\n\
-           tcs drain <node> [-f]\n\
-           tcs apply -f <file|->\n\n\
+            tcs drain <node> [-f]\n\
+            tcs apply -f <file|->\n\
+            tcs kubectl <args...>        (real kubectl, run server-side)\n\
+            tcs helm <args...>           (real helm, run server-side)\n\
+            tcs talosctl <args...>       (real talosctl, run server-side)\n\n\
          Global flags: --server URL --token JWT --cluster ID\n\
          Auth: `tcs login`, TCS_TOKEN, or ~/.tcs/config\n"
     );

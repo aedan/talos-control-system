@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-21
+
+### Added
+- **Real `kubectl` / `helm` / `talosctl` passthrough** — new CLI verbs `tcs kubectl …`, `tcs helm …`, and `tcs talosctl …` run the actual binaries **server-side** on the TCS host, using the cluster's stored credentials. The kubeconfig/talosconfig is decrypted in memory, written to a `0600` file in a `0700` temp dir (removed on drop, even on panic), and never reaches the CLI — only command output does.
+  - One-shot commands (`tcs kubectl get pods -A`, `tcs helm list -A`, `tcs talosctl get machines`) go over `POST /api/clusters/:id/tool` and return stdout/stderr/exit code.
+  - Interactive commands (`tcs kubectl exec -it <pod> -- sh`) are auto-detected and bridged over a PTY WebSocket at `GET /api/clusters/:id/tool/tty` (stdin/stdout/resize/exit).
+  - The tool name is restricted to an allowlist and argv is passed verbatim (no shell), so there is no shell-injection surface.
+- **Installer now provisions the toolchain** — `install.sh` additionally installs version-pinned `kubectl` (v1.31.4) and `helm` (v3.16.2) alongside `talosctl` (v1.13.8), so passthrough works out of the box.
+
+### Changed
+- The existing Rust kubectl-like verbs (`tcs get/describe/logs/exec/...`) are kept as fast paths; the new passthrough verbs are the general escape hatch for anything they don't cover (including all of Helm).
+
 ## [0.4.8] — 2026-08-21
 
 ### Fixed

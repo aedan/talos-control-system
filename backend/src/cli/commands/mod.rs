@@ -15,6 +15,7 @@ pub mod exec;
 pub mod get;
 pub mod logs;
 pub mod scale;
+pub mod tool;
 
 use super::client::Client;
 use super::output::Format;
