@@ -79,8 +79,8 @@
       <h1>Import Cluster</h1>
       <p class="subtitle">Import an existing Talos Linux cluster using its kubeconfig</p>
     </div>
-    <a href="/clusters">
-      <Button variant="ghost">Back to Clusters</Button>
+    <a href="/">
+      <Button variant="ghost">Back to Dashboard</Button>
     </a>
   </div>
 
@@ -147,7 +147,7 @@ contexts:
       {/if}
 
       <div class="form-actions">
-        <a href="/clusters">
+        <a href="/">
           <Button variant="ghost">Cancel</Button>
         </a>
         <Button variant="primary" disabled={$storeLoading} onclick={handlePreview}>
@@ -250,7 +250,7 @@ contexts:
         {/if}
 
         <div class="form-actions">
-          <a href="/clusters">
+          <a href="/">
             <Button variant="ghost">Cancel</Button>
           </a>
           <Button
@@ -283,7 +283,7 @@ contexts:
         <div class="error">{err}</div>
       {/if}
       <div class="form-actions">
-        <a href="/clusters">
+        <a href="/">
           <Button variant="ghost">View All Clusters</Button>
         </a>
         {#if importResult}

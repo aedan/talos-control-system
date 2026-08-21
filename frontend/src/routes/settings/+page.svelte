@@ -68,18 +68,6 @@
       <span class="card-arrow">&rarr;</span>
     </a>
 
-    <a href="/upgrades" class="settings-card">
-      <div class="card-icon">
-        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="23 4 23 10 17 10"/>
-          <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-        </svg>
-      </div>
-      <h3>Rolling upgrades</h3>
-      <p>Fleet and cluster Talos upgrade jobs.</p>
-      <span class="card-arrow">&rarr;</span>
-    </a>
-    
     <a href="/settings/audit-logs" class="settings-card">
       <div class="card-icon">
         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">

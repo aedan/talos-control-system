@@ -86,6 +86,10 @@ pub async fn run_migrations(pool: &DbPool) -> Result<(), AppError> {
             "014_cluster_network_config.sql",
             include_str!("migrations/014_cluster_network_config.sql"),
         ),
+        (
+            "015_drop_machine_classes.sql",
+            include_str!("migrations/015_drop_machine_classes.sql"),
+        ),
     ];
 
     for (name, sql) in migrations {

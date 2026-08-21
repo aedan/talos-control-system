@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import { client } from '$lib/api/client';
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { success, error as notifyError } from '$lib/stores/notifications';
   import Button from '$lib/components/Button.svelte';
   import Spinner from '$lib/components/Spinner.svelte';
@@ -15,13 +15,14 @@
   } from '$lib/api/types';
   import WorkloadsExplorer from '$lib/explorer/WorkloadsExplorer.svelte';
 
-  type Tab = 'nodes' | 'machines' | 'config' | 'backups';
+  type Tab = 'machines' | 'config' | 'backups';
 
   let cluster = $state<any>(null);
   let loading = $state(true);
   let error = $state('');
   let busy = $state(false);
-  let tab = $state<Tab>('nodes');
+  let tab = $state<Tab>('machines');
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
 
   // ── machines / nodes (same inventory source) ──────────────────────
   let machines = $state<Machine[]>([]);
@@ -65,12 +66,22 @@
   let savingSchedule = $state(false);
 
   // ── header actions ────────────────────────────────────────────────
-  let talosTestResults = $state<
-    Array<{ address?: string; ok: boolean; talosVersion?: string; error?: string }>
-  >([]);
   let upgradeImage = $state('ghcr.io/siderolabs/installer:v1.9.0');
   let upgradeMaxUnavail = $state(1);
   let upgradeCpLast = $state(true);
+
+  // ── upgrade jobs (per-cluster) ────────────────────────────────────
+  interface UpgradeJob {
+    id: string;
+    scope: string;
+    image: string;
+    status: string;
+    createdAt?: string;
+    created_at?: string;
+  }
+  let upgradeJobs = $state<UpgradeJob[]>([]);
+  let upgradeJobsLoading = $state(false);
+  let upgradeJobDetail = $state<any>(null);
 
   const cid = $page.params.id;
 
@@ -128,15 +139,60 @@
     if (t === 'backups' && backups.length === 0 && !backupsLoading) void loadBackups();
   }
 
+  async function loadUpgradeJobs() {
+    upgradeJobsLoading = true;
+    try {
+      const data = (await client.get(`/clusters/${cid}/upgrade-jobs`)) as UpgradeJob[];
+      upgradeJobs = Array.isArray(data) ? data : [];
+    } catch {
+      upgradeJobs = [];
+    } finally {
+      upgradeJobsLoading = false;
+    }
+  }
+
+  async function openUpgradeJob(id: string) {
+    try {
+      upgradeJobDetail = await client.get(`/upgrade-jobs/${id}`);
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Failed to load job');
+    }
+  }
+
+  async function cancelUpgradeJob(id: string) {
+    if (!confirm('Request cancel for this upgrade job?')) return;
+    busy = true;
+    try {
+      await client.post(`/upgrade-jobs/${id}/cancel`, {});
+      success('Cancel requested');
+      await loadUpgradeJobs();
+      if (upgradeJobDetail?.job?.id === id) upgradeJobDetail = await client.get(`/upgrade-jobs/${id}`);
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Cancel failed');
+    } finally {
+      busy = false;
+    }
+  }
+
   onMount(async () => {
     try {
       await loadCluster();
       await loadMachines();
+      loadUpgradeJobs();
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Failed to load cluster';
     } finally {
       loading = false;
     }
+    pollTimer = setInterval(() => {
+      loadCluster().catch(() => {});
+      loadMachines();
+      loadUpgradeJobs();
+    }, 15000);
+  });
+
+  onDestroy(() => {
+    if (pollTimer) clearInterval(pollTimer);
   });
 
   // ── header action handlers ────────────────────────────────────────
@@ -149,45 +205,6 @@
       success(`Refreshed ${res.machines} machine(s) from kubeconfig`);
     } catch (e: unknown) {
       notifyError(e instanceof Error ? e.message : 'Refresh failed (need stored kubeconfig)');
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function testTalos() {
-    busy = true;
-    talosTestResults = [];
-    try {
-      const res = (await client.post(`/clusters/${cid}/talos/test`, {})) as {
-        results: Array<{ ok: boolean; address?: string; talosVersion?: string; error?: string }>;
-      };
-      talosTestResults = res.results ?? [];
-      const ok = talosTestResults.filter((r) => r.ok).length;
-      const fail = talosTestResults.length - ok;
-      if (fail === 0) success(`Talos test: ${ok} ok`);
-      else notifyError(`Talos test: ${ok} ok, ${fail} failed`);
-    } catch (e: unknown) {
-      notifyError(e instanceof Error ? e.message : 'Talos connectivity test failed');
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function probeVersions() {
-    busy = true;
-    try {
-      const res = (await client.post(`/clusters/${cid}/talos/versions`, {})) as {
-        ok: number;
-        failed: number;
-        versions?: string[];
-      };
-      await loadCluster();
-      success(
-        `Version probe: ${res.ok} ok, ${res.failed} failed` +
-          (res.versions?.length ? ` (${res.versions.join(', ')})` : '')
-      );
-    } catch (e: unknown) {
-      notifyError(e instanceof Error ? e.message : 'Version probe failed');
     } finally {
       busy = false;
     }
@@ -383,8 +400,6 @@
       <h1>{cluster.name}</h1>
       <div class="actions">
         <Button variant="secondary" size="sm" onclick={refresh} disabled={busy}>Refresh from K8s</Button>
-        <Button variant="secondary" size="sm" onclick={testTalos} disabled={busy}>Test Talos</Button>
-        <Button variant="secondary" size="sm" onclick={probeVersions} disabled={busy}>Probe versions</Button>
       </div>
     </div>
 
@@ -414,53 +429,6 @@
         <span class="info-value">{cluster.hasKubeconfig || cluster.has_kubeconfig ? 'Stored' : 'Missing'}</span>
       </div>
     </div>
-
-    {#if talosTestResults.length > 0}
-      <div class="talos-test">
-        <div class="talos-test-header">
-          <h3>Talos connectivity</h3>
-          <span class="hint">
-            {talosTestResults.filter((r) => r.ok).length} ok ·
-            {talosTestResults.filter((r) => !r.ok).length} failed
-          </span>
-          <Button variant="ghost" size="sm" class="dismiss" onclick={() => (talosTestResults = [])}>Dismiss</Button>
-        </div>
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Address</th>
-              <th>Result</th>
-              <th>Talos version</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each talosTestResults as r (r.address ?? Math.random())}
-              <tr>
-                <td class="mono">{r.address || '—'}</td>
-                <td>
-                  {#if r.ok}
-                    <span class="status-badge running">ok</span>
-                  {:else}
-                    <span class="status-badge offline" title={r.error}>failed</span>
-                  {/if}
-                </td>
-                <td>{r.talosVersion || (r.error ? '' : '—')}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-        {#if talosTestResults.some((r) => !r.ok)}
-          <details>
-            <summary>Failure details</summary>
-            <ul class="err-list">
-              {#each talosTestResults.filter((r) => !r.ok) as r (r.address ?? Math.random())}
-                <li><span class="mono">{r.address}</span>: {r.error}</li>
-              {/each}
-            </ul>
-          </details>
-        {/if}
-      </div>
-    {/if}
 
     <details class="panel" open>
       <summary>Cluster actions</summary>
@@ -498,54 +466,61 @@
             <Button variant="primary" size="sm" onclick={startClusterUpgrade} disabled={busy}>
               Start rolling upgrade
             </Button>
-            <a class="jobs-link" href="/upgrades">View upgrade jobs →</a>
+          </div>
+          <div class="upgrade-jobs">
+            <h4>Upgrade jobs</h4>
+            {#if upgradeJobsLoading && upgradeJobs.length === 0}
+              <p class="hint">Loading…</p>
+            {:else if upgradeJobs.length === 0}
+              <p class="hint">No upgrade jobs for this cluster yet.</p>
+            {:else}
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Image</th>
+                    <th>Status</th>
+                    <th>Created</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each upgradeJobs as job (job.id)}
+                    <tr>
+                      <td class="mono">{job.image || '—'}</td>
+                      <td><span class="status-badge {job.status}">{job.status}</span></td>
+                      <td>{job.createdAt || job.created_at ? new Date(job.createdAt || job.created_at).toLocaleString() : '—'}</td>
+                      <td>
+                        <div class="row-actions">
+                          <Button variant="ghost" size="sm" onclick={() => openUpgradeJob(job.id)}>Details</Button>
+                          {#if job.status === 'pending' || job.status === 'running'}
+                            <Button variant="danger" size="sm" onclick={() => cancelUpgradeJob(job.id)}>Cancel</Button>
+                          {/if}
+                        </div>
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {/if}
+            {#if upgradeJobDetail}
+              <div class="job-detail">
+                <div class="job-detail-header">
+                  <h4>Job {upgradeJobDetail.job?.id || upgradeJobDetail.id}</h4>
+                  <Button variant="ghost" size="sm" onclick={() => (upgradeJobDetail = null)}>Close</Button>
+                </div>
+                <pre class="job-json">{JSON.stringify(upgradeJobDetail, null, 2)}</pre>
+              </div>
+            {/if}
           </div>
         </div>
       </div>
     </details>
 
     <nav class="tabs">
-      <button class:active={tab === 'nodes'} onclick={() => selectTab('nodes')}>Nodes</button>
       <button class:active={tab === 'machines'} onclick={() => selectTab('machines')}>Machines</button>
       <button class:active={tab === 'config'} onclick={() => selectTab('config')}>Config</button>
       <button class:active={tab === 'backups'} onclick={() => selectTab('backups')}>Backups</button>
     </nav>
-
-    <!-- ── Nodes ─────────────────────────────────────────────────── -->
-    {#if tab === 'nodes'}
-      <div class="tab-panel">
-        {#if machinesLoading}
-          <Spinner />
-        {:else if machinesError}
-          <div class="error-banner">{machinesError}</div>
-        {:else if machines.length === 0}
-          <div class="empty-state"><p>No nodes in this cluster</p></div>
-        {:else}
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Node</th>
-                <th>Role</th>
-                <th>Status</th>
-                <th>Address</th>
-                <th>Talos</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each machines as m (m.id)}
-                <tr>
-                  <td class="mono">{m.hostname || machineLabel(m)}</td>
-                  <td>{m.machineType || '—'}</td>
-                  <td><span class="status-badge {m.status}">{m.status}</span></td>
-                  <td class="mono">{m.address || '—'}</td>
-                  <td>{m.talosVersion || '—'}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {/if}
-      </div>
-    {/if}
 
     <!-- ── Machines ──────────────────────────────────────────────── -->
     {#if tab === 'machines'}
@@ -796,19 +771,6 @@
     margin-bottom: 1.5rem;
   }
 
-  .talos-test {
-    background: var(--tcs-surface);
-    border: 1px solid var(--tcs-border);
-    border-radius: 8px;
-    padding: 1rem 1.25rem;
-    margin-bottom: 1.5rem;
-  }
-  .talos-test-header { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.75rem; }
-  .talos-test-header h3 { margin: 0; font-size: 1rem; }
-  .talos-test-header .hint { margin: 0; }
-  .talos-test-header .dismiss { margin-left: auto; }
-  .err-list { margin: 0.5rem 0 0; padding-left: 1.25rem; font-size: 0.8rem; color: var(--tcs-text-muted); }
-  .err-list li { margin-bottom: 0.25rem; word-break: break-word; }
   .hint { color: var(--tcs-text-muted); font-size: 0.85rem; margin: 0 0 0.75rem; }
   .mono { font-family: ui-monospace, monospace; font-size: 0.8rem; }
 
@@ -847,7 +809,27 @@
     color: var(--tcs-text);
     min-width: 10rem;
   }
-  .jobs-link { font-size: 0.85rem; color: var(--tcs-secondary); align-self: center; }
+  .upgrade-jobs { margin-top: 1rem; }
+  .upgrade-jobs h4 { margin: 0 0 0.5rem; font-size: 0.9rem; color: var(--tcs-text); }
+  .job-detail {
+    margin-top: 1rem;
+    background: var(--tcs-background);
+    border: 1px solid var(--tcs-border);
+    border-radius: 8px;
+    padding: 1rem;
+  }
+  .job-detail-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; }
+  .job-detail-header h4 { margin: 0; font-size: 0.9rem; }
+  .job-json {
+    margin: 0;
+    padding: 0.75rem;
+    background: var(--tcs-surface);
+    border: 1px solid var(--tcs-border);
+    border-radius: 6px;
+    font-size: 0.75rem;
+    overflow: auto;
+    max-height: 24rem;
+  }
 
   .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--tcs-border); margin-bottom: 1.5rem; }
   .tabs button {

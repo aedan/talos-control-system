@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.4.5] — 2026-08-20
+
+### Changed
+- **Dashboard-centric IA** — removed the left sidebar; the Dashboard (`/`) is now the primary page and absorbs the Clusters list (status, K8s/Talos versions, node counts, delete, live polling). Settings is a top-bar dropdown linking straight to sub-pages.
+- **Per-cluster upgrades** — upgrade jobs now live on the cluster detail page (inline list with details/cancel) instead of a global `/upgrades` page. New API `GET /clusters/:id/upgrade-jobs`.
+- Cluster detail auto-refreshes (15s) and drops the redundant Nodes tab plus the Test Talos / Probe versions actions (Refresh from K8s remains).
+
+### Removed
+- Global `/upgrades` page, fleet upgrade form, and `POST /fleets/upgrades` + `GET /upgrade-jobs` APIs.
+- Global `/machines` and `/machines/pending` list pages (machine detail + import remain).
+- Machine Classes feature end-to-end (UI, APIs, repo/model, `machine_classes` table via migration `015`).
+
 ## [0.4.2] — 2026-08-11
 
 ### Added

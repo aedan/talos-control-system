@@ -755,7 +755,7 @@
             <div class="success-banner full">
               🎉 Cluster provisioned successfully!
               <div class="dl-row" style="margin-top: 1rem;">
-                <Button variant="primary" onclick={() => goto('/clusters')}>View Cluster</Button>
+                <Button variant="primary" onclick={() => goto(clusterId ? `/clusters/${clusterId}` : '/')}>View Cluster</Button>
               </div>
             </div>
           {/if}
@@ -788,7 +788,7 @@
       <div class="form-actions">
         <Button variant="ghost" onclick={() => currentStep = 2}>← Back</Button>
         {#if generated}
-          <Button variant="secondary" onclick={() => goto('/clusters')}>Back to clusters</Button>
+          <Button variant="secondary" onclick={() => goto('/')}>Back to Dashboard</Button>
         {/if}
       </div>
     </div>

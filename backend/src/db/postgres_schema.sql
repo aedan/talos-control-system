@@ -108,20 +108,6 @@ CREATE TABLE IF NOT EXISTS tenant_branding (
     updated_at TEXT
 );
 
-CREATE TABLE IF NOT EXISTS machine_classes (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    min_cpu INTEGER NOT NULL DEFAULT 0,
-    min_memory BIGINT NOT NULL DEFAULT 0,
-    min_disk BIGINT NOT NULL DEFAULT 0,
-    arch TEXT NOT NULL DEFAULT 'amd64',
-    secure_boot INTEGER NOT NULL DEFAULT 0,
-    allowed_roles TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS config_patches (
     id TEXT PRIMARY KEY,
     cluster_id TEXT NOT NULL,

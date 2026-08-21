@@ -95,7 +95,7 @@ machines:
 <div class="import-page">
   <div class="page-header">
     <h1>Import machine inventory</h1>
-    <a href="/machines"><Button variant="ghost" size="sm">Back to machines</Button></a>
+    <a href="/"><Button variant="ghost" size="sm">Back to Dashboard</Button></a>
   </div>
   <p class="hint">
     Bulk-add servers for PXE provisioning (MAC + BMC) or address-based assisted install.
@@ -196,7 +196,6 @@ machines:
           {/each}
         </ul>
       {/if}
-      <Button variant="secondary" size="sm" onclick={() => goto('/machines')}>View machines</Button>
       {#if result.clusterId}
         <Button
           variant="primary"

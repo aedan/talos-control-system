@@ -3169,116 +3169,6 @@ pub async fn restore_cluster_backup(
     }
 }
 
-// ─── Machine Classes ───────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateMachineClassRequest {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    pub min_cpu: i32,
-    pub min_memory: i64,
-    pub min_disk: i64,
-    pub arch: String,
-    #[serde(default)]
-    pub secure_boot: bool,
-    #[serde(default)]
-    pub allowed_roles: Vec<String>,
-}
-
-pub async fn create_machine_class(
-    State(state): State<AppState>,
-    Json(payload): Json<CreateMachineClassRequest>,
-) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
-    let mc = crate::db::models::machine_class::MachineClass::new(
-        payload.name,
-        payload.description,
-        payload.min_cpu,
-        payload.min_memory,
-        payload.min_disk,
-        payload.arch,
-        payload.secure_boot,
-        payload.allowed_roles,
-    );
-
-    match repos::machine_class::create(&state.db_pool, &mc).await {
-        Ok(c) => match serde_json::to_value(c) {
-            Ok(v) => Ok((StatusCode::CREATED, Json(v))),
-            Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-        },
-        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
-    }
-}
-
-pub async fn list_machine_classes(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    match repos::machine_class::list(&state.db_pool).await {
-        Ok(classes) => {
-            let vals: Result<Vec<_>, _> = classes.into_iter().map(serde_json::to_value).collect();
-            match vals {
-                Ok(v) => Ok(Json(v)),
-                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-            }
-        }
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-    }
-}
-
-pub async fn get_machine_class(
-    State(state): State<AppState>,
-    Path(id): Path<uuid::Uuid>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    match repos::machine_class::get(&state.db_pool, id).await {
-        Ok(Some(mc)) => match serde_json::to_value(mc) {
-            Ok(v) => Ok(Json(v)),
-            Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-        },
-        Ok(None) => Err((StatusCode::NOT_FOUND, "Machine class not found".to_string())),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-    }
-}
-
-pub async fn update_machine_class(
-    State(state): State<AppState>,
-    Path(id): Path<uuid::Uuid>,
-    Json(payload): Json<CreateMachineClassRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    match repos::machine_class::get(&state.db_pool, id).await {
-        Ok(Some(mut mc)) => {
-            mc.name = payload.name;
-            mc.description = payload.description;
-            mc.min_cpu = payload.min_cpu;
-            mc.min_memory = payload.min_memory;
-            mc.min_disk = payload.min_disk;
-            mc.arch = payload.arch;
-            mc.secure_boot = payload.secure_boot;
-            mc.allowed_roles = payload.allowed_roles;
-            mc.updated_at = chrono::Utc::now();
-            match repos::machine_class::update(&state.db_pool, &mc).await {
-                Ok(c) => match serde_json::to_value(c) {
-                    Ok(v) => Ok(Json(v)),
-                    Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-                },
-                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-            }
-        }
-        Ok(None) => Err((StatusCode::NOT_FOUND, "Machine class not found".to_string())),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-    }
-}
-
-pub async fn delete_machine_class(
-    State(state): State<AppState>,
-    Path(id): Path<uuid::Uuid>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    match repos::machine_class::delete(&state.db_pool, id).await {
-        Ok(()) => Ok(StatusCode::NO_CONTENT),
-        Err(e) => Err((StatusCode::NOT_FOUND, e.to_string())),
-    }
-}
-
 // ─── Rolling upgrades ──────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -3292,17 +3182,6 @@ pub struct ClusterUpgradeRequest {
 }
 
 fn default_max_unavail() -> i32 { 1 }
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FleetUpgradeRequest {
-    pub cluster_ids: Vec<Uuid>,
-    pub image: String,
-    #[serde(default = "default_max_unavail")]
-    pub max_unavailable: i32,
-    #[serde(default = "default_true")]
-    pub control_plane_last: bool,
-}
 
 pub async fn start_cluster_upgrade(
     State(state): State<AppState>,
@@ -3333,35 +3212,13 @@ pub async fn start_cluster_upgrade(
     Ok((StatusCode::ACCEPTED, Json(serde_json::json!({ "job": job }))))
 }
 
-pub async fn start_fleet_upgrade(
+pub async fn list_cluster_upgrade_jobs(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(payload): Json<FleetUpgradeRequest>,
-) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
-    let claims = extract_claims(&headers)?;
-    if claims.role != "admin" && claims.role != "operator" {
-        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
-    }
-    let ctrl = crate::controllers::UpgradeController::new(state.db_pool.clone());
-    let job = ctrl
-        .start_fleet_upgrade(
-            &payload.cluster_ids,
-            &payload.image,
-            payload.max_unavailable,
-            payload.control_plane_last,
-            Some(claims.sub.clone()),
-        )
-        .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok((StatusCode::ACCEPTED, Json(serde_json::json!({ "job": job }))))
-}
-
-pub async fn list_upgrade_jobs(
-    State(state): State<AppState>,
-    headers: HeaderMap,
+    Path(cluster_id): Path<Uuid>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     let _ = extract_claims(&headers)?;
-    let jobs = crate::db::repos::upgrade_job::list_jobs(&state.db_pool, 50)
+    let jobs = crate::db::repos::upgrade_job::list_jobs_for_cluster(&state.db_pool, cluster_id, 50)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(

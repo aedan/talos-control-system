@@ -84,8 +84,6 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
             "/provision/artifacts/:id",
             get(handlers::get_provision_artifact),
         )
-        .route("/fleets/upgrades", post(handlers::start_fleet_upgrade))
-        .route("/upgrade-jobs", get(handlers::list_upgrade_jobs))
         .route("/upgrade-jobs/:id", get(handlers::get_upgrade_job))
         .route(
             "/upgrade-jobs/:id/cancel",
@@ -110,6 +108,10 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route(
             "/clusters/:id/upgrade",
             post(handlers::start_cluster_upgrade),
+        )
+        .route(
+            "/clusters/:id/upgrade-jobs",
+            get(handlers::list_cluster_upgrade_jobs),
         )
         .route(
             "/clusters/:id/scale",
@@ -202,12 +204,6 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
             post(handlers::restore_cluster_backup),
         )
         .route("/clusters/:id/backups/:backup_id", delete(handlers::delete_cluster_backup))
-        // Machine classes
-        .route("/machine-classes", get(handlers::list_machine_classes))
-        .route("/machine-classes", post(handlers::create_machine_class))
-        .route("/machine-classes/:id", get(handlers::get_machine_class))
-        .route("/machine-classes/:id", put(handlers::update_machine_class))
-        .route("/machine-classes/:id", delete(handlers::delete_machine_class))
         // Settings
         .route("/settings/audit-logs", get(handlers::get_audit_logs))
         .route("/settings/audit-logs", delete(handlers::clear_audit_logs))

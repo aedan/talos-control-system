@@ -87,10 +87,17 @@ pub async fn get_job(pool: &DbPool, id: Uuid) -> Result<Option<UpgradeJob>, AppE
     .await
 }
 
-pub async fn list_jobs(pool: &DbPool, limit: i64) -> Result<Vec<UpgradeJob>, AppError> {
+pub async fn list_jobs_for_cluster(
+    pool: &DbPool,
+    cluster_id: Uuid,
+    limit: i64,
+) -> Result<Vec<UpgradeJob>, AppError> {
     pool.fetch_all_as(
-        "SELECT * FROM upgrade_jobs ORDER BY created_at DESC LIMIT ?",
-        &[SqlVal::I64(limit)],
+        "SELECT DISTINCT j.* FROM upgrade_jobs j
+         JOIN upgrade_job_targets t ON t.job_id = j.id
+         WHERE t.cluster_id = ?
+         ORDER BY j.created_at DESC LIMIT ?",
+        &[SqlVal::Uuid(cluster_id), SqlVal::I64(limit)],
     )
     .await
 }

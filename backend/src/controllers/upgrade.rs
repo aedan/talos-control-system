@@ -57,53 +57,6 @@ impl UpgradeController {
         Ok(job)
     }
 
-    pub async fn start_fleet_upgrade(
-        &self,
-        cluster_ids: &[Uuid],
-        image: &str,
-        max_unavailable: i32,
-        control_plane_last: bool,
-        created_by: Option<String>,
-    ) -> Result<UpgradeJob, AppError> {
-        if cluster_ids.is_empty() {
-            return Err(AppError::InvalidInput("clusterIds required".into()));
-        }
-        if image.trim().is_empty() {
-            return Err(AppError::InvalidInput("image is required".into()));
-        }
-
-        let now = Utc::now();
-        let job = UpgradeJob {
-            id: Uuid::new_v4(),
-            scope: "fleet".to_string(),
-            image: image.trim().to_string(),
-            status: "pending".to_string(),
-            max_unavailable: max_unavailable.max(1),
-            control_plane_last,
-            cancel_requested: false,
-            created_by,
-            error: None,
-            created_at: now,
-            updated_at: now,
-        };
-        upgrade_job::create_job(&self.pool, &job).await?;
-
-        let mut sort = 0i32;
-        for cid in cluster_ids {
-            let machines = repos::machine::list_by_cluster(&self.pool, *cid).await?;
-            sort = insert_ordered_targets(
-                &self.pool,
-                job.id,
-                *cid,
-                machines,
-                control_plane_last,
-                sort,
-            )
-            .await?;
-        }
-        Ok(job)
-    }
-
     pub async fn get_job_detail(&self, job_id: Uuid) -> Result<serde_json::Value, AppError> {
         let job = upgrade_job::get_job(&self.pool, job_id)
             .await?

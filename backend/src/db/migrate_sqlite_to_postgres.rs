@@ -17,7 +17,6 @@ const TABLES: &[&str] = &[
     "clusters",
     "machines",
     "tenant_branding",
-    "machine_classes",
     "config_patches",
     "cluster_backups",
     "cluster_access",
