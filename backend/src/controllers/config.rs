@@ -71,10 +71,10 @@ impl ConfigController {
                apiServer:\n\
                  certSANs:\n\
                    - 100.64.0.{}\n\
-               network:\n\
-                 cni:\n\
-                   name: flannel\n\
-                 dns:\n\
+                network:\n\
+                  cni:\n\
+                    name: none\n\
+                  dns:\n\
                    clusterDomain: cluster.local\n\
                token: secret-token\n\
                secret: cluster-secret\n",

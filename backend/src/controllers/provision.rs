@@ -616,6 +616,8 @@ cluster:
     endpoint: https://{ep}:6443
   clusterName: {name}
   network:
+    cni:
+      name: none
     dnsDomain: {cluster_domain}
     podSubnets:
       - 10.244.0.0/16
@@ -766,6 +768,8 @@ cluster:
     endpoint: https://{ep}:6443
   clusterName: {name}
   network:
+    cni:
+      name: none
     dnsDomain: {cluster_domain}
     podSubnets:
       - 10.244.0.0/16
