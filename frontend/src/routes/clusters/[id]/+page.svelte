@@ -430,7 +430,7 @@
       </div>
     </div>
 
-    <details class="panel" open>
+    <details class="panel">
       <summary>Cluster actions</summary>
       <div class="actions-stack">
         <div class="action-block">
@@ -701,7 +701,7 @@
           <select title="Control-plane node that will perform the etcd restore" bind:value={restoreMachineId}>
             <option value="">Auto (first control-plane / talosconfig endpoint)</option>
             {#each controlPlanes as m (m.id)}
-              <option value={m.id}>{machineLabel(m)} — {m.address || 'no address'}</option>
+              <option value={m.id}>{m.hostname || machineLabel(m)} — {m.address || 'no address'}</option>
             {/each}
           </select>
         </section>
