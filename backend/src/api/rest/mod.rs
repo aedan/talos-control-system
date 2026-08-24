@@ -15,6 +15,7 @@ pub mod k8s_list_handlers;
 pub mod k8s_stream_handlers;
 pub mod k8s_tool_handlers;
 pub mod middleware;
+pub mod proxy_handlers;
 
 pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router {
     let cors = CorsLayer::new()
@@ -42,7 +43,8 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
             "/branding/tenants/:tenant_id",
             get(handlers::get_tenant_branding),
         )
-        .route("/siderolink/register", post(handlers::siderolink_register));
+        .route("/siderolink/register", post(handlers::siderolink_register))
+        .route("/proxy/tunnel", get(proxy_handlers::tunnel_ws));
 
     // Metrics intentionally not on public API; use /metrics on metrics_port when exposed separately.
     // Kept behind auth for alpha simplicity:
@@ -95,6 +97,12 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
             "/siderolink/tokens",
             get(handlers::list_siderolink_tokens).post(handlers::create_siderolink_token),
         )
+        .route(
+            "/proxy/tokens",
+            get(proxy_handlers::list_proxy_tokens).post(proxy_handlers::create_proxy_token),
+        )
+        .route("/proxy/tokens/:token", delete(proxy_handlers::delete_proxy_token))
+        .route("/proxy/agents", get(proxy_handlers::list_proxy_agents))
         .route("/clusters/:id", get(handlers::get_cluster))
         .route("/clusters/:id", put(handlers::update_cluster))
         .route("/clusters/:id", delete(handlers::delete_cluster))

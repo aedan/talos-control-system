@@ -5,6 +5,7 @@ mod redfish;
 
 use crate::db::models::machine::Machine;
 use crate::AppError;
+use serde::{Deserialize, Serialize};
 
 pub use ipmi::IpmiClient;
 pub use redfish::RedfishClient;
@@ -26,7 +27,7 @@ impl PowerState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BootTarget {
     Pxe,
     Disk,
@@ -47,6 +48,8 @@ impl BmcProtocol {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BmcCredentials {
     pub address: String,
     pub username: String,
@@ -196,4 +199,99 @@ impl BmcSession {
         }
         Err(AppError::Internal("ISO unmount only supported via Redfish".into()))
     }
+}
+
+/// Unified BMC control surface: either a direct on-network session or a relay
+/// through a connected remote OOB agent. Call sites use this instead of
+/// `BmcSession` so proxied machines are transparent.
+pub enum BmcOps {
+    Direct(BmcSession),
+    Proxied {
+        tunnel: std::sync::Arc<crate::network::tunnel::TunnelRegistry>,
+        agent_id: String,
+        creds: BmcCredentials,
+    },
+}
+
+impl BmcOps {
+    pub async fn power(&self, action: &str) -> Result<(), AppError> {
+        match self {
+            BmcOps::Direct(s) => s.power(action).await,
+            BmcOps::Proxied { tunnel, agent_id, creds } => {
+                tunnel.proxy_power(agent_id, creds, action).await
+            }
+        }
+    }
+
+    pub async fn set_boot(&self, target: BootTarget, once: bool) -> Result<(), AppError> {
+        match self {
+            BmcOps::Direct(s) => s.set_boot(target, once).await,
+            BmcOps::Proxied { tunnel, agent_id, creds } => {
+                tunnel.proxy_set_boot(agent_id, creds, target, once).await
+            }
+        }
+    }
+
+    pub async fn get_power_state(&self) -> Result<PowerState, AppError> {
+        match self {
+            BmcOps::Direct(s) => s.get_power_state().await,
+            BmcOps::Proxied { tunnel, agent_id, creds } => {
+                tunnel.proxy_get_power_state(agent_id, creds).await
+            }
+        }
+    }
+
+    pub async fn mount_iso(&self, iso_url: &str, media: &str) -> Result<(), AppError> {
+        match self {
+            BmcOps::Direct(s) => s.mount_iso(iso_url, media).await,
+            BmcOps::Proxied { tunnel, agent_id, creds } => {
+                tunnel.proxy_mount_iso(agent_id, creds, iso_url, media).await
+            }
+        }
+    }
+
+    pub async fn unmount_iso(&self, media: &str) -> Result<(), AppError> {
+        match self {
+            BmcOps::Direct(s) => s.unmount_iso(media).await,
+            BmcOps::Proxied { tunnel, agent_id, creds } => {
+                tunnel.proxy_unmount_iso(agent_id, creds, media).await
+            }
+        }
+    }
+}
+
+/// Open BMC control for a machine, routing through its remote OOB agent when
+/// `proxy_id` is set and the agent is connected, otherwise directly.
+pub async fn open_bmc_ops(
+    machine: &Machine,
+    password_plain: &str,
+    timeout_secs: u64,
+    ipmi_interface: &str,
+    tunnel: &std::sync::Arc<crate::network::tunnel::TunnelRegistry>,
+) -> Result<BmcOps, AppError> {
+    if let Some(agent_id) = machine
+        .proxy_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+    {
+        if tunnel.is_online(&agent_id) {
+            let creds = BmcCredentials::from_machine(
+                machine,
+                password_plain,
+                timeout_secs,
+                ipmi_interface,
+            )?;
+            return Ok(BmcOps::Proxied {
+                tunnel: std::sync::Arc::clone(tunnel),
+                agent_id,
+                creds,
+            });
+        }
+        return Err(AppError::Network(format!(
+            "OOB agent '{agent_id}' is not connected"
+        )));
+    }
+    let creds = BmcCredentials::from_machine(machine, password_plain, timeout_secs, ipmi_interface)?;
+    let sess = BmcSession::connect(&creds).await?;
+    Ok(BmcOps::Direct(sess))
 }

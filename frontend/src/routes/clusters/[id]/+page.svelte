@@ -528,6 +528,7 @@
         <p class="hint">
           Inventory for this cluster. Click a machine to edit role, MAC, BMC, address, or install disk.
           <a href="/machines/import">Import CSV/YAML</a>
+          · <a href="/machines/discover">Discover from Core</a>
         </p>
         {#if machinesLoading}
           <Spinner />

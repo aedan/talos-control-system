@@ -30,6 +30,8 @@ pub struct AppState {
     pub metal_runtime: Option<Arc<crate::network::MetalRuntime>>,
     /// Shared pool of K8s clients (built lazily from stored kubeconfigs).
     pub k8s_pool: Arc<crate::integration::K8sClientPool>,
+    /// Remote OOB proxy tunnel registry (connected agents + op relay).
+    pub tunnel: crate::network::tunnel::TunnelHandle,
 }
 
 impl Clone for AppState {
@@ -44,6 +46,7 @@ impl Clone for AppState {
             tls_runtime: self.tls_runtime.clone(),
             metal_runtime: self.metal_runtime.clone(),
             k8s_pool: Arc::clone(&self.k8s_pool),
+            tunnel: Arc::clone(&self.tunnel),
         }
     }
 }

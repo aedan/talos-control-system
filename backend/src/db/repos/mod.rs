@@ -7,6 +7,7 @@ pub mod cluster_backup;
 pub mod cluster_access;
 pub mod upgrade_job;
 pub mod siderolink;
+pub mod proxy;
 pub mod provision;
 pub mod oidc_state;
 pub mod pxe_profile;

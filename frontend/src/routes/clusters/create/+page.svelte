@@ -551,6 +551,7 @@
       <h2>Register Machines</h2>
       <p class="sub">
         Add machines individually or import from YAML inventory. Each machine needs at least an address, MAC, or BMC.
+        <a href="/machines/discover">Discover from Rackspace Core →</a>
       </p>
 
       <!-- Import YAML -->
