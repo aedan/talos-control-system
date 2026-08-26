@@ -68,21 +68,6 @@
       <span class="card-arrow">&rarr;</span>
     </a>
 
-    <a href="/settings/proxy" title="Remote OOB agent join tokens and connected agents" class="settings-card">
-      <div class="card-icon">
-        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M12 2v6"/>
-          <path d="M5 8l7-6 7 6"/>
-          <path d="M5 16l7 6 7-6"/>
-          <path d="M5 8v8"/>
-          <path d="M19 8v8"/>
-        </svg>
-      </div>
-      <h3>OOB Proxy</h3>
-      <p>Remote OOB agent join tokens and connected agents.</p>
-      <span class="card-arrow">&rarr;</span>
-    </a>
-
     <a href="/settings/metal" title="Configure the metal provisioning server (DHCP/PXE) for bare-metal installs" class="settings-card">
       <div class="card-icon">
         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">

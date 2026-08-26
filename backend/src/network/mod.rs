@@ -1,6 +1,5 @@
 pub mod siderolink;
 pub mod siderolink_wg;
-pub mod tunnel;
 pub mod dns;
 pub mod proxy;
 pub mod pxe;

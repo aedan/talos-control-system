@@ -51,10 +51,6 @@ pub struct Machine {
     pub bmc_tls_insecure: bool,
     #[sqlx(rename = "pxe_profile_id")]
     pub pxe_profile_id: Option<String>,
-    /// When set, BMC operations for this machine are relayed to the remote OOB
-    /// agent registered under this proxy id (see `network::tunnel`).
-    #[sqlx(rename = "proxy_id")]
-    pub proxy_id: Option<String>,
     #[sqlx(rename = "last_power_state")]
     pub last_power_state: String,
     #[sqlx(rename = "last_seen_at")]
@@ -88,7 +84,6 @@ impl Machine {
             bmc_redfish_path: String::new(),
             bmc_tls_insecure: true,
             pxe_profile_id: None,
-            proxy_id: None,
             last_power_state: "unknown".to_string(),
             last_seen_at: None,
             created_at: Utc::now(),

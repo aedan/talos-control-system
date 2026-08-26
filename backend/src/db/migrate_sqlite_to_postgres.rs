@@ -25,7 +25,6 @@ const TABLES: &[&str] = &[
     "upgrade_job_targets",
     "siderolink_peers",
     "siderolink_join_tokens",
-    "proxy_join_tokens",
     "provision_artifacts",
     "provision_jobs",
     "ha_locks",

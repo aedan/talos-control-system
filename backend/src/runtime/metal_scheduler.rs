@@ -7,15 +7,12 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use std::sync::Arc;
-
 use crate::config::MetalConfig;
 use crate::controllers::cluster::ClusterController;
 use crate::controllers::provision::ProvisionController;
 use crate::db::pool::DbPool;
 use crate::db::repos::{self, provision_job::ProvisionJob};
-use crate::integration::bmc::{BootTarget, BmcOps};
-use crate::network::tunnel::TunnelRegistry;
+use crate::integration::bmc::{BootTarget, BmcCredentials, BmcSession};
 use crate::utils::secrets;
 use crate::AppError;
 
@@ -40,7 +37,6 @@ pub fn spawn_metal_scheduler(
     sqlite_path: String,
     jwt_secret: String,
     metal: MetalConfig,
-    tunnel: Arc<TunnelRegistry>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         info!("Metal provision scheduler started");
@@ -48,7 +44,7 @@ pub fn spawn_metal_scheduler(
             match crate::runtime::ha::try_acquire(&pool, "metal_scheduler", 20).await {
                 Ok(true) => {
                     if let Err(e) =
-                        tick(&pool, &sqlite_path, &jwt_secret, &metal, &tunnel).await
+                        tick(&pool, &sqlite_path, &jwt_secret, &metal).await
                     {
                         warn!(error = %e, "Metal scheduler tick failed");
                     }
@@ -66,14 +62,13 @@ async fn tick(
     sqlite_path: &str,
     jwt_secret: &str,
     metal: &MetalConfig,
-    tunnel: &Arc<TunnelRegistry>,
 ) -> Result<(), AppError> {
     let jobs = repos::provision_job::list_active(pool).await?;
     for job in jobs {
         if job.kind != "metal_provision" {
             continue;
         }
-        if let Err(e) = run_job(pool, sqlite_path, jwt_secret, metal, tunnel, job).await {
+        if let Err(e) = run_job(pool, sqlite_path, jwt_secret, metal, job).await {
             warn!(error = %e, "Metal job step failed");
         }
     }
@@ -85,7 +80,6 @@ async fn run_job(
     sqlite_path: &str,
     jwt_secret: &str,
     metal: &MetalConfig,
-    tunnel: &Arc<TunnelRegistry>,
     job: ProvisionJob,
 ) -> Result<(), AppError> {
     let mut payload: MetalJobPayload = job
@@ -134,7 +128,7 @@ async fn run_job(
     match step.as_str() {
         "set_pxe" => {
             if machine.has_bmc() {
-                match open_bmc(pool, jwt_secret, metal, &machine, tunnel).await {
+                match open_bmc(pool, jwt_secret, metal, &machine).await {
                     Ok(sess) => {
                         if let Err(e) = sess.set_boot(BootTarget::Pxe, true).await {
                             fail_job(pool, job.id, &mut payload, &format!("set PXE boot: {e}"))
@@ -158,7 +152,7 @@ async fn run_job(
         }
         "power" => {
             if machine.has_bmc() {
-                match open_bmc(pool, jwt_secret, metal, &machine, tunnel).await {
+                match open_bmc(pool, jwt_secret, metal, &machine).await {
                     Ok(sess) => {
                         let state = sess.get_power_state().await.unwrap_or(
                             crate::integration::bmc::PowerState::Unknown,
@@ -400,7 +394,7 @@ async fn run_job(
         }
         "boot_disk" => {
             if machine.has_bmc() {
-                if let Ok(sess) = open_bmc(pool, jwt_secret, metal, &machine, tunnel).await {
+                if let Ok(sess) = open_bmc(pool, jwt_secret, metal, &machine).await {
                     let _ = sess.set_boot(BootTarget::Disk, false).await;
                     log(&mut payload, "BMC boot restored to disk");
                 }
@@ -429,21 +423,19 @@ async fn open_bmc(
     jwt_secret: &str,
     metal: &MetalConfig,
     machine: &crate::db::models::machine::Machine,
-    tunnel: &Arc<TunnelRegistry>,
-) -> Result<BmcOps, AppError> {
+) -> Result<BmcSession, AppError> {
     let enc = machine
         .bmc_password_enc
         .as_ref()
         .ok_or_else(|| AppError::InvalidInput("no BMC password".into()))?;
     let plain = secrets::decrypt(jwt_secret, enc)?;
-    crate::integration::bmc::open_bmc_ops(
+    let creds = BmcCredentials::from_machine(
         machine,
         &plain,
         metal.bmc.connect_timeout_secs,
         &metal.bmc.ipmi_interface,
-        tunnel,
-    )
-    .await
+    )?;
+    BmcSession::connect(&creds).await
 }
 
 async fn load_config_yaml(

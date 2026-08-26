@@ -1509,7 +1509,7 @@ pub async fn list_users(
     }))
 }
 
-pub fn extract_claims(headers: &HeaderMap) -> Result<Claims, (StatusCode, String)> {
+fn extract_claims(headers: &HeaderMap) -> Result<Claims, (StatusCode, String)> {
     let auth_header = headers
         .get(axum::http::header::AUTHORIZATION)
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?
@@ -3803,15 +3803,16 @@ pub async fn machine_power(
         m.bmc_password_enc.as_ref().unwrap(),
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let sess = crate::integration::bmc::open_bmc_ops(
+    let creds = crate::integration::bmc::BmcCredentials::from_machine(
         &m,
         &plain,
         state.config.metal.bmc.connect_timeout_secs,
         &state.config.metal.bmc.ipmi_interface,
-        &state.tunnel,
     )
-    .await
     .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let sess = crate::integration::bmc::BmcSession::connect(&creds)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     sess.power(&payload.action)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
@@ -3866,15 +3867,16 @@ pub async fn machine_boot_device(
         m.bmc_password_enc.as_ref().unwrap(),
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let sess = crate::integration::bmc::open_bmc_ops(
+    let creds = crate::integration::bmc::BmcCredentials::from_machine(
         &m,
         &plain,
         state.config.metal.bmc.connect_timeout_secs,
         &state.config.metal.bmc.ipmi_interface,
-        &state.tunnel,
     )
-    .await
     .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let sess = crate::integration::bmc::BmcSession::connect(&creds)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     sess.set_boot(target, payload.once)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
@@ -3921,15 +3923,16 @@ pub async fn machine_mount_iso(
         m.bmc_password_enc.as_ref().unwrap(),
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let sess = crate::integration::bmc::open_bmc_ops(
+    let creds = crate::integration::bmc::BmcCredentials::from_machine(
         &m,
         &plain,
         state.config.metal.bmc.connect_timeout_secs,
         &state.config.metal.bmc.ipmi_interface,
-        &state.tunnel,
     )
-    .await
     .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let sess = crate::integration::bmc::BmcSession::connect(&creds)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     sess.mount_iso(&payload.iso_url, &payload.media)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
@@ -3973,15 +3976,16 @@ pub async fn machine_unmount_iso(
         m.bmc_password_enc.as_ref().unwrap(),
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let sess = crate::integration::bmc::open_bmc_ops(
+    let creds = crate::integration::bmc::BmcCredentials::from_machine(
         &m,
         &plain,
         state.config.metal.bmc.connect_timeout_secs,
         &state.config.metal.bmc.ipmi_interface,
-        &state.tunnel,
     )
-    .await
     .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let sess = crate::integration::bmc::BmcSession::connect(&creds)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     sess.unmount_iso(&payload.media)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
@@ -4549,8 +4553,6 @@ pub struct InventoryImportRequest {
     pub cluster_id: Option<Uuid>,
     pub create_cluster: Option<bool>,
     pub create_cluster_name: Option<String>,
-    /// When set, imported machines route their BMC ops through this OOB agent.
-    pub proxy_id: Option<String>,
     #[serde(default = "default_true")]
     pub upsert_by_mac: bool,
 }
@@ -4594,7 +4596,6 @@ pub async fn import_machines(
         payload.cluster_id,
         payload.upsert_by_mac,
         create_name.as_deref(),
-        payload.proxy_id.as_deref(),
     )
     .await
     .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;

@@ -1,6 +1,5 @@
 /target/
 backend/target/
-oob-agent/target/
 frontend/node_modules/
 frontend/.svelte-kit/
 frontend/build/

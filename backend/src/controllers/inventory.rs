@@ -289,7 +289,6 @@ pub async fn apply_inventory(
     cluster_id: Option<Uuid>,
     upsert_by_mac: bool,
     create_cluster_name: Option<&str>,
-    proxy_id: Option<&str>,
 ) -> Result<InventoryImportResult, AppError> {
     let preview = preview_inventory(doc);
     if preview.errors.iter().any(|e| e.message.contains("invalid") || e.message.contains("duplicate")) {
@@ -330,10 +329,6 @@ pub async fn apply_inventory(
     let mut updated = 0usize;
     let mut errors = Vec::new();
     let mut machine_ids = Vec::new();
-    let proxy_id = proxy_id
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
 
     for (index, row) in doc.machines.iter().enumerate() {
         let mac = resolve_mac(row);
@@ -376,9 +371,6 @@ pub async fn apply_inventory(
             if let Some(pw) = bmc_password {
                 m.bmc_password_enc = Some(secrets::encrypt(jwt_secret, &pw)?);
             }
-            if let Some(pid) = &proxy_id {
-                m.proxy_id = Some(pid.clone());
-            }
             m.updated_at = chrono::Utc::now();
             let m = repos::machine::update(pool, &m).await?;
             machine_ids.push(m.id);
@@ -404,7 +396,6 @@ pub async fn apply_inventory(
             m.bmc_username = bmc_username;
             m.bmc_type = bmc_type;
             m.cluster_id = cluster_id;
-            m.proxy_id = proxy_id.clone();
             if let Some(pw) = bmc_password {
                 m.bmc_password_enc = Some(secrets::encrypt(jwt_secret, &pw)?);
             }

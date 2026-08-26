@@ -2,7 +2,7 @@ use crate::db::models::machine::Machine;
 use crate::db::pool::{DbPool, SqlVal};
 use crate::AppError;
 
-const COLS: &str = "id, system_uuid, machine_type, cluster_id, status, talos_version, secure_boot, siderolink_connected, address, install_disk, desired_config, mac_address, hostname, bmc_address, bmc_username, bmc_password_enc, bmc_type, bmc_redfish_path, bmc_tls_insecure, pxe_profile_id, proxy_id, last_power_state, last_seen_at, created_at, updated_at";
+const COLS: &str = "id, system_uuid, machine_type, cluster_id, status, talos_version, secure_boot, siderolink_connected, address, install_disk, desired_config, mac_address, hostname, bmc_address, bmc_username, bmc_password_enc, bmc_type, bmc_redfish_path, bmc_tls_insecure, pxe_profile_id, last_power_state, last_seen_at, created_at, updated_at";
 
 pub async fn create(pool: &DbPool, machine: &Machine) -> Result<Machine, AppError> {
     if get(pool, machine.id).await?.is_some() {
@@ -15,7 +15,7 @@ pub async fn create(pool: &DbPool, machine: &Machine) -> Result<Machine, AppErro
         .execute(
             &format!(
                 "INSERT INTO machines ({COLS})
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             ),
             &[
                 SqlVal::Uuid(machine.id),
@@ -38,7 +38,6 @@ pub async fn create(pool: &DbPool, machine: &Machine) -> Result<Machine, AppErro
                 SqlVal::text(&machine.bmc_redfish_path),
                 SqlVal::Bool(machine.bmc_tls_insecure),
                 SqlVal::OptText(machine.pxe_profile_id.clone()),
-                SqlVal::OptText(machine.proxy_id.clone()),
                 SqlVal::text(&machine.last_power_state),
                 SqlVal::OptDateTime(machine.last_seen_at),
                 SqlVal::DateTime(machine.created_at),
@@ -112,8 +111,8 @@ pub async fn list_with_mac(pool: &DbPool) -> Result<Vec<Machine>, AppError> {
 pub async fn update(pool: &DbPool, machine: &Machine) -> Result<Machine, AppError> {
     let n = pool
         .execute(
-             "UPDATE machines SET system_uuid = ?, machine_type = ?, cluster_id = ?, status = ?, talos_version = ?, secure_boot = ?, siderolink_connected = ?, address = ?, install_disk = ?, desired_config = ?, mac_address = ?, hostname = ?, bmc_address = ?, bmc_username = ?, bmc_password_enc = ?, bmc_type = ?, bmc_redfish_path = ?, bmc_tls_insecure = ?, pxe_profile_id = ?, proxy_id = ?, last_power_state = ?, last_seen_at = ?, updated_at = ?
-              WHERE id = ?",
+            "UPDATE machines SET system_uuid = ?, machine_type = ?, cluster_id = ?, status = ?, talos_version = ?, secure_boot = ?, siderolink_connected = ?, address = ?, install_disk = ?, desired_config = ?, mac_address = ?, hostname = ?, bmc_address = ?, bmc_username = ?, bmc_password_enc = ?, bmc_type = ?, bmc_redfish_path = ?, bmc_tls_insecure = ?, pxe_profile_id = ?, last_power_state = ?, last_seen_at = ?, updated_at = ?
+             WHERE id = ?",
             &[
                 SqlVal::text(&machine.system_uuid),
                 SqlVal::text(&machine.machine_type),
@@ -134,7 +133,6 @@ pub async fn update(pool: &DbPool, machine: &Machine) -> Result<Machine, AppErro
                 SqlVal::text(&machine.bmc_redfish_path),
                 SqlVal::Bool(machine.bmc_tls_insecure),
                 SqlVal::OptText(machine.pxe_profile_id.clone()),
-                SqlVal::OptText(machine.proxy_id.clone()),
                 SqlVal::text(&machine.last_power_state),
                 SqlVal::OptDateTime(machine.last_seen_at),
                 SqlVal::DateTime(machine.updated_at),

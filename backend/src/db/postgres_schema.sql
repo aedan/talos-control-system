@@ -42,7 +42,6 @@ CREATE TABLE IF NOT EXISTS machines (
     bmc_redfish_path TEXT NOT NULL DEFAULT '',
     bmc_tls_insecure INTEGER NOT NULL DEFAULT 1,
     pxe_profile_id TEXT,
-    proxy_id TEXT,
     last_power_state TEXT NOT NULL DEFAULT 'unknown',
     last_seen_at TEXT,
     created_at TEXT NOT NULL,
@@ -186,13 +185,6 @@ CREATE TABLE IF NOT EXISTS siderolink_peers (
 );
 
 CREATE TABLE IF NOT EXISTS siderolink_join_tokens (
-    token TEXT PRIMARY KEY,
-    label TEXT,
-    expires_at TEXT,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS proxy_join_tokens (
     token TEXT PRIMARY KEY,
     label TEXT,
     expires_at TEXT,

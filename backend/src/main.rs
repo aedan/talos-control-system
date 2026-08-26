@@ -299,9 +299,6 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         &data_dir,
     );
 
-    // Remote OOB proxy tunnel registry (shared by handlers + metal scheduler).
-    let tunnel = Arc::new(talos_control_system::network::tunnel::TunnelRegistry::new());
-
     // Placeholder runtime; filled in run_with_tls before serving
     let state = AppState {
         config: Arc::new(config.clone()),
@@ -313,7 +310,6 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tls_runtime: None,
         metal_runtime: Some(metal_runtime),
         k8s_pool: Arc::new(talos_control_system::integration::K8sClientPool::new()),
-        tunnel: tunnel.clone(),
     };
 
     let _backup_sched = talos_control_system::runtime::spawn_backup_scheduler(
@@ -331,7 +327,6 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config.database.sqlite_path.clone(),
         config.auth.jwt_secret.clone(),
         metal_merged,
-        tunnel,
     );
     let _status_sched = talos_control_system::runtime::spawn_status_reconciler(
         db_pool.clone(),
