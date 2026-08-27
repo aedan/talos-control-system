@@ -25,6 +25,12 @@ use super::output::Format;
 pub use super::client;
 pub use super::output;
 
+/// Perform an interactive re-login using the same server as the current CLI
+/// invocation. Used when a stored token is missing/expired. Requires a TTY.
+pub async fn relogin(server: Option<&str>) -> super::client::CliResult<()> {
+    super::do_login(&server.map(|s| s.to_string()), None, None).await
+}
+
 /// Common flags shared by most read commands.
 #[derive(Debug, Clone)]
 pub struct CommonArgs {

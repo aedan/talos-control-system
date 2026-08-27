@@ -79,21 +79,12 @@ pub enum Command {
     Drain(drain::DrainArgs),
     /// Apply a YAML manifest.
     Apply(apply::ApplyArgs),
-    /// Print the cluster's stored kubeconfig YAML.
-    ///
-    /// `--local` reads the TCS database on this host directly (no token);
-    /// default fetches over the API.
-    Kubeconfig {
-        /// Read the local TCS database directly (this host must run TCS).
-        #[arg(long)]
-        local: bool,
-    },
-    /// Print the cluster's stored talosconfig YAML.
-    Talosconfig {
-        /// Read the local TCS database directly (this host must run TCS).
-        #[arg(long)]
-        local: bool,
-    },
+    /// Print the cluster's stored kubeconfig YAML (fetched over the API;
+    /// auto re-login if the token expired).
+    Kubeconfig,
+    /// Print the cluster's stored talosconfig YAML (fetched over the API;
+    /// auto re-login if the token expired).
+    Talosconfig,
 }
 
 /// Run the CLI (called from `main` when a verb is present).
@@ -114,22 +105,24 @@ pub async fn run_cli(cli: Cli) -> CliResult<()> {
             let client = Client::new(cli.server.as_deref(), cli.token.as_deref())?;
             do_clusters(&client).await
         }
-        Command::Kubeconfig { local } => kubeconfig::run(
-            kubeconfig::Kind::Kubeconfig,
-            &kubeconfig::Args { local },
-            cli.server.as_deref(),
-            cli.token.as_deref(),
-            cli.cluster.as_deref(),
-        )
-        .await,
-        Command::Talosconfig { local } => kubeconfig::run(
-            kubeconfig::Kind::Talosconfig,
-            &kubeconfig::Args { local },
-            cli.server.as_deref(),
-            cli.token.as_deref(),
-            cli.cluster.as_deref(),
-        )
-        .await,
+        Command::Kubeconfig => {
+            kubeconfig::run(
+                kubeconfig::Kind::Kubeconfig,
+                cli.server.as_deref(),
+                cli.token.as_deref(),
+                cli.cluster.as_deref(),
+            )
+            .await
+        }
+        Command::Talosconfig => {
+            kubeconfig::run(
+                kubeconfig::Kind::Talosconfig,
+                cli.server.as_deref(),
+                cli.token.as_deref(),
+                cli.cluster.as_deref(),
+            )
+            .await
+        }
         _ => {
             let client = Client::new(cli.server.as_deref(), cli.token.as_deref())?;
             let cluster = commands::require_cluster(&client, cli.cluster.as_deref()).await?;
@@ -148,14 +141,17 @@ pub async fn run_cli(cli: Cli) -> CliResult<()> {
                 Command::Login { .. }
                 | Command::Clusters
                 | Command::Serve
-                | Command::Kubeconfig { .. }
-                | Command::Talosconfig { .. } => unreachable!(),
+                | Command::Kubeconfig
+                | Command::Talosconfig => unreachable!(),
             }
         }
     }
 }
 
-async fn do_login(
+/// Interactive email+password login. Prompts for anything not supplied and
+/// persists the resulting JWT to `~/.tcs/config`. Exposed so other commands
+/// (e.g. `kubeconfig`) can re-authenticate when a stored token has expired.
+pub async fn do_login(
     server_flag: &Option<String>,
     email: Option<String>,
     password: Option<String>,

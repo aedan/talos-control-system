@@ -172,9 +172,9 @@ fn print_help() {
              tcs kubectl <args...>        (real kubectl, run server-side)\n\
              tcs helm <args...>           (real helm, run server-side)\n\
              tcs talosctl <args...>       (real talosctl, run server-side)\n\
-             tcs kubeconfig [--local]     Print the cluster's stored kubeconfig\n\
-             tcs talosconfig [--local]    Print the cluster's stored talosconfig\n\
-             (--local reads the TCS DB on this host; no token needed)\n\n\
+             tcs kubeconfig               Print the cluster's stored kubeconfig\n\
+             tcs talosconfig              Print the cluster's stored talosconfig\n\
+             (fetched over the API with your token; auto re-login if expired)\n\n\
          Global flags: --server URL --token JWT --cluster ID\n\
          Auth: `tcs login`, TCS_TOKEN, or ~/.tcs/config\n"
     );
