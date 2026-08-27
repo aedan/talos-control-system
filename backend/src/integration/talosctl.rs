@@ -71,6 +71,7 @@ impl TalosctlClient {
 
     async fn ensure_installed() -> Result<(), AppError> {
         match Command::new("talosctl")
+            .env("TCS_INTERNAL", "1")
             .arg("--help")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -133,6 +134,7 @@ impl TalosctlClient {
             .filter(|p| p.starts_with("/var/lib/tcs/talosctl-tmp/"));
 
         let out = Command::new("talosctl")
+            .env("TCS_INTERNAL", "1")
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -201,6 +203,7 @@ impl TalosctlClient {
         Self::ensure_installed().await?;
 
         let out = Command::new("talosctl")
+            .env("TCS_INTERNAL", "1")
             .args(["get", "disks", "-i", "-e", endpoint, "-n", endpoint, "-o", "json"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -599,6 +602,7 @@ impl TalosctlClient {
         Self::ensure_installed().await?;
 
         let out = Command::new("talosctl")
+            .env("TCS_INTERNAL", "1")
             .args(["get", "disks", "-i", "-e", endpoint, "-n", endpoint, "-o", "json"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -632,6 +636,7 @@ impl TalosctlClient {
         args.extend(Self::talosconfig_args(talosconfig));
 
         let out = Command::new("talosctl")
+            .env("TCS_INTERNAL", "1")
             .args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

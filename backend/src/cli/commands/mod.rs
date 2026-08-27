@@ -13,6 +13,7 @@ pub mod describe;
 pub mod drain;
 pub mod exec;
 pub mod get;
+pub mod kubeconfig;
 pub mod logs;
 pub mod scale;
 pub mod tool;

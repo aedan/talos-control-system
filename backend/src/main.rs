@@ -169,9 +169,12 @@ fn print_help() {
            tcs cordon <node> | uncordon <node>\n\
             tcs drain <node> [-f]\n\
             tcs apply -f <file|->\n\
-            tcs kubectl <args...>        (real kubectl, run server-side)\n\
-            tcs helm <args...>           (real helm, run server-side)\n\
-            tcs talosctl <args...>       (real talosctl, run server-side)\n\n\
+             tcs kubectl <args...>        (real kubectl, run server-side)\n\
+             tcs helm <args...>           (real helm, run server-side)\n\
+             tcs talosctl <args...>       (real talosctl, run server-side)\n\
+             tcs kubeconfig [--local]     Print the cluster's stored kubeconfig\n\
+             tcs talosconfig [--local]    Print the cluster's stored talosconfig\n\
+             (--local reads the TCS DB on this host; no token needed)\n\n\
          Global flags: --server URL --token JWT --cluster ID\n\
          Auth: `tcs login`, TCS_TOKEN, or ~/.tcs/config\n"
     );

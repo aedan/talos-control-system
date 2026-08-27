@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 use client::{CliError, CliResult, Client};
 use serde_json::Value;
 use commands::{
-    apply, attach, cordon, delete, describe, drain, exec, get, logs, scale,
+    apply, attach, cordon, delete, describe, drain, exec, get, kubeconfig, logs, scale,
 };
 
 /// Talos Control System CLI.
@@ -79,6 +79,21 @@ pub enum Command {
     Drain(drain::DrainArgs),
     /// Apply a YAML manifest.
     Apply(apply::ApplyArgs),
+    /// Print the cluster's stored kubeconfig YAML.
+    ///
+    /// `--local` reads the TCS database on this host directly (no token);
+    /// default fetches over the API.
+    Kubeconfig {
+        /// Read the local TCS database directly (this host must run TCS).
+        #[arg(long)]
+        local: bool,
+    },
+    /// Print the cluster's stored talosconfig YAML.
+    Talosconfig {
+        /// Read the local TCS database directly (this host must run TCS).
+        #[arg(long)]
+        local: bool,
+    },
 }
 
 /// Run the CLI (called from `main` when a verb is present).
@@ -99,6 +114,22 @@ pub async fn run_cli(cli: Cli) -> CliResult<()> {
             let client = Client::new(cli.server.as_deref(), cli.token.as_deref())?;
             do_clusters(&client).await
         }
+        Command::Kubeconfig { local } => kubeconfig::run(
+            kubeconfig::Kind::Kubeconfig,
+            &kubeconfig::Args { local },
+            cli.server.as_deref(),
+            cli.token.as_deref(),
+            cli.cluster.as_deref(),
+        )
+        .await,
+        Command::Talosconfig { local } => kubeconfig::run(
+            kubeconfig::Kind::Talosconfig,
+            &kubeconfig::Args { local },
+            cli.server.as_deref(),
+            cli.token.as_deref(),
+            cli.cluster.as_deref(),
+        )
+        .await,
         _ => {
             let client = Client::new(cli.server.as_deref(), cli.token.as_deref())?;
             let cluster = commands::require_cluster(&client, cli.cluster.as_deref()).await?;
@@ -114,7 +145,11 @@ pub async fn run_cli(cli: Cli) -> CliResult<()> {
                 Command::Uncordon(a) => cordon::run_uncordon(&client, &cluster, a).await,
                 Command::Drain(a) => drain::run(&client, &cluster, a).await,
                 Command::Apply(a) => apply::run(&client, &cluster, a).await,
-                Command::Login { .. } | Command::Clusters | Command::Serve => unreachable!(),
+                Command::Login { .. }
+                | Command::Clusters
+                | Command::Serve
+                | Command::Kubeconfig { .. }
+                | Command::Talosconfig { .. } => unreachable!(),
             }
         }
     }

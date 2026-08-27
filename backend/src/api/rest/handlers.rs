@@ -700,6 +700,45 @@ pub async fn set_cluster_talosconfig(
     }
 }
 
+/// GET /clusters/:id/kubeconfig — return the decrypted kubeconfig YAML.
+///
+/// Used by `tcs kubeconfig` and the zero-touch tool wrappers on the TCS host.
+/// The caller is authenticated + RBAC-checked by the middleware.
+pub async fn get_cluster_kubeconfig(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<uuid::Uuid>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    let cluster = super::k8s_common::load_cluster(&state, cluster_id).await?;
+    let Some(enc) = cluster.kubeconfig else {
+        return Err((StatusCode::BAD_REQUEST, "Cluster has no kubeconfig attached".to_string()));
+    };
+    let plain = crate::utils::secrets::decrypt(&state.config.auth.jwt_secret, &enc)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/yaml")
+        .body(axum::body::Body::from(plain))
+        .unwrap())
+}
+
+/// GET /clusters/:id/talosconfig — return the decrypted talosconfig YAML.
+pub async fn get_cluster_talosconfig(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<uuid::Uuid>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    let cluster = super::k8s_common::load_cluster(&state, cluster_id).await?;
+    let Some(enc) = cluster.talosconfig else {
+        return Err((StatusCode::BAD_REQUEST, "Cluster has no talosconfig attached".to_string()));
+    };
+    let plain = crate::utils::secrets::decrypt(&state.config.auth.jwt_secret, &enc)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/yaml")
+        .body(axum::body::Body::from(plain))
+        .unwrap())
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetKubeconfigRequest {
