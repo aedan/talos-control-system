@@ -39,11 +39,7 @@ pub async fn run(
     token: Option<&str>,
     cluster: Option<&str>,
 ) -> CliResult<()> {
-    let client = Client::new(server, token)?;
-    let id = resolve(&client, cluster).await?;
-    let path = format!("/api/clusters/{id}/{}", kind_name(kind));
-
-    match client.get_text(&path).await {
+    match fetch_once(kind, server, token, cluster).await {
         Ok(text) => {
             print!("{text}");
             Ok(())
@@ -51,15 +47,26 @@ pub async fn run(
         Err(err) if is_auth_error(&err) => {
             eprintln!("token is missing or expired — re-authenticating…");
             super::relogin(server).await?;
-            let client = Client::new(server, token)?;
-            let id = resolve(&client, cluster).await?;
-            let path = format!("/api/clusters/{id}/{}", kind_name(kind));
-            let text = client.get_text(&path).await?;
+            let text = fetch_once(kind, server, token, cluster).await?;
             print!("{text}");
             Ok(())
         }
         Err(err) => Err(err),
     }
+}
+
+/// Resolve the cluster and fetch its credential, both via the API with the
+/// caller's token. This is the unit retried once after an interactive relogin.
+async fn fetch_once(
+    kind: Kind,
+    server: Option<&str>,
+    token: Option<&str>,
+    cluster: Option<&str>,
+) -> CliResult<String> {
+    let client = Client::new(server, token)?;
+    let id = resolve(&client, cluster).await?;
+    let path = format!("/api/clusters/{id}/{}", kind_name(kind));
+    client.get_text(&path).await
 }
 
 /// Resolve the canonical cluster UUID for the credential verbs.
