@@ -75,7 +75,12 @@
       editAddress = machine.address || '';
       editMac = machine.macAddress || '';
       editHostname = machine.hostname || '';
-      editMachineType = machine.machineType || 'worker';
+      // Normalize legacy role spellings to the canonical backend value
+      // ('controlplane'), since the Role select only offers controlplane/worker.
+      const rawType = (machine.machineType || 'worker').toLowerCase();
+      editMachineType = rawType === 'control-plane' || rawType === 'control_plane' || rawType === 'cp'
+        ? 'controlplane'
+        : (rawType === 'worker' ? 'worker' : machine.machineType || 'worker');
       editInstallDisk = machine.installDisk || '';
       editClusterId = machine.clusterId || '';
       bmcAddress = machine.bmcAddress || '';
@@ -104,6 +109,16 @@
       loading = false;
     }
   });
+
+  // Human-friendly role label for the header badge (canonical value is
+  // 'controlplane'; legacy rows may store 'control-plane'/'control_plane').
+  function roleLabel(t: string | undefined): string {
+    const s = (t || '').toLowerCase();
+    if (s === 'controlplane' || s === 'control-plane' || s === 'control_plane' || s === 'cp') {
+      return 'control-plane';
+    }
+    return t || '—';
+  }
 
   async function loadDesiredConfig() {
     const before = configYaml;
@@ -539,10 +554,19 @@
     <div class="error">{error}</div>
   {:else if machine}
     <div class="detail-header">
-      <h1>{hostnameLive || machine.hostname || machineLabel(machine)}</h1>
+      <div class="detail-title">
+        {#if machine.clusterId}
+          <a class="back-link" href="/clusters/{machine.clusterId}"
+             title="Back to this cluster's machine list">← Back to machine list</a>
+        {:else}
+          <button class="back-link" type="button" onclick={() => history.back()}
+                  title="Back to previous page">← Back</button>
+        {/if}
+        <h1>{hostnameLive || machine.hostname || machineLabel(machine)}</h1>
+      </div>
       <div class="header-actions">
         <span class="status-badge">{machine.status}</span>
-        <span class="type-badge">{machine.machineType}</span>
+        <span class="type-badge">{roleLabel(machine.machineType)}</span>
         <Button variant="secondary" size="sm" title="Probe the node for its running Talos version" onclick={probeVersion} disabled={actionBusy}>Version</Button>
         <Button variant="secondary" size="sm" title="Fetch the node's live hostname from Talos" onclick={loadHostname} disabled={actionBusy}>Hostname</Button>
         <Button variant="secondary" size="sm" title="List the Talos services running on this node and their health" onclick={loadServices} disabled={actionBusy}>Services</Button>
@@ -566,8 +590,7 @@
           <label>
             Role
             <select title="Node role: control-plane or worker" bind:value={editMachineType}>
-              <option value="controlplane">controlplane</option>
-              <option value="control-plane">control-plane</option>
+              <option value="controlplane">control-plane</option>
               <option value="worker">worker</option>
             </select>
           </label>
@@ -1052,6 +1075,18 @@ cluster:
     gap: 0.75rem;
     margin-bottom: 1.5rem;
   }
+  .detail-title { display: flex; flex-direction: column; gap: 0.25rem; }
+  .back-link {
+    align-self: flex-start;
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: var(--tcs-text-muted, #9aa4b2);
+    text-decoration: none;
+  }
+  .back-link:hover { color: var(--tcs-text, #e6e9ef); text-decoration: underline; }
   .header-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
   .info-grid {
     display: grid;
