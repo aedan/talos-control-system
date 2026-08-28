@@ -6,8 +6,14 @@
 //! database — that would let anything with DB access exfiltrate cluster
 //! credentials without authentication.
 //!
-//! If the stored token is missing or has expired (HTTP 401), this command
-//! performs an interactive `tcs login` once and retries, mirroring the old
+//! Cluster resolution: an explicit `--cluster`/`TCS_CLUSTER`/saved cluster is
+//! used when present. If none is set and the account can see exactly **one**
+//! cluster, that cluster is used as the default (this is what lets the
+//! zero-touch tool wrappers work with bare `kubectl`/`helm`/`talosctl` on a
+//! single-cluster host). If there are several and none is selected, it errors.
+//!
+//! Auth: if the stored token is missing or expired (HTTP 401), this command
+//! performs an interactive `tcs login` once and retries — mirroring the old
 //! `tcs kubectl` behavior. Unattended scripts therefore require a human to
 //! have logged in recently (within the JWT TTL).
 
@@ -34,7 +40,7 @@ pub async fn run(
     cluster: Option<&str>,
 ) -> CliResult<()> {
     let client = Client::new(server, token)?;
-    let id = require_cluster(&client, cluster).await?;
+    let id = resolve(&client, cluster).await?;
     let path = format!("/api/clusters/{id}/{}", kind_name(kind));
 
     match client.get_text(&path).await {
@@ -43,20 +49,46 @@ pub async fn run(
             Ok(())
         }
         Err(err) if is_auth_error(&err) => {
-            eprintln!(
-                "{} token is missing or expired — re-authenticating…",
-                kind_name(kind)
-            );
+            eprintln!("token is missing or expired — re-authenticating…");
             super::relogin(server).await?;
-            // Re-resolve server/token after login rewrote the config.
             let client = Client::new(server, token)?;
-            let id = require_cluster(&client, cluster).await?;
+            let id = resolve(&client, cluster).await?;
             let path = format!("/api/clusters/{id}/{}", kind_name(kind));
             let text = client.get_text(&path).await?;
             print!("{text}");
             Ok(())
         }
         Err(err) => Err(err),
+    }
+}
+
+/// Resolve the canonical cluster UUID for the credential verbs.
+///
+/// Prefers an explicitly selected cluster; otherwise, if the account can see
+/// exactly one cluster, uses it as the default. Returns the canonical UUID
+/// plus the server/token so the caller can rebuild a fresh client.
+async fn resolve(client: &Client, cluster: Option<&str>) -> CliResult<String> {
+    let want = super::super::config::CliConfig::resolve_cluster(cluster);
+    match want {
+        Some(want) => require_cluster(client, Some(&want)).await,
+        None => single_visible_cluster(client).await,
+    }
+}
+
+/// Return the single visible cluster's UUID, or an error.
+async fn single_visible_cluster(client: &Client) -> CliResult<String> {
+    let res = client.get_json("/api/clusters").await?;
+    let rows = res.as_array().cloned().unwrap_or_default();
+    match rows.len() {
+        0 => Err(CliError::Other("no clusters visible to this account".into())),
+        1 => rows[0]
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or(CliError::Other("cluster row missing id".into())),
+        n => Err(CliError::Other(format!(
+            "{n} clusters visible; pass --cluster or set TCS_CLUSTER"
+        ))),
     }
 }
 
@@ -71,8 +103,8 @@ fn is_auth_error(err: &CliError) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_auth_error;
     use super::super::client::CliError;
+    use super::is_auth_error;
 
     #[test]
     fn detects_401_server_error() {
