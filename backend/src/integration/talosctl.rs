@@ -575,15 +575,19 @@ impl TalosctlClient {
     }
 
     /// Get a single installed extension (Talos module) from the extensions list JSON.
+    ///
+    /// `talosctl get extensions -o json` emits one document per module. Each doc has
+    /// `metadata.id` (a numeric index, NOT the name) and the real module info under
+    /// `spec.metadata.name` + `spec.image` + `spec.metadata.version`.
     fn extension_from_item(v: &serde_json::Value) -> Option<MachineExtension> {
-        let id = v["metadata"]["id"].as_str()?.to_string();
-        if id.is_empty() {
+        let name = v["spec"]["metadata"]["name"].as_str()?.to_string();
+        if name.is_empty() {
             return None;
         }
         Some(MachineExtension {
-            id,
-            source: v["spec"]["source"].as_str().unwrap_or("").to_string(),
-            hash: v["spec"]["hash"].as_str().unwrap_or("").to_string(),
+            id: name,
+            source: v["spec"]["image"].as_str().unwrap_or("").to_string(),
+            hash: v["spec"]["metadata"]["version"].as_str().unwrap_or("").to_string(),
         })
     }
 
@@ -616,9 +620,11 @@ impl TalosctlClient {
         Ok(extensions)
     }
 
-    /// Get the node's installed/upgradable Talos versions (includes the installed
-    /// image). Returns the raw `talosctl get versions -o json` payload so the
-    /// caller can read `versions.installed` / `versions.upgradable`.
+    /// Get the node's Talos version info (from `talosctl get versions -o json`).
+    ///
+    /// Returns a normalized `{ version, upgradable }` object. Newer Talos releases may
+    /// add an `installed` image URI under `spec`; we surface it as `installed` when
+    /// present, otherwise `installed` is empty and the UI falls back to `version`.
     pub async fn get_versions(
         endpoint: &str,
         talosconfig: Option<&str>,
@@ -631,16 +637,22 @@ impl TalosctlClient {
         args.extend(Self::talosconfig_args(talosconfig));
 
         let out = Self::run(&args).await?;
-        // `get versions` emits one or more JSON documents; take the first object.
         let parsed: Vec<serde_json::Value> = serde_json::Deserializer::from_str(&out)
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| AppError::Network(format!("Failed to parse talosctl versions JSON: {e}")))?;
 
-        parsed
+        let doc = parsed
             .into_iter()
             .find(|v| v.is_object())
-            .ok_or_else(|| AppError::Network("talosctl get versions returned no object".to_string()))
+            .ok_or_else(|| AppError::Network("talosctl get versions returned no object".to_string()))?;
+
+        let spec = &doc["spec"];
+        Ok(serde_json::json!({
+            "version": spec.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            "installed": spec.get("installed").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            "upgradable": spec.get("upgradable").and_then(|v| v.as_str()),
+        }))
     }
 
     /// Get hostname of a node.
@@ -1077,18 +1089,21 @@ mod tests {
     #[test]
     fn extension_from_item_parses() {
         let v = serde_json::json!({
-            "metadata": { "id": "metal", "phase": "Installed" },
-            "spec": { "source": "factory.talos.dev/metal:abc", "hash": "deadbeef" }
+            "metadata": { "id": 1, "phase": "running" },
+            "spec": {
+                "image": "1.sqsh",
+                "metadata": { "name": "schematic", "version": "fd096f676a", "author": "Image Factory" }
+            }
         });
         let ext = TalosctlClient::extension_from_item(&v).unwrap();
-        assert_eq!(ext.id, "metal");
-        assert_eq!(ext.source, "factory.talos.dev/metal:abc");
-        assert_eq!(ext.hash, "deadbeef");
+        assert_eq!(ext.id, "schematic");
+        assert_eq!(ext.source, "1.sqsh");
+        assert_eq!(ext.hash, "fd096f676a");
     }
 
     #[test]
-    fn extension_from_item_missing_id_is_none() {
-        let v = serde_json::json!({ "metadata": {}, "spec": { "source": "x" } });
+    fn extension_from_item_missing_name_is_none() {
+        let v = serde_json::json!({ "metadata": { "id": 0 }, "spec": { "image": "0.sqsh" } });
         assert!(TalosctlClient::extension_from_item(&v).is_none());
     }
 

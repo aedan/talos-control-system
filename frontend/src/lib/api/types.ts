@@ -51,6 +51,7 @@ export interface MachineExtension {
 }
 
 export interface MachineVersions {
+  version?: string;
   installed?: string;
   upgradable?: string | null;
   [key: string]: unknown;

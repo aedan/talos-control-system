@@ -658,19 +658,21 @@
       <div class="info-section">
         <h2>Image &amp; modules</h2>
         <div class="info-row">
-          <span class="label">Installed image</span>
-          <span class="value mono">{versions?.installed || (extError ? '—' : (extBusy ? 'probing…' : 'unknown'))}</span>
+          <span class="label">Running version</span>
+          <span class="value mono">{versions?.version || machine.talosVersion || (extError ? '—' : (extBusy ? 'probing…' : 'unknown'))}</span>
         </div>
+        {#if versions?.installed}
+          <div class="info-row">
+            <span class="label">Installed image</span>
+            <span class="value mono">{versions.installed}</span>
+          </div>
+        {/if}
         {#if versions?.upgradable}
           <div class="info-row">
             <span class="label">Upgradable to</span>
             <span class="value mono">{versions.upgradable}</span>
           </div>
         {/if}
-        <div class="info-row">
-          <span class="label">Running version</span>
-          <span class="value mono">{machine.talosVersion || '—'}</span>
-        </div>
         <Button variant="ghost" size="sm" title="Re-probe the node's installed image and modules" onclick={() => loadImageAndModules(false)} disabled={extBusy}>Refresh</Button>
         {#if extError}
           <p class="muted-hint error-hint">{extError}</p>
@@ -681,14 +683,14 @@
         {:else}
           <table class="modules-table">
             <thead>
-              <tr><th>Module</th><th>Source</th><th>Hash</th></tr>
+              <tr><th>Module</th><th>Image</th><th>Version / hash</th></tr>
             </thead>
             <tbody>
               {#each extensions as ext (ext.id)}
                 <tr>
                   <td class="mono">{ext.id}</td>
                   <td class="mono" title={ext.source}>{ext.source || '—'}</td>
-                  <td class="mono" title={ext.hash}>{ext.hash ? ext.hash.slice(0, 12) : '—'}</td>
+                  <td class="mono" title={ext.hash}>{ext.hash ? (ext.hash.length > 16 ? ext.hash.slice(0, 16) + '…' : ext.hash) : '—'}</td>
                 </tr>
               {/each}
             </tbody>
