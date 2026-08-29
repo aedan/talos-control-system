@@ -20,6 +20,14 @@ pub struct TalosCredentials {
     pub nodes: Vec<String>,
 }
 
+/// A single installed Talos extension (module) on a node.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct MachineExtension {
+    pub id: String,
+    pub source: String,
+    pub hash: String,
+}
+
 impl TalosCredentials {
     /// Parse a talosconfig YAML string (same format as `~/.talos/config`).
     pub fn from_talosconfig_yaml(yaml: &str) -> Result<Self, AppError> {
@@ -566,6 +574,75 @@ impl TalosctlClient {
         Ok(services)
     }
 
+    /// Get a single installed extension (Talos module) from the extensions list JSON.
+    fn extension_from_item(v: &serde_json::Value) -> Option<MachineExtension> {
+        let id = v["metadata"]["id"].as_str()?.to_string();
+        if id.is_empty() {
+            return None;
+        }
+        Some(MachineExtension {
+            id,
+            source: v["spec"]["source"].as_str().unwrap_or("").to_string(),
+            hash: v["spec"]["hash"].as_str().unwrap_or("").to_string(),
+        })
+    }
+
+    /// List installed Talos extensions (modules) on a node.
+    pub async fn list_extensions(
+        endpoint: &str,
+        talosconfig: Option<&str>,
+    ) -> Result<Vec<MachineExtension>, AppError> {
+        Self::ensure_installed().await?;
+
+        let mut args: Vec<String> = vec![
+            "get".into(), "extensions".into(), "-e".into(), endpoint.into(), "-n".into(), endpoint.into(), "-o".into(), "json".into(),
+        ];
+        args.extend(Self::talosconfig_args(talosconfig));
+
+        let out = Self::run(&args).await?;
+        let stream: Vec<serde_json::Value> = serde_json::Deserializer::from_str(&out)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                AppError::Network(format!("Failed to parse talosctl extensions JSON: {e}"))
+            })?;
+
+        let extensions = stream
+            .iter()
+            .filter(|v| v.is_object())
+            .filter_map(Self::extension_from_item)
+            .collect();
+
+        Ok(extensions)
+    }
+
+    /// Get the node's installed/upgradable Talos versions (includes the installed
+    /// image). Returns the raw `talosctl get versions -o json` payload so the
+    /// caller can read `versions.installed` / `versions.upgradable`.
+    pub async fn get_versions(
+        endpoint: &str,
+        talosconfig: Option<&str>,
+    ) -> Result<serde_json::Value, AppError> {
+        Self::ensure_installed().await?;
+
+        let mut args: Vec<String> = vec![
+            "get".into(), "versions".into(), "-e".into(), endpoint.into(), "-n".into(), endpoint.into(), "-o".into(), "json".into(),
+        ];
+        args.extend(Self::talosconfig_args(talosconfig));
+
+        let out = Self::run(&args).await?;
+        // `get versions` emits one or more JSON documents; take the first object.
+        let parsed: Vec<serde_json::Value> = serde_json::Deserializer::from_str(&out)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::Network(format!("Failed to parse talosctl versions JSON: {e}")))?;
+
+        parsed
+            .into_iter()
+            .find(|v| v.is_object())
+            .ok_or_else(|| AppError::Network("talosctl get versions returned no object".to_string()))
+    }
+
     /// Get hostname of a node.
     pub async fn hostname(
         endpoint: &str,
@@ -996,6 +1073,24 @@ fn spec_from_mc_json(out: &str) -> Result<String, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extension_from_item_parses() {
+        let v = serde_json::json!({
+            "metadata": { "id": "metal", "phase": "Installed" },
+            "spec": { "source": "factory.talos.dev/metal:abc", "hash": "deadbeef" }
+        });
+        let ext = TalosctlClient::extension_from_item(&v).unwrap();
+        assert_eq!(ext.id, "metal");
+        assert_eq!(ext.source, "factory.talos.dev/metal:abc");
+        assert_eq!(ext.hash, "deadbeef");
+    }
+
+    #[test]
+    fn extension_from_item_missing_id_is_none() {
+        let v = serde_json::json!({ "metadata": {}, "spec": { "source": "x" } });
+        assert!(TalosctlClient::extension_from_item(&v).is_none());
+    }
 
     #[test]
     fn path_value_builds_nested_yaml() {

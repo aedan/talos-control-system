@@ -44,6 +44,18 @@ export function machineHasBmc(m: Partial<Machine>): boolean {
   return !!(m.bmcAddress && m.bmcAddress.trim());
 }
 
+export interface MachineExtension {
+  id: string;
+  source: string;
+  hash: string;
+}
+
+export interface MachineVersions {
+  installed?: string;
+  upgradable?: string | null;
+  [key: string]: unknown;
+}
+
 export interface ClusterBackup {
   id: string;
   clusterId: string;

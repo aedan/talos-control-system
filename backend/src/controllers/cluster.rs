@@ -860,6 +860,23 @@ impl ClusterController {
         TalosctlClient::hostname(&machine.address, tc.as_deref()).await
     }
 
+    /// The node's installed/upgradable Talos versions (raw `talosctl get versions` JSON).
+    pub async fn machine_versions(&self, machine_id: Uuid) -> Result<serde_json::Value, AppError> {
+        let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
+        let tc = self.talosconfig_yaml(&cluster)?;
+        TalosctlClient::get_versions(&machine.address, tc.as_deref()).await
+    }
+
+    /// The node's installed Talos extensions (modules).
+    pub async fn machine_extensions(
+        &self,
+        machine_id: Uuid,
+    ) -> Result<Vec<crate::integration::talosctl::MachineExtension>, AppError> {
+        let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
+        let tc = self.talosconfig_yaml(&cluster)?;
+        TalosctlClient::list_extensions(&machine.address, tc.as_deref()).await
+    }
+
     pub async fn update_machine_address(
         &self,
         machine_id: Uuid,

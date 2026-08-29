@@ -150,6 +150,8 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route("/machines/:id/reset", post(handlers::reset_machine))
         .route("/machines/:id/bootstrap", post(handlers::bootstrap_machine))
         .route("/machines/:id/version", get(handlers::get_machine_version))
+        .route("/machines/:id/versions", get(handlers::get_machine_versions))
+        .route("/machines/:id/extensions", get(handlers::get_machine_extensions))
         .route("/machines/:id/services", get(handlers::get_machine_services))
         .route("/machines/:id/hostname", get(handlers::get_machine_hostname))
         .route("/machines/:id/disks", get(handlers::list_machine_disks))

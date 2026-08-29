@@ -1090,6 +1090,30 @@ pub async fn get_machine_services(
     }
 }
 
+/// GET /machines/:id/versions — the node's installed/upgradable Talos versions.
+pub async fn get_machine_versions(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller.machine_versions(id).await {
+        Ok(versions) => Ok(Json(versions)),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+/// GET /machines/:id/extensions — the node's installed Talos extensions (modules).
+pub async fn get_machine_extensions(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller.machine_extensions(id).await {
+        Ok(extensions) => Ok(Json(serde_json::json!({ "extensions": extensions }))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
 pub async fn get_machine_hostname(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,

@@ -4,7 +4,7 @@
   import { parseAllDocuments as yamlParseAll, stringify as yamlStringify } from 'yaml';
   import { client } from '$lib/api/client';
   import { success, error as notifyError } from '$lib/stores/notifications';
-  import { machineLabel, type Machine } from '$lib/api/types';
+  import { machineLabel, type Machine, type MachineVersions, type MachineExtension } from '$lib/api/types';
   import Button from '$lib/components/Button.svelte';
   import Spinner from '$lib/components/Spinner.svelte';
   import {
@@ -33,6 +33,10 @@
   let upgradeImage = $state('');
   let services = $state<ServiceRow[]>([]);
   let servicesError = $state('');
+  let versions = $state<MachineVersions | null>(null);
+  let extensions = $state<MachineExtension[]>([]);
+  let extBusy = $state(false);
+  let extError = $state('');
   let hostnameLive = $state('');
   let bmcStatus = $state<{
     configured?: boolean;
@@ -56,7 +60,6 @@
   let configBusy = $state(false);
   let liveReachable = $state(false);
   let hasDesired = $state(false);
-  let installImageHelper = $state('');
   let mountsYamlHelper = $state('');
   let netKeys = $state<NetworkBuilderKeys>({ interfaces: false, nameservers: false });
   let netInterfaces = $state<NetInterfaceBlock[]>([]);
@@ -103,6 +106,7 @@
       }
       populateHelpersFromConfig();
       void loadHostname();
+      void loadImageAndModules(true);
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Failed to load machine';
     } finally {
@@ -177,9 +181,6 @@
         .map((d) => d.toJS({ maxAliasCount: 1000 }) as Record<string, any> | null)
         .find(Boolean) as Record<string, any> | null;
       const machine = doc?.machine as Record<string, any> | undefined;
-      if (typeof machine?.install?.image === 'string') {
-        installImageHelper = machine.install.image;
-      }
       const mounts = machine?.kubelet?.extraMounts;
       if (Array.isArray(mounts) && mounts.length > 0) {
         mountsYamlHelper = yamlStringify(mounts);
@@ -296,7 +297,6 @@
     configBusy = true;
     try {
       const res = (await client.post(`/machines/${$page.params.id}/config/helpers`, {
-        installImage: installImageHelper.trim() || undefined,
         networkYaml: networkYaml || undefined,
         extraMountsYaml: mountsYamlHelper.trim() || undefined,
         hostname: editHostname.trim() || undefined,
@@ -352,6 +352,26 @@
     } catch (e: unknown) {
       servicesError = e instanceof Error ? e.message : 'Failed to load services';
       services = [];
+    }
+  }
+
+  async function loadImageAndModules(silent = false) {
+    extError = '';
+    extBusy = true;
+    try {
+      const [vRes, eRes] = await Promise.all([
+        client.get(`/machines/${$page.params.id}/versions`),
+        client.get(`/machines/${$page.params.id}/extensions`),
+      ]);
+      versions = (vRes as MachineVersions) || null;
+      extensions = ((eRes as { extensions: MachineExtension[] }).extensions) || [];
+    } catch (e: unknown) {
+      extError = e instanceof Error ? e.message : 'Failed to probe image & modules';
+      versions = null;
+      extensions = [];
+    } finally {
+      extBusy = false;
+      if (!silent) success('Probed image & modules');
     }
   }
 
@@ -628,9 +648,52 @@
           <Button variant="secondary" size="sm" title="Upgrade this node to the image above" onclick={upgrade} disabled={actionBusy}>Upgrade</Button>
         </div>
         <p class="muted-hint">
-          Per-node network, mounts, and install image: use the <strong>Machine config</strong>
-          section below. Cluster-wide path patches remain under Cluster → Config.
+          This is the only image control for a running node (live upgrade). Per-node network
+          and mounts — and the rare factory/custom <code>machine.install.image</code> — live in
+          the <strong>Machine config</strong> section below. Cluster-wide upgrades are under
+          Cluster → Config.
         </p>
+      </div>
+
+      <div class="info-section">
+        <h2>Image &amp; modules</h2>
+        <div class="info-row">
+          <span class="label">Installed image</span>
+          <span class="value mono">{versions?.installed || (extError ? '—' : (extBusy ? 'probing…' : 'unknown'))}</span>
+        </div>
+        {#if versions?.upgradable}
+          <div class="info-row">
+            <span class="label">Upgradable to</span>
+            <span class="value mono">{versions.upgradable}</span>
+          </div>
+        {/if}
+        <div class="info-row">
+          <span class="label">Running version</span>
+          <span class="value mono">{machine.talosVersion || '—'}</span>
+        </div>
+        <Button variant="ghost" size="sm" title="Re-probe the node's installed image and modules" onclick={() => loadImageAndModules(false)} disabled={extBusy}>Refresh</Button>
+        {#if extError}
+          <p class="muted-hint error-hint">{extError}</p>
+        {/if}
+        <h3 class="subheading">Installed modules</h3>
+        {#if extensions.length === 0 && !extBusy && !extError}
+          <p class="muted-hint">None installed.</p>
+        {:else}
+          <table class="modules-table">
+            <thead>
+              <tr><th>Module</th><th>Source</th><th>Hash</th></tr>
+            </thead>
+            <tbody>
+              {#each extensions as ext (ext.id)}
+                <tr>
+                  <td class="mono">{ext.id}</td>
+                  <td class="mono" title={ext.source}>{ext.source || '—'}</td>
+                  <td class="mono" title={ext.hash}>{ext.hash ? ext.hash.slice(0, 12) : '—'}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
       </div>
 
       <div class="info-section">
@@ -690,9 +753,10 @@
     <section class="config-editor">
       <h2>Machine config</h2>
       <p class="muted-hint">
-        Edit the full Talos machine config for this node (network, mounts, install image for
-        factory/kernel modules, etc.). Save as desired copy, dry-run, then apply. Requires
-        cluster talosconfig and a reachable machine address for live/apply.
+        Edit the full Talos machine config for this node (network, mounts, and for the
+        rare factory/custom install image case, <code>machine.install.image</code>). Save as
+        desired copy, dry-run, then apply. Requires cluster talosconfig and a reachable
+        machine address for live/apply.
         {#if hasDesired}<span class="badge">desired saved</span>{/if}
         {#if liveReachable}<span class="badge ok">node reachable</span>{:else}<span class="badge">live unknown</span>{/if}
       </p>
@@ -700,15 +764,6 @@
       <div class="helper-grid">
         <div class="info-section">
           <h3>Helpers (deep-merged into desired config)</h3>
-          <label>
-            Install image (factory / custom installer)
-            <input
-              type="text"
-              title="Talos installer image to set under machine.install.image"
-              bind:value={installImageHelper}
-              placeholder="factory.talos.dev/metal-installer/<schematic-id>:v1.13.7"
-            />
-          </label>
           <label>
             Network blocks (deep-merged under machine.network)
             <div class="net-keys-row">
@@ -1140,6 +1195,32 @@ cluster:
     margin: 0.75rem 0 0;
     line-height: 1.4;
   }
+  .muted-hint code {
+    font-family: var(--tcs-mono, ui-monospace, monospace);
+    font-size: 0.75rem;
+    background: rgba(255, 255, 255, 0.06);
+    padding: 0.05rem 0.3rem;
+    border-radius: 3px;
+  }
+  .error-hint { color: var(--tcs-error, #ef4444); }
+  .subheading {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--tcs-text-muted);
+    margin: 1rem 0 0.5rem;
+  }
+  .modules-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+  }
+  .modules-table th, .modules-table td {
+    text-align: left;
+    padding: 0.3rem 0.5rem;
+    border-bottom: 1px solid var(--tcs-border);
+  }
+  .modules-table th { color: var(--tcs-text-muted); font-weight: 600; }
   .config-editor {
     margin: 1.5rem 0;
   }
