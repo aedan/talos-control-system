@@ -90,6 +90,10 @@ pub async fn run_migrations(pool: &DbPool) -> Result<(), AppError> {
             "015_drop_machine_classes.sql",
             include_str!("migrations/015_drop_machine_classes.sql"),
         ),
+        (
+            "016_factory_modules.sql",
+            include_str!("migrations/016_factory_modules.sql"),
+        ),
     ];
 
     for (name, sql) in migrations {

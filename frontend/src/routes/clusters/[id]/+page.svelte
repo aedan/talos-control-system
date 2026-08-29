@@ -12,6 +12,7 @@
     machineHasBmc,
     type Machine,
     type ClusterBackup,
+    type FactoryExtension,
   } from '$lib/api/types';
   import WorkloadsExplorer from '$lib/explorer/WorkloadsExplorer.svelte';
 
@@ -23,6 +24,55 @@
   let busy = $state(false);
   let tab = $state<Tab>('machines');
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+  // ── cluster default modules (Image Factory) ────────────────────────
+  let factoryExtensions = $state<FactoryExtension[]>([]);
+  let factoryBusy = $state(false);
+  let factoryError = $state('');
+  let clusterModules = $state<Set<string>>(new Set());
+  let modulesDirty = $state(false);
+  function shortModuleName(full: string): string {
+    const i = full.indexOf('/');
+    return i >= 0 ? full.slice(i + 1) : full;
+  }
+  function toggleClusterModule(name: string) {
+    const next = new Set(clusterModules);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    clusterModules = next;
+    const cur = cluster?.factoryModules || [];
+    modulesDirty = [...next].sort().join('|') !== [...cur].sort().join('|');
+  }
+  async function loadClusterModules() {
+    if (!cluster) return;
+    clusterModules = new Set(cluster.factoryModules || []);
+    modulesDirty = false;
+    factoryBusy = true;
+    factoryError = '';
+    try {
+      const res = await client.get(`/factory/extensions?version=${encodeURIComponent(cluster.talosVersion || cluster.talos_version || 'v1.13.7')}`);
+      factoryExtensions = ((res as { extensions: FactoryExtension[] }).extensions) || [];
+    } catch (e: unknown) {
+      factoryError = e instanceof Error ? e.message : 'Failed to load module catalog';
+      factoryExtensions = [];
+    } finally {
+      factoryBusy = false;
+    }
+  }
+  async function saveClusterModules() {
+    if (!cluster || busy) return;
+    busy = true;
+    try {
+      await client.put(`/clusters/${$page.params.id}/modules`, { modules: [...clusterModules] });
+      cluster.factoryModules = [...clusterModules];
+      modulesDirty = false;
+      success('Cluster modules updated');
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Failed to update cluster modules');
+    } finally {
+      busy = false;
+    }
+  }
 
   // ── machines / nodes (same inventory source) ──────────────────────
   let machines = $state<Machine[]>([]);
@@ -89,6 +139,7 @@
     cluster = await client.get(`/clusters/${cid}`);
     scheduleHours = cluster.backupScheduleHours ?? 0;
     retention = cluster.backupRetention ?? 10;
+    void loadClusterModules();
   }
 
   async function loadMachines() {
@@ -428,7 +479,53 @@
         <span class="info-label">Kubeconfig</span>
         <span class="info-value">{cluster.hasKubeconfig || cluster.has_kubeconfig ? 'Stored' : 'Missing'}</span>
       </div>
+      <div class="info-item">
+        <span class="info-label">Modules</span>
+        <span class="info-value">
+          {(cluster.factoryModules || []).length > 0
+            ? (cluster.factoryModules || []).map(shortModuleName).join(', ')
+            : 'default (none)'}
+        </span>
+      </div>
     </div>
+
+    <details class="panel">
+      <summary>Default modules (Image Factory)</summary>
+      <p class="sub">
+        System extensions baked into every machine's image in this cluster unless a machine
+        overrides them on its own page. Changing this does not affect running nodes — apply it
+        per-machine to take effect.
+      </p>
+      {#if factoryError}
+        <p class="hint error">{factoryError}</p>
+      {:else if factoryBusy}
+        <p class="hint">Loading module catalog…</p>
+      {:else}
+        <div class="module-picker">
+          {#each factoryExtensions as f (f.name)}
+            <label class="module-option" title={f.description || f.ref || ''}>
+              <input type="checkbox" checked={clusterModules.has(f.name)} onchange={() => toggleClusterModule(f.name)} />
+              <span class="mono">{shortModuleName(f.name)}</span>
+              {#if f.author}<span class="hint"> · {f.author}</span>{/if}
+            </label>
+          {/each}
+          {#if factoryExtensions.length === 0}
+            <p class="hint">No modules returned for {cluster.talosVersion || cluster.talos_version || 'this version'}.</p>
+          {/if}
+        </div>
+        {#if clusterModules.size > 0}
+          <p class="hint">
+            Selected:
+            {#each [...clusterModules].sort() as m (m)}
+              <span class="module-chip mono">{shortModuleName(m)}</span>
+            {/each}
+          </p>
+        {/if}
+        <div class="form-actions">
+          <Button variant="primary" size="sm" title="Save the cluster's default module set" onclick={saveClusterModules} disabled={busy || !modulesDirty}>Save cluster modules</Button>
+        </div>
+      {/if}
+    </details>
 
     <details class="panel">
       <summary>Cluster actions</summary>
@@ -772,7 +869,38 @@
   }
 
   .hint { color: var(--tcs-text-muted); font-size: 0.85rem; margin: 0 0 0.75rem; }
+  .hint.error { color: var(--tcs-error, #ef4444); }
   .mono { font-family: ui-monospace, monospace; font-size: 0.8rem; }
+  .module-picker {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    gap: 0.25rem 0.75rem;
+    max-height: 240px;
+    overflow-y: auto;
+    border: 1px solid var(--tcs-border);
+    border-radius: 6px;
+    padding: 0.5rem 0.65rem;
+    margin: 0.4rem 0;
+  }
+  .module-option {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    cursor: pointer;
+    font-size: 0.82rem;
+    padding: 0.1rem 0;
+  }
+  .module-option input { flex: 0 0 auto; }
+  .module-chip {
+    display: inline-block;
+    background: color-mix(in srgb, var(--tcs-primary) 15%, transparent);
+    border: 1px solid var(--tcs-primary);
+    border-radius: 999px;
+    padding: 0.05rem 0.55rem;
+    font-size: 0.75rem;
+    margin: 0.1rem 0.2rem 0.1rem 0;
+  }
+  .form-actions { display: flex; gap: 0.75rem; margin-top: 0.75rem; }
 
   .panel {
     background: var(--tcs-surface);

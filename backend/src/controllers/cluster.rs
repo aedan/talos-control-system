@@ -104,6 +104,7 @@ impl ClusterController {
             created_at: now,
             updated_at: now,
             network_config: None,
+            factory_modules: None,
         };
 
         let cluster = crate::db::repos::cluster::create(&self.pool, &cluster).await?;
@@ -875,6 +876,118 @@ impl ClusterController {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
         let tc = self.talosconfig_yaml(&cluster)?;
         TalosctlClient::list_extensions(&machine.address, tc.as_deref()).await
+    }
+
+    /// Store the cluster's factory modules and resolve the resulting schematic id
+    /// + installer image. `modules_json` is a JSON array of official extension
+    /// names (e.g. `["siderolabs/bnx2-bnx2x"]`) or null/empty for the default.
+    pub async fn set_cluster_factory_modules(
+        &self,
+        cluster_id: Uuid,
+        modules: Option<Vec<String>>,
+        factory: &crate::config::FactoryConfig,
+    ) -> Result<serde_json::Value, AppError> {
+        let list: Vec<String> = modules
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+            .collect();
+        let factory_client = crate::integration::image_factory::ImageFactoryClient::new(&factory.normalized_base());
+        // Resolve the schematic id from the chosen module set (empty => default).
+        let schematic = factory_client.create_schematic(&list).await?;
+        let modules_json = if list.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&list).unwrap_or_default())
+        };
+
+        let mut cluster = crate::db::repos::cluster::get(&self.pool, cluster_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Cluster {} not found", cluster_id)))?;
+        cluster.factory_modules = modules_json;
+        cluster.updated_at = chrono::Utc::now();
+        crate::db::repos::cluster::update(&self.pool, &cluster).await?;
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "modules": list,
+            "schematic": schematic,
+            "installerImage": factory.installer_image(&schematic, &cluster.talos_version),
+        }))
+    }
+
+    /// Effective modules for a machine: its own factory_modules override, else the
+    /// cluster's.
+    pub async fn effective_modules(&self, machine_id: Uuid) -> Result<Vec<String>, AppError> {
+        let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
+        let raw = machine.factory_modules.clone().or_else(|| cluster.factory_modules.clone());
+        let raw = raw.filter(|s| !s.trim().is_empty()).unwrap_or_default();
+        if raw.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        serde_json::from_str::<Vec<String>>(&raw)
+            .map_err(|e| AppError::InvalidInput(format!("Invalid factory_modules JSON: {e}")))
+    }
+
+    /// Set a machine's factory modules override (None clears it → inherits cluster).
+    pub async fn set_machine_factory_modules(
+        &self,
+        machine_id: Uuid,
+        modules: Option<Vec<String>>,
+    ) -> Result<serde_json::Value, AppError> {
+        let mut machine = crate::db::repos::machine::get(&self.pool, machine_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Machine {} not found", machine_id)))?;
+        let list: Vec<String> = modules
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+            .collect();
+        machine.factory_modules = if list.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&list).unwrap_or_default())
+        };
+        machine.updated_at = chrono::Utc::now();
+        crate::db::repos::machine::update(&self.pool, &machine).await?;
+        Ok(serde_json::json!({ "ok": true, "modules": list }))
+    }
+
+    /// Apply the machine's effective modules by upgrading it to the factory
+    /// installer image that bundles them. This reboots the node; on return the
+    /// driver modules (e.g. bnx2x) are present and its NICs come up with the
+    /// addresses already in its machineconfig.
+    pub async fn apply_machine_modules(
+        &self,
+        machine_id: Uuid,
+        factory: &crate::config::FactoryConfig,
+    ) -> Result<serde_json::Value, AppError> {
+        let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
+        let tc = self.talosconfig_yaml(&cluster)?;
+        let modules = self.effective_modules(machine_id).await?;
+        if modules.is_empty() {
+            return Err(AppError::InvalidInput(
+                "No modules selected for this machine or its cluster".to_string(),
+            ));
+        }
+        let factory_client =
+            crate::integration::image_factory::ImageFactoryClient::new(&factory.normalized_base());
+        let schematic = factory_client.create_schematic(&modules).await?;
+        let image = factory.installer_image(&schematic, &cluster.talos_version);
+
+        // talosctl upgrade --image <factory installer> --preserve (reboots the node).
+        TalosctlClient::upgrade(&machine.address, &image, tc.as_deref()).await?;
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "machine": machine.id,
+            "modules": modules,
+            "schematic": schematic,
+            "image": image,
+            "rebooting": true,
+        }))
     }
 
     pub async fn update_machine_address(

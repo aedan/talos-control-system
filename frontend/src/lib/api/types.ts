@@ -10,6 +10,8 @@ export interface Cluster {
   workerSize: number;
   hasTalosconfig?: boolean;
   hasKubeconfig?: boolean;
+  /** Image Factory system extensions (modules) baked into this cluster's images. */
+  factoryModules?: string[];
   backupRetention?: number | null;
   backupScheduleHours?: number | null;
   lastAutoBackupAt?: string | null;
@@ -55,6 +57,15 @@ export interface MachineVersions {
   installed?: string;
   upgradable?: string | null;
   [key: string]: unknown;
+}
+
+/** An official Talos system extension (module) available from the Image Factory. */
+export interface FactoryExtension {
+  name: string;
+  ref?: string;
+  digest?: string;
+  author?: string;
+  description?: string;
 }
 
 export interface ClusterBackup {

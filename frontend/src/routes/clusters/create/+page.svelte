@@ -2,8 +2,10 @@
   import { client } from '$lib/api/client';
   import { success, error as notifyError } from '$lib/stores/notifications';
   import { goto } from '$app/navigation';
+  import { onMount } from 'svelte';
   import Button from '$lib/components/Button.svelte';
   import Spinner from '$lib/components/Spinner.svelte';
+  import type { FactoryExtension } from '$lib/api/types';
 
   // ── Step state ──
   let currentStep = $state(0);
@@ -17,6 +19,36 @@
   let clusterDomain = $state('cluster.local');
   let creating = $state(false);
   let clusterId = $state<string | null>(null);
+
+  // ── Step 1 (cont.): Image Factory modules ──
+  let factoryExtensions = $state<FactoryExtension[]>([]);
+  let factoryBusy = $state(false);
+  let factoryError = $state('');
+  let selectedModules = $state<Set<string>>(new Set());
+  function shortModuleName(full: string): string {
+    const i = full.indexOf('/');
+    return i >= 0 ? full.slice(i + 1) : full;
+  }
+  function toggleModule(name: string) {
+    const next = new Set(selectedModules);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    selectedModules = next;
+  }
+  async function loadFactoryModules() {
+    factoryBusy = true;
+    factoryError = '';
+    try {
+      const res = await client.get(`/factory/extensions?version=${encodeURIComponent(talosVersion)}`);
+      factoryExtensions = ((res as { extensions: FactoryExtension[] }).extensions) || [];
+    } catch (e: unknown) {
+      factoryError = e instanceof Error ? e.message : 'Failed to load module catalog';
+      factoryExtensions = [];
+    } finally {
+      factoryBusy = false;
+    }
+  }
+  onMount(() => { void loadFactoryModules(); });
 
   // ── Step 2: Network ──
   let networkEnabled = $state(true);
@@ -87,6 +119,7 @@
         name: name.trim(),
         controlPlaneVersion,
         talosVersion,
+        factoryModules: [...selectedModules],
       })) as { id?: string };
       clusterId = created?.id || null;
       success('Cluster record created.');
@@ -438,13 +471,48 @@
 
         <div class="form-group">
           <label for="talosVersion">Talos Version</label>
-          <select id="talosVersion" title="Talos Linux version to install on nodes" bind:value={talosVersion}>
+          <select id="talosVersion" title="Talos Linux version to install on nodes" bind:value={talosVersion} onchange={() => loadFactoryModules()}>
             <option value="v1.13.7">v1.13.7</option>
             <option value="v1.12.0">v1.12.0</option>
             <option value="v1.11.0">v1.11.0</option>
             <option value="v1.10.0">v1.10.0</option>
             <option value="v1.9.0">v1.9.0</option>
           </select>
+        </div>
+
+        <div class="form-group">
+          <label>System extensions (modules)</label>
+          <p class="hint">
+            Optional. Bake Talos system extensions into every node's image (e.g.
+            <code>siderolabs/bnx2-bnx2x</code> for Broadcom 10G NICs). Nodes are upgraded to a
+            factory image that includes them. Leave empty for the default image.
+          </p>
+          {#if factoryError}
+            <p class="hint error">{factoryError}</p>
+          {:else if factoryBusy}
+            <p class="hint">Loading module catalog…</p>
+          {:else}
+            <div class="module-picker">
+              {#each factoryExtensions as f (f.name)}
+                <label class="module-option" title={f.description || f.ref || ''}>
+                  <input type="checkbox" checked={selectedModules.has(f.name)} onchange={() => toggleModule(f.name)} />
+                  <span class="mono">{shortModuleName(f.name)}</span>
+                  {#if f.author}<span class="hint"> · {f.author}</span>{/if}
+                </label>
+              {/each}
+              {#if factoryExtensions.length === 0}
+                <p class="hint">No modules returned for {talosVersion}.</p>
+              {/if}
+            </div>
+            {#if selectedModules.size > 0}
+              <p class="hint">
+                Selected:
+                {#each [...selectedModules].sort() as m (m)}
+                  <span class="module-chip mono">{shortModuleName(m)}</span>
+                {/each}
+              </p>
+            {/if}
+          {/if}
         </div>
       </div>
 
@@ -925,6 +993,35 @@
     outline: none;
     border-color: var(--tcs-primary);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--tcs-primary) 20%, transparent);
+  }
+  .module-picker {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    gap: 0.25rem 0.75rem;
+    max-height: 240px;
+    overflow-y: auto;
+    border: 1px solid var(--tcs-border);
+    border-radius: 6px;
+    padding: 0.5rem 0.65rem;
+    margin: 0.4rem 0;
+  }
+  .module-option {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    cursor: pointer;
+    font-size: 0.82rem;
+    padding: 0.1rem 0;
+  }
+  .module-option input { flex: 0 0 auto; }
+  .module-chip {
+    display: inline-block;
+    background: color-mix(in srgb, var(--tcs-primary) 15%, transparent);
+    border: 1px solid var(--tcs-primary);
+    border-radius: 999px;
+    padding: 0.05rem 0.55rem;
+    font-size: 0.75rem;
+    margin: 0.1rem 0.2rem 0.1rem 0;
   }
   .form-actions {
     display: flex;

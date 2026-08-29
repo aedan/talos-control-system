@@ -107,6 +107,15 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
             put(handlers::set_cluster_kubeconfig).get(handlers::get_cluster_kubeconfig),
         )
         .route("/clusters/:id/refresh", post(handlers::refresh_cluster))
+        .route(
+            "/clusters/:id/modules",
+            put(handlers::set_cluster_modules),
+        )
+        .route("/factory/versions", get(handlers::list_factory_versions))
+        .route(
+            "/factory/extensions",
+            get(handlers::list_factory_extensions),
+        )
         .route("/clusters/:id/talos/test", post(handlers::test_cluster_talos))
         .route(
             "/clusters/:id/talos/versions",
@@ -152,6 +161,14 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route("/machines/:id/version", get(handlers::get_machine_version))
         .route("/machines/:id/versions", get(handlers::get_machine_versions))
         .route("/machines/:id/extensions", get(handlers::get_machine_extensions))
+        .route(
+            "/machines/:id/modules",
+            get(handlers::get_machine_modules).put(handlers::set_machine_modules),
+        )
+        .route(
+            "/machines/:id/apply-modules",
+            post(handlers::apply_machine_modules),
+        )
         .route("/machines/:id/services", get(handlers::get_machine_services))
         .route("/machines/:id/hostname", get(handlers::get_machine_hostname))
         .route("/machines/:id/disks", get(handlers::list_machine_disks))

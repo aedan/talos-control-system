@@ -51,6 +51,10 @@ pub struct Machine {
     pub bmc_tls_insecure: bool,
     #[sqlx(rename = "pxe_profile_id")]
     pub pxe_profile_id: Option<String>,
+    /// Per-machine Image Factory modules (JSON array). Overrides the cluster's
+    /// factory_modules when set. e.g. ["siderolabs/bnx2-bnx2x"].
+    #[sqlx(rename = "factory_modules")]
+    pub factory_modules: Option<String>,
     #[sqlx(rename = "last_power_state")]
     pub last_power_state: String,
     #[sqlx(rename = "last_seen_at")]
@@ -86,6 +90,7 @@ impl Machine {
             pxe_profile_id: None,
             last_power_state: "unknown".to_string(),
             last_seen_at: None,
+            factory_modules: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

@@ -295,6 +295,10 @@ pub struct CreateClusterRequest {
     pub name: String,
     pub control_plane_version: String,
     pub talos_version: String,
+    /// Optional Image Factory system extensions (modules) to bake into this
+    /// cluster's machines, e.g. ["siderolabs/bnx2-bnx2x"].
+    #[serde(default)]
+    pub factory_modules: Option<Vec<String>>,
 }
 
 pub async fn create_cluster(
@@ -302,11 +306,22 @@ pub async fn create_cluster(
     Json(payload): Json<CreateClusterRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
     // Inventory-only: does not provision Talos or Kubernetes.
-    let cluster = crate::db::models::cluster::Cluster::new(
+    let mut cluster = crate::db::models::cluster::Cluster::new(
         payload.name,
         payload.control_plane_version,
         payload.talos_version,
     );
+
+    if let Some(mods) = payload.factory_modules {
+        let list: Vec<String> = mods
+            .into_iter()
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+            .collect();
+        if !list.is_empty() {
+            cluster.factory_modules = Some(serde_json::to_string(&list).unwrap_or_default());
+        }
+    }
 
     match repos::cluster::create(&state.db_pool, &cluster).await {
         Ok(c) => Ok((StatusCode::CREATED, Json(cluster_public_json(c)))),
@@ -623,6 +638,16 @@ fn cluster_public_json(mut cluster: crate::db::models::cluster::Cluster) -> serd
     if let Some(obj) = v.as_object_mut() {
         obj.insert("hasTalosconfig".to_string(), serde_json::Value::Bool(has_creds));
         obj.insert("hasKubeconfig".to_string(), serde_json::Value::Bool(has_kube));
+        // Expose factory_modules as a parsed array (or null) for the UI.
+        let mods: Vec<String> = cluster
+            .factory_modules
+            .clone()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        obj.insert(
+            "factoryModules".to_string(),
+            serde_json::Value::Array(mods.into_iter().map(serde_json::Value::String).collect()),
+        );
     }
     v
 }
@@ -1121,6 +1146,101 @@ pub async fn get_machine_hostname(
     let controller = controller_for(&state);
     match controller.machine_hostname(id).await {
         Ok(hostname) => Ok(Json(serde_json::json!({ "hostname": hostname }))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+/// GET /factory/versions — Talos versions the Image Factory can build.
+pub async fn list_factory_versions(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let client = crate::integration::image_factory::ImageFactoryClient::new(
+        &state.config.factory.normalized_base(),
+    );
+    match client.list_versions().await {
+        Ok(versions) => Ok(Json(serde_json::json!({ "versions": versions }))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+/// GET /factory/extensions?version=v1.13.7 — official modules for a version.
+pub async fn list_factory_extensions(
+    State(state): State<AppState>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let client = crate::integration::image_factory::ImageFactoryClient::new(
+        &state.config.factory.normalized_base(),
+    );
+    let version = q
+        .get("version")
+        .cloned()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "query param 'version' required".to_string()))?;
+    match client.list_extensions(&version).await {
+        Ok(extensions) => Ok(Json(serde_json::json!({ "extensions": extensions, "version": version }))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetModulesRequest {
+    pub modules: Option<Vec<String>>,
+}
+
+/// GET /machines/:id/modules — the machine's effective factory modules.
+pub async fn get_machine_modules(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller.effective_modules(id).await {
+        Ok(modules) => Ok(Json(serde_json::json!({ "modules": modules }))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+/// PUT /machines/:id/modules — set/clear the machine's module override.
+pub async fn set_machine_modules(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(payload): Json<SetModulesRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller.set_machine_factory_modules(id, payload.modules).await {
+        Ok(v) => Ok(Json(v)),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+/// POST /machines/:id/apply-modules — upgrade the machine to the factory image
+/// that bundles its effective modules (reboots the node).
+pub async fn apply_machine_modules(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller
+        .apply_machine_modules(id, &state.config.factory)
+        .await
+    {
+        Ok(v) => Ok(Json(v)),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+/// PUT /clusters/:id/modules — set the cluster's default factory modules.
+pub async fn set_cluster_modules(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(payload): Json<SetModulesRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller
+        .set_cluster_factory_modules(id, payload.modules, &state.config.factory)
+        .await
+    {
+        Ok(v) => Ok(Json(v)),
         Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
     }
 }

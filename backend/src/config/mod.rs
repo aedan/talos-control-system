@@ -5,6 +5,7 @@ pub mod siderolink;
 pub mod auth;
 pub mod tls;
 pub mod metal;
+pub mod factory;
 
 pub use server::ServerConfig;
 pub use database::{DatabaseBackend, DatabaseConfig};
@@ -14,6 +15,7 @@ pub use auth::LdapConfig;
 pub use auth::OidcConfig;
 pub use tls::{TlsConfig, TlsMode};
 pub use metal::{MetalBmcConfig, MetalConfig, MetalDhcpConfig, MetalPxeConfig};
+pub use factory::FactoryConfig;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -27,6 +29,8 @@ pub struct Config {
     pub tls: TlsConfig,
     #[serde(default)]
     pub metal: MetalConfig,
+    #[serde(default)]
+    pub factory: FactoryConfig,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -117,6 +121,7 @@ impl Config {
             auth: AuthConfig::default(),
             tls: TlsConfig::default(),
             metal: MetalConfig::default(),
+            factory: FactoryConfig::default(),
         }
     }
 }

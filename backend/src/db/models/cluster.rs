@@ -42,6 +42,10 @@ pub struct Cluster {
     /// JSON blob of network config (NetworkConfigParams) for auto-generation.
     #[sqlx(rename = "network_config")]
     pub network_config: Option<String>,
+    /// JSON array of Image Factory system extensions (modules) to bake into
+    /// images for this cluster's machines, e.g. ["siderolabs/bnx2-bnx2x"].
+    #[sqlx(rename = "factory_modules")]
+    pub factory_modules: Option<String>,
 }
 
 impl Cluster {
@@ -62,6 +66,7 @@ impl Cluster {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             network_config: None,
+            factory_modules: None,
         }
     }
 

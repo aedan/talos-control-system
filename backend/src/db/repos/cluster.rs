@@ -11,8 +11,8 @@ pub async fn create(pool: &DbPool, cluster: &Cluster) -> Result<Cluster, AppErro
     }
     let n = pool
         .execute(
-            "INSERT INTO clusters (id, name, control_plane_version, talos_version, status, control_plane_size, worker_size, talosconfig, kubeconfig, backup_retention, backup_schedule_hours, last_auto_backup_at, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO clusters (id, name, control_plane_version, talos_version, status, control_plane_size, worker_size, talosconfig, kubeconfig, backup_retention, backup_schedule_hours, last_auto_backup_at, created_at, updated_at, network_config, factory_modules)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             &[
                 SqlVal::Uuid(cluster.id),
                 SqlVal::text(&cluster.name),
@@ -28,6 +28,8 @@ pub async fn create(pool: &DbPool, cluster: &Cluster) -> Result<Cluster, AppErro
                 SqlVal::OptDateTime(cluster.last_auto_backup_at),
                 SqlVal::DateTime(cluster.created_at),
                 SqlVal::DateTime(cluster.updated_at),
+                SqlVal::OptText(cluster.network_config.clone()),
+                SqlVal::OptText(cluster.factory_modules.clone()),
             ],
         )
         .await?;
@@ -50,8 +52,8 @@ pub async fn list(pool: &DbPool) -> Result<Vec<Cluster>, AppError> {
 pub async fn update(pool: &DbPool, cluster: &Cluster) -> Result<Cluster, AppError> {
     let n = pool
         .execute(
-            "UPDATE clusters SET name = ?, status = ?, control_plane_size = ?, worker_size = ?, backup_retention = ?, backup_schedule_hours = ?, last_auto_backup_at = ?, updated_at = ?
-             WHERE id = ?",
+            "UPDATE clusters SET name = ?, status = ?, control_plane_size = ?, worker_size = ?, backup_retention = ?, backup_schedule_hours = ?, last_auto_backup_at = ?, network_config = COALESCE(?, network_config), factory_modules = ?, updated_at = ?
+              WHERE id = ?",
             &[
                 SqlVal::text(&cluster.name),
                 SqlVal::text(&cluster.status),
@@ -60,6 +62,8 @@ pub async fn update(pool: &DbPool, cluster: &Cluster) -> Result<Cluster, AppErro
                 SqlVal::OptI32(cluster.backup_retention),
                 SqlVal::OptI32(cluster.backup_schedule_hours),
                 SqlVal::OptDateTime(cluster.last_auto_backup_at),
+                SqlVal::OptText(cluster.network_config.clone()),
+                SqlVal::OptText(cluster.factory_modules.clone()),
                 SqlVal::DateTime(cluster.updated_at),
                 SqlVal::Uuid(cluster.id),
             ],

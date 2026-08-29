@@ -4,7 +4,7 @@
   import { parseAllDocuments as yamlParseAll, stringify as yamlStringify } from 'yaml';
   import { client } from '$lib/api/client';
   import { success, error as notifyError } from '$lib/stores/notifications';
-  import { machineLabel, type Machine, type MachineVersions, type MachineExtension } from '$lib/api/types';
+  import { machineLabel, type Machine, type MachineVersions, type MachineExtension, type FactoryExtension } from '$lib/api/types';
   import Button from '$lib/components/Button.svelte';
   import Spinner from '$lib/components/Spinner.svelte';
   import {
@@ -37,6 +37,17 @@
   let extensions = $state<MachineExtension[]>([]);
   let extBusy = $state(false);
   let extError = $state('');
+  // Module management (Image Factory)
+  let factoryVersions = $state<string[]>([]);
+  let factoryExtensions = $state<FactoryExtension[]>([]);
+  let factoryBusy = $state(false);
+  let factoryError = $state('');
+  let selectedVersion = $state('');
+  let effectiveModules = $state<string[]>([]);
+  let editModules = $state<Set<string>>(new Set());
+  let modulesDirty = $state(false);
+  let applyBusy = $state(false);
+  let applyMessage = $state('');
   let hostnameLive = $state('');
   let bmcStatus = $state<{
     configured?: boolean;
@@ -355,16 +366,30 @@
     }
   }
 
-  async function loadImageAndModules(silent = false) {
-    extError = '';
+  // Factory extension names are "org/module" (e.g. siderolabs/bnx2-bnx2x); the
+  // node reports loaded extensions by the short "module" name. Normalize both.
+  function shortModuleName(full: string): string {
+    const i = full.indexOf('/');
+    return i >= 0 ? full.slice(i + 1) : full;
+  }
+
+  async function loadImageAndModules(silent = false) {    extError = '';
     extBusy = true;
     try {
-      const [vRes, eRes] = await Promise.all([
+      const [vRes, eRes, mRes] = await Promise.all([
         client.get(`/machines/${$page.params.id}/versions`),
         client.get(`/machines/${$page.params.id}/extensions`),
+        client.get(`/machines/${$page.params.id}/modules`),
       ]);
       versions = (vRes as MachineVersions) || null;
       extensions = ((eRes as { extensions: MachineExtension[] }).extensions) || [];
+      effectiveModules = ((mRes as { modules: string[] }).modules) || [];
+      // Prefill the picker from the effective modules.
+      editModules = new Set(effectiveModules);
+      modulesDirty = false;
+      // Load the factory module catalog for the running version (best-effort).
+      const ver = versions?.version || machine?.talosVersion || '';
+      if (ver) void loadFactoryCatalog(ver, silent);
     } catch (e: unknown) {
       extError = e instanceof Error ? e.message : 'Failed to probe image & modules';
       versions = null;
@@ -372,6 +397,80 @@
     } finally {
       extBusy = false;
       if (!silent) success('Probed image & modules');
+    }
+  }
+
+  async function loadFactoryCatalog(version: string, silent = false) {
+    factoryError = '';
+    if (!factoryBusy) factoryBusy = true;
+    try {
+      // Version list (to allow switching) + the official extensions for the chosen version.
+      const vRes = await client.get(`/factory/versions`);
+      factoryVersions = ((vRes as { versions: string[] }).versions) || [];
+      if (!selectedVersion) selectedVersion = version;
+      const eRes = await client.get(`/factory/extensions?version=${encodeURIComponent(selectedVersion)}`);
+      factoryExtensions = ((eRes as { extensions: FactoryExtension[] }).extensions) || [];
+    } catch (e: unknown) {
+      factoryError = e instanceof Error ? e.message : 'Failed to load Image Factory catalog';
+      factoryExtensions = [];
+      factoryVersions = [];
+    } finally {
+      factoryBusy = false;
+      if (!silent) { /* silent catalog load */ }
+    }
+  }
+
+  function toggleModule(name: string) {
+    const next = new Set(editModules);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    editModules = next;
+    modulesDirty = [...editModules].sort().join('|') !== [...effectiveModules].sort().join('|');
+  }
+
+  async function saveModules() {
+    if (applyBusy) return;
+    try {
+      await client.put(`/machines/${$page.params.id}/modules`, { modules: [...editModules] });
+      effectiveModules = [...editModules];
+      modulesDirty = false;
+      success('Modules saved');
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Failed to save modules');
+    }
+  }
+
+  async function applyModules() {
+    if (applyBusy) return;
+    const mods = [...editModules];
+    if (mods.length === 0) {
+      notifyError('Select at least one module to apply');
+      return;
+    }
+    const ok = confirm(
+      `Apply modules [${mods.join(', ')}] to ${machine?.hostname || 'this machine'}?\n\n` +
+        `This upgrades the node to a factory image that bundles those modules and REBOOTS it. ` +
+        `Its NICs will come back up once the new drivers load.`,
+    );
+    if (!ok) return;
+    applyBusy = true;
+    applyMessage = 'Applying modules (node will reboot)…';
+    try {
+      // Save the selection first so the effective set is persisted, then apply.
+      await client.put(`/machines/${$page.params.id}/modules`, { modules: mods });
+      effectiveModules = mods;
+      modulesDirty = false;
+      const res = await client.post(`/machines/${$page.params.id}/apply-modules`, {});
+      const r = res as { image?: string };
+      applyMessage = `Upgrade initiated with image ${r.image || ''}. The node is rebooting…`;
+      success('Module upgrade started');
+      // Re-prob the node after a delay so the new modules show up once it's back.
+      setTimeout(() => void loadImageAndModules(true), 90_000);
+    } catch (e: unknown) {
+      applyMessage = '';
+      notifyError(e instanceof Error ? e.message : 'Failed to apply modules');
+    } finally {
+      applyBusy = false;
     }
   }
 
@@ -677,6 +776,7 @@
         {#if extError}
           <p class="muted-hint error-hint">{extError}</p>
         {/if}
+
         <h3 class="subheading">Installed modules</h3>
         {#if extensions.length === 0 && !extBusy && !extError}
           <p class="muted-hint">None installed.</p>
@@ -695,6 +795,71 @@
               {/each}
             </tbody>
           </table>
+        {/if}
+
+        {#if effectiveModules.length > 0 && !extBusy}
+          {@const missing = effectiveModules.filter((m) => !extensions.some((e) => e.id === shortModuleName(m)))}
+          {#if missing.length > 0}
+            <p class="muted-hint warn-hint">
+              ⚠ Configured but not loaded yet: <span class="mono">{missing.map(shortModuleName).join(', ')}</span>.
+              Use <strong>Apply modules</strong> to upgrade the node so they load.
+            </p>
+          {:else}
+            <p class="muted-hint ok-hint">✓ All configured modules are loaded on this node.</p>
+          {/if}
+        {/if}
+
+        <h3 class="subheading">Modules (Image Factory)</h3>
+        <p class="muted-hint">
+          Pick the system extensions to bake into this node's image. Applying upgrades the node to a
+          factory image that bundles them (reboots the node, then its NICs come up with the new drivers).
+        </p>
+        {#if factoryError}
+          <p class="muted-hint error-hint">{factoryError}</p>
+        {:else if factoryBusy}
+          <p class="muted-hint">Loading module catalog…</p>
+        {:else}
+          {#if factoryVersions.length > 0}
+            <div class="form-row">
+              <label>
+                Talos version
+                <select title="Talos version whose official modules to list" bind:value={selectedVersion} onchange={() => loadFactoryCatalog(selectedVersion)}>
+                  {#each factoryVersions as v (v)}
+                    <option value={v}>{v}</option>
+                  {/each}
+                </select>
+              </label>
+            </div>
+          {/if}
+          <div class="module-picker">
+            {#each factoryExtensions as f (f.name)}
+              <label class="module-option" title={f.description || f.ref || ''}>
+                <input type="checkbox" checked={editModules.has(f.name)} onchange={() => toggleModule(f.name)} />
+                <span class="mono">{shortModuleName(f.name)}</span>
+                {#if f.author}<span class="muted-hint"> · {f.author}</span>{/if}
+              </label>
+            {/each}
+            {#if factoryExtensions.length === 0}
+              <p class="muted-hint">No modules returned for {selectedVersion || 'this version'}.</p>
+            {/if}
+          </div>
+          <div class="module-selected" class:empty={editModules.size === 0}>
+            {#if editModules.size > 0}
+              <span class="muted-hint">Selected:</span>
+              {#each [...editModules].sort() as m (m)}
+                <span class="module-chip mono">{shortModuleName(m)}</span>
+              {/each}
+            {:else}
+              <span class="muted-hint">None selected (inherits cluster default or no modules).</span>
+            {/if}
+          </div>
+          <div class="module-actions">
+            <Button variant="secondary" size="sm" title="Save this module selection for the machine (no reboot)" onclick={saveModules} disabled={applyBusy || !modulesDirty}>Save</Button>
+            <Button variant="primary" size="sm" title="Upgrade the node to a factory image with these modules (reboots)" onclick={applyModules} disabled={applyBusy || editModules.size === 0}>Apply modules</Button>
+          </div>
+          {#if applyMessage}
+            <p class="muted-hint info-hint">{applyMessage}</p>
+          {/if}
         {/if}
       </div>
 
@@ -1223,6 +1388,46 @@ cluster:
     border-bottom: 1px solid var(--tcs-border);
   }
   .modules-table th { color: var(--tcs-text-muted); font-weight: 600; }
+  .warn-hint { color: var(--tcs-warning, #f59e0b); }
+  .ok-hint { color: var(--tcs-success, #22c55e); }
+  .info-hint { color: var(--tcs-text, #e5e7eb); }
+  .module-picker {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    gap: 0.25rem 0.75rem;
+    max-height: 240px;
+    overflow-y: auto;
+    border: 1px solid var(--tcs-border);
+    border-radius: 6px;
+    padding: 0.5rem 0.65rem;
+    margin: 0.4rem 0;
+    background: var(--tcs-surface-2, rgba(255,255,255,0.02));
+  }
+  .module-option {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    cursor: pointer;
+    font-size: 0.82rem;
+    padding: 0.1rem 0;
+  }
+  .module-option input { flex: 0 0 auto; }
+  .module-selected {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem;
+    margin: 0.4rem 0;
+    min-height: 1.4rem;
+  }
+  .module-chip {
+    background: var(--tcs-accent-soft, rgba(59,130,246,0.15));
+    border: 1px solid var(--tcs-accent, #3b82f6);
+    border-radius: 999px;
+    padding: 0.05rem 0.55rem;
+    font-size: 0.75rem;
+  }
+  .module-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.4rem; }
   .config-editor {
     margin: 1.5rem 0;
   }
