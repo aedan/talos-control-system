@@ -553,6 +553,25 @@ fn url_path_for(r: &ResolvedKind, ns: Option<&str>) -> String {
     }
 }
 
+/// Decide whether `cand` (with `cand_score`) should replace the current `best`
+/// (with `best_score`) in kind resolution.
+///
+/// Preference order: (1) strictly higher score; (2) on a score tie, the CORE
+/// group (empty `group`) beats a CRD group — so "nodes" resolves to the core
+/// v1 Node rather than a same-named CRD (e.g. longhorn.io Node); (3) on a
+/// full tie, keep the shorter kind name (the more specific match).
+fn prefer_candidate(cand: &ResolvedKind, cand_score: usize, best: &ResolvedKind, best_score: usize) -> bool {
+    if cand_score != best_score {
+        return cand_score > best_score;
+    }
+    let cand_core = cand.group.is_empty();
+    let best_core = best.group.is_empty();
+    if cand_core != best_core {
+        return cand_core;
+    }
+    best.kind.len() >= cand.kind.len()
+}
+
 /// Map kubectl-style short names to their canonical plural resource name.
 /// Only the common core aliases are covered; anything else is returned as-is
 /// and matched against kind/plural/prefix during resolution.
@@ -659,8 +678,17 @@ impl K8sClient {
                         plural: res.plural.clone(),
                         namespaced,
                     };
-                    // Prefer exact matches; keep the highest score.
-                    if best.as_ref().map(|(b, s)| score > *s || (score == *s && b.kind.len() >= rk.kind.len())).unwrap_or(true) {
+                    // Prefer: (1) higher score, (2) on a tie the CORE group
+                    // (empty group) over a CRD group — e.g. "nodes" must resolve
+                    // to the core v1 Node, not longhorn.io/v1beta2 Node (which
+                    // shares the same plural + kind and would otherwise win on
+                    // iteration order, producing a 404 page not found). (3) on
+                    // an otherwise-identical tie, keep the shorter kind name.
+                    let replace = best
+                        .as_ref()
+                        .map(|(b, s)| prefer_candidate(&rk, score, b, *s))
+                        .unwrap_or(true);
+                    if replace {
                         best = Some((rk, score));
                     }
                 }
@@ -735,12 +763,10 @@ impl K8sClient {
     pub async fn get_kind(&self, kind: &str, ns: Option<&str>, name: &str) -> Result<serde_json::Value, AppError> {
         let rk = self.resolve(kind)?;
         let path = url_path_for(&rk, ns.filter(|_| rk.namespaced));
-        tracing::debug!(kind, ?ns, name, resolved_kind = %rk.kind, group = %rk.group, api_version = %rk.api_version, plural = %rk.plural, namespaced = rk.namespaced, path, "get_kind resolving");
+        tracing::debug!(kind, ?ns, name, group = %rk.group, api_version = %rk.api_version, plural = %rk.plural, namespaced = rk.namespaced, path, "get_kind");
         let req = kube::core::Request::new(path)
             .get(name, &kube::api::GetParams::default())
             .map_err(|e| AppError::Internal(format!("build get request: {e}")))?;
-        let url = req.uri().to_string();
-        tracing::debug!(url, "get_kind request url");
         self.client.request::<serde_json::Value>(req).await.map_err(map_kube_err)
     }
 
@@ -1102,5 +1128,52 @@ mod tests {
     fn path_no_namespace() {
         let r = rk("", "v1", "v1", "Pod", "pods", true);
         assert_eq!(url_path_for(&r, None), "/api/v1/pods");
+    }
+
+    #[test]
+    fn prefer_higher_score() {
+        let core = rk("", "v1", "v1", "Node", "nodes", false);
+        let crd = rk("longhorn.io", "v1beta2", "longhorn.io/v1beta2", "Node", "nodes", true);
+        // Exact plural match (3) beats a prefix match (2) regardless of group.
+        assert!(prefer_candidate(&core, 3, &crd, 2));
+        assert!(!prefer_candidate(&crd, 2, &core, 3));
+    }
+
+    #[test]
+    fn core_group_wins_score_tie() {
+        // Both score 3 (exact plural "nodes"); core v1 Node must win over the
+        // longhorn.io Node CRD — this is the "nodes" -> 404 page not found fix.
+        let core = rk("", "v1", "v1", "Node", "nodes", false);
+        let crd = rk("longhorn.io", "v1beta2", "longhorn.io/v1beta2", "Node", "nodes", true);
+        // Core replaces an existing CRD best.
+        assert!(prefer_candidate(&core, 3, &crd, 3));
+        // A CRD does NOT replace an existing core best.
+        assert!(!prefer_candidate(&crd, 3, &core, 3));
+    }
+
+    #[test]
+    fn crd_tie_is_deterministic() {
+        // If only CRDs match (no core equivalent) and they tie on score and kind
+        // length, the decision is deterministic: the later candidate (>= kind
+        // length) wins. groups_alphabetical() iterates in a stable order, so the
+        // result is stable across calls (no flip-flopping).
+        let a = rk("a.io", "v1", "a.io/v1", "Widget", "widgets", true);
+        let b = rk("b.io", "v1", "b.io/v1", "Widget", "widgets", true);
+        // Both non-core, same score, same kind len -> candidate replaces (last wins).
+        assert!(prefer_candidate(&b, 3, &a, 3));
+        // A CRD must never replace a core match on a tie (the important case).
+        let core = rk("", "v1", "v1", "Widget", "widgets", true);
+        assert!(!prefer_candidate(&b, 3, &core, 3));
+    }
+
+    #[test]
+    fn shorter_kind_wins_full_tie() {
+        // Same score, both core: the shorter (more specific) kind name is kept.
+        let short = rk("", "v1", "v1", "Pod", "pods", true);
+        let long = rk("", "v1", "v1", "PodDisruptionBudget", "poddisruptionbudgets", true);
+        // cand=short replacing best=long: tie, both core, long.len()>=short.len() -> replace.
+        assert!(prefer_candidate(&short, 3, &long, 3));
+        // cand=long replacing best=short: tie, both core, short.len()>=long.len() false -> keep short.
+        assert!(!prefer_candidate(&long, 3, &short, 3));
     }
 }
