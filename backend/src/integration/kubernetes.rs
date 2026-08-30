@@ -735,9 +735,12 @@ impl K8sClient {
     pub async fn get_kind(&self, kind: &str, ns: Option<&str>, name: &str) -> Result<serde_json::Value, AppError> {
         let rk = self.resolve(kind)?;
         let path = url_path_for(&rk, ns.filter(|_| rk.namespaced));
+        tracing::debug!(kind, ?ns, name, resolved_kind = %rk.kind, group = %rk.group, api_version = %rk.api_version, plural = %rk.plural, namespaced = rk.namespaced, path, "get_kind resolving");
         let req = kube::core::Request::new(path)
             .get(name, &kube::api::GetParams::default())
             .map_err(|e| AppError::Internal(format!("build get request: {e}")))?;
+        let url = req.uri().to_string();
+        tracing::debug!(url, "get_kind request url");
         self.client.request::<serde_json::Value>(req).await.map_err(map_kube_err)
     }
 
