@@ -139,7 +139,6 @@
     cluster = await client.get(`/clusters/${cid}`);
     scheduleHours = cluster.backupScheduleHours ?? 0;
     retention = cluster.backupRetention ?? 10;
-    void loadClusterModules();
   }
 
   async function loadMachines() {
@@ -230,13 +229,18 @@
       await loadCluster();
       await loadMachines();
       loadUpgradeJobs();
+      // Load the Image Factory module catalog once; the poll below must NOT
+      // re-fetch it (doing so reset the selection + <details> state every 15s).
+      void loadClusterModules();
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Failed to load cluster';
     } finally {
       loading = false;
     }
+    // Only the physical nodes (and their status) refresh on the poll interval.
+    // The cluster object + default-modules section are loaded once and left
+    // alone so the user can interact with them without the page resetting.
     pollTimer = setInterval(() => {
-      loadCluster().catch(() => {});
       loadMachines();
       loadUpgradeJobs();
     }, 15000);
