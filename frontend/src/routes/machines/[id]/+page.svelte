@@ -1405,13 +1405,29 @@ cluster:
   }
   .module-option {
     display: flex;
+    flex-direction: row;
     align-items: center;
     gap: 0.4rem;
     cursor: pointer;
     font-size: 0.82rem;
     padding: 0.1rem 0;
+    min-width: 0;
   }
   .module-option input { flex: 0 0 auto; }
+  .module-option .mono {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .module-option .muted-hint {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .module-selected {
     display: flex;
     flex-wrap: wrap;
