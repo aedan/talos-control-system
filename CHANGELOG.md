@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.5.10] — 2026-08-31
+
+### Changed
+- **Rolling-upgrade jobs table now shows what a job actually does, not a raw installer image.** The "Image" column read like `ghcr.io/siderolabs/installer:v1.13.7` for *every* job — for a Kubernetes-only upgrade that looked like it was going to re-apply an image and wipe the module set (it isn't; a k8s upgrade is in-place and touches no modules/Talos image). The column is now **Action** and renders a per-job summary derived from the job's `phase`/targets: `Talos → v1.13.7`, `Kubernetes → v1.36.4`, or `Talos → vX + Kubernetes → vY`. The installer image is still available in the row tooltip and the Details view for reference.
+
+### Fixed
+- **Module-picker rows: the "· author" suffix was a different (smaller) font and sat slightly off the module name's baseline.** The name used the monospace `.mono` size (0.8rem) but the author used `.hint` (0.85rem, different family/weight). Both now use the monospace font and size — the author is only muted in color — so name and author line up.
+
 ## [0.5.9] — 2026-08-31
 
 ### Fixed

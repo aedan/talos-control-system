@@ -133,12 +133,43 @@
     scope: string;
     image: string;
     status: string;
+    phase?: string;
+    targetTalosVersion?: string;
+    targetK8sVersion?: string;
     createdAt?: string;
     created_at?: string;
   }
   let upgradeJobs = $state<UpgradeJob[]>([]);
   let upgradeJobsLoading = $state(false);
   let upgradeJobDetail = $state<any>(null);
+
+  // Human-readable description of what a job actually does, so a k8s-only
+  // upgrade isn't shown as "apply this installer image". The raw image is kept
+  // in the row's tooltip / Details view for reference.
+  //   - Kubernetes is part of the job iff targetK8sVersion is set (it is null
+  //     for Talos-only jobs).
+  //   - The Talos phase is part of the job iff phase === 'talos' (k8s-only jobs
+  //     start at phase 'k8s'; a combined job moves to 'k8s' once Talos is done).
+  function jobAction(job: UpgradeJob): string {
+    const parts: string[] = [];
+    const phase = job.phase || 'talos';
+    if (phase === 'talos' && job.targetTalosVersion) {
+      parts.push(`Talos → ${job.targetTalosVersion}`);
+    }
+    if (job.targetK8sVersion) {
+      parts.push(`Kubernetes → ${job.targetK8sVersion}`);
+    }
+    if (parts.length === 0) {
+      // Fall back to the image tag when no explicit targets are recorded.
+      const tag = (job.image || '').split(':').pop();
+      return tag ? `Talos → ${tag}` : '—';
+    }
+    return parts.join(' + ');
+  }
+  function jobActionTitle(job: UpgradeJob): string {
+    const base = jobAction(job);
+    return job.image ? `${base}\nInstaller image: ${job.image}` : base;
+  }
 
   const cid = $page.params.id;
 
@@ -670,8 +701,8 @@
             {#each factoryExtensions as f (f.name)}
               <label class="module-option" title={f.description || f.ref || ''}>
                 <input type="checkbox" checked={clusterModules.has(f.name)} onchange={() => toggleClusterModule(f.name)} />
-                <span class="mono">{shortModuleName(f.name)}</span>
-                {#if f.author}<span class="hint"> · {f.author}</span>{/if}
+                <span class="module-name mono">{shortModuleName(f.name)}</span>
+                {#if f.author}<span class="module-author mono"> · {f.author}</span>{/if}
               </label>
             {/each}
             {#if factoryExtensions.length === 0}
@@ -717,7 +748,7 @@
             <table class="data-table">
               <thead>
                 <tr>
-                  <th>Image</th>
+                  <th>Action</th>
                   <th>Status</th>
                   <th>Created</th>
                   <th>Actions</th>
@@ -726,7 +757,7 @@
               <tbody>
                 {#each upgradeJobs as job (job.id)}
                   <tr>
-                    <td class="mono">{job.image || '—'}</td>
+                    <td class="mono" title={jobActionTitle(job)}>{jobAction(job)}</td>
                     <td><span class="status-badge {job.status}">{job.status}</span></td>
                     <td>{job.createdAt || job.created_at ? new Date(job.createdAt || job.created_at || '').toLocaleString() : '—'}</td>
                     <td>
@@ -1105,19 +1136,20 @@
     min-width: 0;
   }
   .module-option input { flex: 0 0 auto; }
-  .module-option .mono {
+  .module-option .module-name {
     flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .module-option .hint {
+  .module-option .module-author {
     flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    color: var(--tcs-text-muted);
   }
   .module-chip {
     display: inline-block;
