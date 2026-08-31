@@ -577,13 +577,10 @@
     </div>
 
     <details class="panel" open>
-      <summary>Rolling upgrade (Talos + modules + Kubernetes)</summary>
+      <summary>Rolling upgrade</summary>
       <p class="sub">
-        Pick a new <strong>Talos version</strong>, adjust the <strong>modules</strong>, and/or choose a
-        <strong>Kubernetes version</strong>, then start one rolling job. The installer image is derived
-        automatically (per-node modules × chosen version) — nothing to type in. Talos changes reboot
-        nodes (workers first by default); Kubernetes changes apply in place, control-plane first, no
-        reboots.
+        Choose a new Talos version and/or Kubernetes version, and adjust modules. Talos reboots
+        nodes; Kubernetes applies in place (control-plane first, no reboots).
       </p>
       {#if targetsError}
         <p class="hint error">{targetsError}</p>
@@ -619,6 +616,14 @@
                 <option value={v}>{v}</option>
               {/each}
             </select>
+          </label>
+          <label>
+            Max unavailable
+            <input type="number" title="How many nodes may be upgraded concurrently (Talos phase)" min="1" max="20" bind:value={upgradeMaxUnavail} />
+          </label>
+          <label class="check" style="align-self:end">
+            <input type="checkbox" title="Upgrade workers before control-plane nodes for safety" bind:checked={upgradeCpLast} />
+            Workers first
           </label>
         </div>
 
@@ -666,9 +671,6 @@
           >
             Start rolling upgrade{upgradeSummary() === 'no change' ? '' : ` — ${upgradeSummary()}`}
           </Button>
-          <span class="hint">
-            Talos phase: max-unavailable &amp; ordering live in <strong>Cluster actions</strong> below.
-          </span>
         </div>
       {/if}
     </details>
@@ -692,23 +694,6 @@
           {/if}
         </div>
         <div class="action-block">
-          <h3>Rolling Talos upgrade</h3>
-          <div class="inline-form">
-            <label>
-              Max unavailable
-              <input type="number" title="How many nodes may be upgraded concurrently" min="1" max="20" bind:value={upgradeMaxUnavail} />
-            </label>
-            <label class="check">
-              <input type="checkbox" title="Upgrade workers before control-plane nodes for safety" bind:checked={upgradeCpLast} />
-              Workers first (control plane last) — Talos phase
-            </label>
-          </div>
-          <p class="hint">
-            Choose the Talos version, modules, and (optionally) the Kubernetes version in the
-            <strong>Cluster default modules</strong> panel above, then press <strong>Start rolling
-            upgrade</strong> there. Talos upgrades reboot nodes; Kubernetes upgrades apply in place
-            (control-plane first, no reboots).
-          </p>
           <div class="upgrade-jobs">
             <h4>Upgrade jobs</h4>
             {#if upgradeJobsLoading && upgradeJobs.length === 0}

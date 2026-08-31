@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-08-31
+
+### Changed
+- **Rolling upgrade panel tightened up.** The verbose intro copy is now a single line, and the Talos-phase controls (max-unavailable + "workers first") moved up into the panel next to the version dropdowns — so everything for an upgrade lives in one place instead of the max-unavailable control being buried in the "Cluster actions" block at the bottom. The bottom block is now just the **Upgrade jobs** list.
+
 ## [0.5.2] — 2026-08-31
 
 ### Fixed
