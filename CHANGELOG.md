@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-08-31
+
+### Fixed
+- **`GET /clusters/:id/upgrade-targets` no longer 502s the whole rolling-upgrade panel** when an upstream probe fails. The factory Talos-version fetch and the live `talosctl upgrade-k8s` probe are now independent: if either is unavailable (egress blocked, missing/bad talosconfig, node flapping), the panel still renders with what it has and shows a warning note instead of a hard error. `k8s_upgrade_targets` also degrades a missing/malformed talosconfig to "no k8s targets" rather than an error, so the Talos-only upgrade path stays usable.
+
 ## [0.5.1] — 2026-08-30
 
 ### Added

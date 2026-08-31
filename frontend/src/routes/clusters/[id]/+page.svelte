@@ -126,6 +126,7 @@
   let k8sSupported = $state<string[]>([]);
   let targetsBusy = $state(false);
   let targetsError = $state('');
+  let targetsNote = $state('');
 
   // ── upgrade jobs (per-cluster) ────────────────────────────────────
   interface UpgradeJob {
@@ -275,10 +276,12 @@
   async function loadUpgradeTargets() {
     targetsBusy = true;
     targetsError = '';
+    targetsNote = '';
     try {
       const res = (await client.get(`/clusters/${cid}/upgrade-targets`)) as {
         talos: { current: string; versions: string[] };
-        k8s: { current: string; supported: string[] };
+        k8s: { current: string; supported: string[]; note?: string };
+        notes?: string[];
       };
       currentTalos = res.talos.current || '';
       talosVersions = res.talos.versions || [];
@@ -286,6 +289,10 @@
       k8sSupported = res.k8s.supported || [];
       upgradeTalosVersion = currentTalos;
       upgradeK8sVersion = '';
+      const noteBits: string[] = [];
+      if (res.notes?.length) noteBits.push(...res.notes);
+      if (res.k8s.note) noteBits.push(res.k8s.note);
+      targetsNote = noteBits.join(' ');
     } catch (e: unknown) {
       targetsError = e instanceof Error ? e.message : 'Failed to load upgrade targets';
     } finally {
@@ -583,6 +590,9 @@
       {:else if targetsBusy && talosVersions.length === 0}
         <p class="hint">Loading upgrade targets…</p>
       {:else}
+        {#if targetsNote}
+          <p class="hint warning">{targetsNote}</p>
+        {/if}
         <div class="upgrade-grid">
           <label>
             Talos version
@@ -1005,6 +1015,7 @@
 
   .hint { color: var(--tcs-text-muted); font-size: 0.85rem; margin: 0 0 0.75rem; }
   .hint.error { color: var(--tcs-error, #ef4444); }
+  .hint.warning { color: var(--tcs-warning, #f59e0b); }
   .mono { font-family: ui-monospace, monospace; font-size: 0.8rem; }
   .module-picker {
     display: grid;

@@ -946,7 +946,18 @@ impl ClusterController {
             _ => cluster.control_plane_version.clone(),
         };
 
-        let tc = self.talosconfig_yaml(&cluster)?;
+        // A missing/malformed talosconfig should yield "no k8s targets", not an
+        // error — the Talos phase still works off the factory image.
+        let tc = match self.talosconfig_yaml(&cluster) {
+            Ok(t) => t,
+            Err(e) => {
+                return Ok(serde_json::json!({
+                    "current": current,
+                    "supported": [],
+                    "note": format!("Kubernetes probe skipped: {e}"),
+                }))
+            }
+        };
         let cp_addr = {
             let pairs: Vec<(String, Option<String>)> =
                 machines.iter().map(|m| (m.machine_type.clone(), Some(m.address.clone()))).collect();

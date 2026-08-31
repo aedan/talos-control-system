@@ -3497,16 +3497,30 @@ pub async fn get_upgrade_targets(
     let factory = crate::integration::image_factory::ImageFactoryClient::new(
         &state.config.factory.normalized_base(),
     );
-    let talos_versions = factory
-        .list_versions()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    // Degrade gracefully: if the factory version list or the k8s probe fails
+    // (egress blocked, talosconfig missing, node flapping), still return what
+    // we know so the panel renders. A 502 here blanks the whole UI.
+    let (talos_versions, talos_note) = match factory.list_versions().await {
+        Ok(v) => (v, String::new()),
+        Err(e) => (Vec::new(), format!("Talos version list unavailable: {e}")),
+    };
 
     let ctrl = crate::controllers::ClusterController::new(state.db_pool.clone());
-    let k8s_targets = ctrl
-        .k8s_upgrade_targets(cluster_id)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let (k8s_targets, k8s_note) = match ctrl.k8s_upgrade_targets(cluster_id).await {
+        Ok(v) => (v, String::new()),
+        Err(e) => (
+            serde_json::json!({ "current": cluster.control_plane_version, "supported": [] }),
+            format!("Kubernetes upgrade targets unavailable: {e}"),
+        ),
+    };
+
+    let mut notes = Vec::new();
+    if !talos_note.is_empty() {
+        notes.push(talos_note);
+    }
+    if !k8s_note.is_empty() {
+        notes.push(k8s_note);
+    }
 
     Ok(Json(serde_json::json!({
         "talos": {
@@ -3514,6 +3528,7 @@ pub async fn get_upgrade_targets(
             "versions": talos_versions,
         },
         "k8s": k8s_targets,
+        "notes": notes,
     })))
 }
 
