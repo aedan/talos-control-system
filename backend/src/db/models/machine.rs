@@ -55,6 +55,14 @@ pub struct Machine {
     /// factory_modules when set. e.g. ["siderolabs/bnx2-bnx2x"].
     #[sqlx(rename = "factory_modules")]
     pub factory_modules: Option<String>,
+    /// Node-level module additions on top of the cluster default set (JSON
+    /// array of extension names). See migration 018_module_overrides.sql for
+    /// the effective-set semantics.
+    #[sqlx(rename = "module_adds")]
+    pub module_adds: Option<String>,
+    /// Node-level module removals from the cluster default set (JSON array).
+    #[sqlx(rename = "module_removes")]
+    pub module_removes: Option<String>,
     #[sqlx(rename = "last_power_state")]
     pub last_power_state: String,
     #[sqlx(rename = "last_seen_at")]
@@ -91,6 +99,8 @@ impl Machine {
             last_power_state: "unknown".to_string(),
             last_seen_at: None,
             factory_modules: None,
+            module_adds: None,
+            module_removes: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

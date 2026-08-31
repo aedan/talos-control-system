@@ -30,7 +30,6 @@
   let error = $state('');
   let actionBusy = $state(false);
   let editAddress = $state('');
-  let upgradeImage = $state('');
   let services = $state<ServiceRow[]>([]);
   let servicesError = $state('');
   let versions = $state<MachineVersions | null>(null);
@@ -48,6 +47,12 @@
   let modulesDirty = $state(false);
   let applyBusy = $state(false);
   let applyMessage = $state('');
+  let clusterModules = $state<string[]>([]);
+  let clusterModulesBusy = $state(false);
+  // Node-level deltas against the cluster default module set.
+  let adds = $state<string[]>([]);
+  let removes = $state<string[]>([]);
+  let overridesBusy = $state(false);
   let hostnameLive = $state('');
   let bmcStatus = $state<{
     configured?: boolean;
@@ -118,6 +123,7 @@
       populateHelpersFromConfig();
       void loadHostname();
       void loadImageAndModules(true);
+      void loadClusterModules();
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Failed to load machine';
     } finally {
@@ -428,6 +434,45 @@
     modulesDirty = [...editModules].sort().join('|') !== [...effectiveModules].sort().join('|');
   }
 
+  // ── node-level deltas ─────────────────────────────────────────────────────
+  function isClusterDefault(name: string): boolean {
+    return clusterModules.includes(name);
+  }
+  function toggleAdd(name: string) {
+    const next = new Set(adds);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    adds = [...next].sort();
+    removes = removes.filter((r) => r !== name);
+  }
+  function toggleRemove(name: string) {
+    const next = new Set(removes);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    removes = [...next].sort();
+    adds = adds.filter((a) => a !== name);
+  }
+  async function saveOverrides() {
+    if (overridesBusy) return;
+    overridesBusy = true;
+    try {
+      const res = (await client.put(`/machines/${$page.params.id}/module-overrides`, {
+        adds,
+        removes,
+      })) as { effective?: string[] };
+      if (res.effective) {
+        effectiveModules = res.effective;
+        editModules = new Set(effectiveModules);
+        modulesDirty = false;
+      }
+      success('Module overrides saved');
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Failed to save overrides');
+    } finally {
+      overridesBusy = false;
+    }
+  }
+
   async function saveModules() {
     if (applyBusy) return;
     try {
@@ -487,20 +532,55 @@
     }
   }
 
-  async function upgrade() {
-    if (!upgradeImage.trim()) {
-      notifyError('Enter an installer image');
+  // ── cluster-default modules (for the "reset to cluster" affordance) ──
+  async function loadClusterModules() {
+    const cid = machine?.clusterId;
+    if (!cid) {
+      clusterModules = [];
       return;
     }
-    if (!confirm(`Upgrade with ${upgradeImage}?`)) return;
-    actionBusy = true;
+    clusterModulesBusy = true;
     try {
-      await client.post(`/machines/${$page.params.id}/upgrade`, { image: upgradeImage.trim() });
-      success('Upgrade initiated');
-    } catch (e: unknown) {
-      notifyError(e instanceof Error ? e.message : 'Upgrade failed');
+      const c = (await client.get(`/clusters/${cid}`)) as { factoryModules?: string[] };
+      clusterModules = c.factoryModules || [];
+    } catch {
+      clusterModules = [];
     } finally {
-      actionBusy = false;
+      clusterModulesBusy = false;
+    }
+  }
+
+  async function resetModules() {
+    if (applyBusy) return;
+    if (
+      !confirm(
+        'Reset this machine to the cluster default module set? ' +
+          'This clears the node-level override. Then it will upgrade (reboot) to the cluster image.',
+      )
+    )
+      return;
+    applyBusy = true;
+    applyMessage = 'Resetting to cluster modules (node will reboot)…';
+    try {
+      // Clear absolute override + any deltas via the delta endpoint (reset=true).
+      await client.put(`/machines/${$page.params.id}/module-overrides`, {
+        adds: null,
+        removes: null,
+        reset: true,
+      });
+      effectiveModules = [...clusterModules];
+      editModules = new Set(effectiveModules);
+      modulesDirty = false;
+      const res = await client.post(`/machines/${$page.params.id}/apply-modules`, {});
+      const r = res as { image?: string };
+      applyMessage = `Upgrade initiated with image ${r.image || ''}. The node is rebooting…`;
+      success('Reset to cluster modules started');
+      setTimeout(() => void loadImageAndModules(true), 90_000);
+    } catch (e: unknown) {
+      applyMessage = '';
+      notifyError(e instanceof Error ? e.message : 'Failed to reset modules');
+    } finally {
+      applyBusy = false;
     }
   }
 
@@ -739,18 +819,12 @@
 
       <div class="info-section">
         <h2>Talos ops</h2>
-        <div class="form-row">
-          <label>
-            Upgrade image
-            <input type="text" title="Talos installer image to upgrade this single node to" bind:value={upgradeImage} placeholder="ghcr.io/siderolabs/installer:v1.8.0" />
-          </label>
-          <Button variant="secondary" size="sm" title="Upgrade this node to the image above" onclick={upgrade} disabled={actionBusy}>Upgrade</Button>
-        </div>
         <p class="muted-hint">
-          This is the only image control for a running node (live upgrade). Per-node network
-          and mounts — and the rare factory/custom <code>machine.install.image</code> — live in
-          the <strong>Machine config</strong> section below. Cluster-wide upgrades are under
-          Cluster → Config.
+          Single-node image upgrades are driven by <strong>Image &amp; modules</strong> below
+          (the factory image for this node's effective module set). Cluster-wide rolling
+          upgrades live on the cluster page. Per-node network and mounts — and the rare
+          factory/custom <code>machine.install.image</code> — live in the
+          <strong>Machine config</strong> section further below.
         </p>
       </div>
 
@@ -850,12 +924,70 @@
                 <span class="module-chip mono">{shortModuleName(m)}</span>
               {/each}
             {:else}
-              <span class="muted-hint">None selected (inherits cluster default or no modules).</span>
+              <span class="muted-hint">None selected (no modules baked in).</span>
             {/if}
           </div>
+          {#if clusterModules.length > 0 || clusterModulesBusy}
+            <p class="muted-hint">
+              {#if clusterModulesBusy}
+                Loading cluster defaults…
+              {:else}
+                Cluster defaults:
+                {#if clusterModules.length > 0}
+                  {#each clusterModules as m (m)}
+                    <span class="module-chip mono">{shortModuleName(m)}</span>
+                  {/each}
+                {:else}
+                  <span>(none)</span>
+                {/if}
+              {/if}
+            </p>
+          {/if}
+          <p class="muted-hint" style="margin-top:0.4rem">
+            <strong>Node-level deltas</strong> — extra modules to add on top of the cluster
+            defaults, or cluster defaults to remove from just this node. Effective set
+            = cluster − removes + adds (an absolute "Apply modules" selection wins if set).
+          </p>
+          {#if factoryExtensions.length > 0 || effectiveModules.length > 0}
+            <div class="module-picker" style="max-height:120px">
+              {#each [...new Set([...clusterModules, ...effectiveModules, ...factoryExtensions.map((f) => f.name)])].sort() as m (m)}
+                <span class="module-option">
+                  <button
+                    class="delta-btn"
+                    class:active={adds.includes(m)}
+                    title="Add {shortModuleName(m)} to this node only"
+                    onclick={() => toggleAdd(m)}
+                    disabled={overridesBusy}
+                  >+</button>
+                  <button
+                    class="delta-btn"
+                    class:active={removes.includes(m)}
+                    title="Remove {shortModuleName(m)} from this node only"
+                    onclick={() => toggleRemove(m)}
+                    disabled={overridesBusy}
+                  >−</button>
+                  <span class="mono">{shortModuleName(m)}</span>
+                  {#if isClusterDefault(m)}<span class="muted-hint"> · default</span>{/if}
+                </span>
+              {/each}
+            </div>
+            {#if adds.length > 0 || removes.length > 0}
+              <p class="muted-hint">
+                Adds: {adds.length ? adds.map(shortModuleName).join(', ') : '—'} ·
+                Removes: {removes.length ? removes.map(shortModuleName).join(', ') : '—'}
+              </p>
+            {/if}
+          {/if}
           <div class="module-actions">
-            <Button variant="secondary" size="sm" title="Save this module selection for the machine (no reboot)" onclick={saveModules} disabled={applyBusy || !modulesDirty}>Save</Button>
+            <Button variant="secondary" size="sm" title="Save the node-level add/remove deltas (no reboot)" onclick={saveOverrides} disabled={overridesBusy || (adds.length === 0 && removes.length === 0)}>Save deltas</Button>
             <Button variant="primary" size="sm" title="Upgrade the node to a factory image with these modules (reboots)" onclick={applyModules} disabled={applyBusy || editModules.size === 0}>Apply modules</Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              title="Clear this node's override so it uses the cluster default module set, then upgrade (reboots)"
+              onclick={resetModules}
+              disabled={applyBusy}
+            >Reset to cluster defaults</Button>
           </div>
           {#if applyMessage}
             <p class="muted-hint info-hint">{applyMessage}</p>
@@ -1444,6 +1576,20 @@ cluster:
     font-size: 0.75rem;
   }
   .module-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.4rem; }
+  .delta-btn {
+    all: unset;
+    width: 1.4rem; height: 1.4rem;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid var(--tcs-border);
+    border-radius: 999px;
+    font-size: 0.9rem; line-height: 1;
+    cursor: pointer;
+    color: var(--tcs-text-muted);
+    margin-right: 0.15rem;
+  }
+  .delta-btn:hover { border-color: var(--tcs-primary); color: var(--tcs-primary); }
+  .delta-btn.active { background: var(--tcs-primary); border-color: var(--tcs-primary); color: #fff; }
+  .delta-btn[disabled] { opacity: 0.4; cursor: default; }
   .config-editor {
     margin: 1.5rem 0;
   }

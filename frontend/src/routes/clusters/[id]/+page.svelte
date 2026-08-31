@@ -115,10 +115,17 @@
   let retention = $state(10);
   let savingSchedule = $state(false);
 
-  // ── header actions ────────────────────────────────────────────────
-  let upgradeImage = $state('ghcr.io/siderolabs/installer:v1.9.0');
+  // ── rolling upgrade (derived image: talos version + modules + k8s) ──
+  let upgradeTalosVersion = $state('');
+  let upgradeK8sVersion = $state('');
   let upgradeMaxUnavail = $state(1);
   let upgradeCpLast = $state(true);
+  let talosVersions = $state<string[]>([]);
+  let currentTalos = $state('');
+  let k8sCurrent = $state('');
+  let k8sSupported = $state<string[]>([]);
+  let targetsBusy = $state(false);
+  let targetsError = $state('');
 
   // ── upgrade jobs (per-cluster) ────────────────────────────────────
   interface UpgradeJob {
@@ -265,20 +272,89 @@
     }
   }
 
+  async function loadUpgradeTargets() {
+    targetsBusy = true;
+    targetsError = '';
+    try {
+      const res = (await client.get(`/clusters/${cid}/upgrade-targets`)) as {
+        talos: { current: string; versions: string[] };
+        k8s: { current: string; supported: string[] };
+      };
+      currentTalos = res.talos.current || '';
+      talosVersions = res.talos.versions || [];
+      k8sCurrent = res.k8s.current || '';
+      k8sSupported = res.k8s.supported || [];
+      upgradeTalosVersion = currentTalos;
+      upgradeK8sVersion = '';
+    } catch (e: unknown) {
+      targetsError = e instanceof Error ? e.message : 'Failed to load upgrade targets';
+    } finally {
+      targetsBusy = false;
+    }
+  }
+
+  $effect(() => {
+    if (cluster && !talosVersions.length && !targetsBusy && !targetsError) {
+      loadUpgradeTargets();
+    }
+  });
+
+  function upgradeSummary(): string {
+    const parts: string[] = [];
+    if (upgradeTalosVersion && upgradeTalosVersion !== currentTalos) {
+      parts.push(`Talos ${currentTalos || '?'} → ${upgradeTalosVersion}`);
+    }
+    if (modulesDirty) {
+      parts.push('module set change');
+    }
+    if (upgradeK8sVersion) {
+      parts.push(`Kubernetes ${k8sCurrent || '?'} → ${upgradeK8sVersion}`);
+    }
+    return parts.length ? parts.join(' + ') : 'no change';
+  }
+
   async function startClusterUpgrade() {
-    if (!upgradeImage.trim()) {
-      notifyError('Installer image is required');
+    const doingTalos =
+      (upgradeTalosVersion && upgradeTalosVersion !== currentTalos) || modulesDirty;
+    const doingK8s = !!upgradeK8sVersion;
+    if (!doingTalos && !doingK8s) {
+      notifyError('Select a new Talos version, change modules, or pick a Kubernetes version');
       return;
     }
-    if (!confirm(`Start rolling upgrade of this cluster to ${upgradeImage}?`)) return;
+    const msg = [
+      `Start rolling upgrade: ${upgradeSummary()}?`,
+      '',
+      doingTalos
+        ? '• Talos phase reboots nodes one at a time (workers first).'
+        : '',
+      doingK8s
+        ? `• Kubernetes phase applies in place, no reboots, control-plane first.` +
+          (k8sSupported.length > 1 ? '' : '')
+        : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    if (!confirm(msg)) return;
     busy = true;
     try {
       const res = (await client.post(`/clusters/${cid}/upgrade`, {
-        image: upgradeImage.trim(),
+        talosVersion: doingTalos ? upgradeTalosVersion : undefined,
+        k8sVersion: doingK8s ? upgradeK8sVersion : undefined,
+        modules: modulesDirty ? [...clusterModules] : undefined,
         maxUnavailable: upgradeMaxUnavail,
         controlPlaneLast: upgradeCpLast,
-      })) as { job?: { id: string } };
-      success(`Upgrade job queued${res.job?.id ? `: ${res.job.id}` : ''}`);
+      })) as { job?: { id: string }; k8sSteps?: string[] };
+      const steps = res.k8sSteps || [];
+      if (steps.length > 1) {
+        success(`Upgrade job queued: ${res.job?.id} — k8s will run sequentially: ${steps.join(' → ')}`);
+      } else {
+        success(`Upgrade job queued${res.job?.id ? `: ${res.job.id}` : ''}`);
+      }
+      if (modulesDirty) {
+        cluster.factoryModules = [...clusterModules];
+        modulesDirty = false;
+      }
+      await loadUpgradeTargets();
     } catch (e: unknown) {
       notifyError(e instanceof Error ? e.message : 'Failed to start cluster upgrade');
     } finally {
@@ -493,40 +569,96 @@
       </div>
     </div>
 
-    <details class="panel">
-      <summary>Default modules (Image Factory)</summary>
+    <details class="panel" open>
+      <summary>Rolling upgrade (Talos + modules + Kubernetes)</summary>
       <p class="sub">
-        System extensions baked into every machine's image in this cluster unless a machine
-        overrides them on its own page. Changing this does not affect running nodes — apply it
-        per-machine to take effect.
+        Pick a new <strong>Talos version</strong>, adjust the <strong>modules</strong>, and/or choose a
+        <strong>Kubernetes version</strong>, then start one rolling job. The installer image is derived
+        automatically (per-node modules × chosen version) — nothing to type in. Talos changes reboot
+        nodes (workers first by default); Kubernetes changes apply in place, control-plane first, no
+        reboots.
       </p>
-      {#if factoryError}
-        <p class="hint error">{factoryError}</p>
-      {:else if factoryBusy}
-        <p class="hint">Loading module catalog…</p>
+      {#if targetsError}
+        <p class="hint error">{targetsError}</p>
+      {:else if targetsBusy && talosVersions.length === 0}
+        <p class="hint">Loading upgrade targets…</p>
       {:else}
-        <div class="module-picker">
-          {#each factoryExtensions as f (f.name)}
-            <label class="module-option" title={f.description || f.ref || ''}>
-              <input type="checkbox" checked={clusterModules.has(f.name)} onchange={() => toggleClusterModule(f.name)} />
-              <span class="mono">{shortModuleName(f.name)}</span>
-              {#if f.author}<span class="hint"> · {f.author}</span>{/if}
-            </label>
-          {/each}
-          {#if factoryExtensions.length === 0}
-            <p class="hint">No modules returned for {cluster.talosVersion || cluster.talos_version || 'this version'}.</p>
-          {/if}
+        <div class="upgrade-grid">
+          <label>
+            Talos version
+            <select
+              title="Target Talos version (image is built from this + the module set below)"
+              bind:value={upgradeTalosVersion}
+            >
+              <option value={currentTalos}>{currentTalos || 'current'} (current)</option>
+              {#each talosVersions as v (v)}
+                {#if v !== currentTalos}
+                  <option value={v}>{v}</option>
+                {/if}
+              {/each}
+            </select>
+          </label>
+          <label>
+            Kubernetes version
+            <select
+              title="Target Kubernetes version supported by this Talos build (in-place, no reboot)"
+              bind:value={upgradeK8sVersion}
+            >
+              <option value="">{k8sCurrent || 'current'} (no change)</option>
+              {#each k8sSupported as v (v)}
+                <option value={v}>{v}</option>
+              {/each}
+            </select>
+          </label>
         </div>
-        {#if clusterModules.size > 0}
-          <p class="hint">
-            Selected:
-            {#each [...clusterModules].sort() as m (m)}
-              <span class="module-chip mono">{shortModuleName(m)}</span>
+
+        {#if factoryError}
+          <p class="hint error">{factoryError}</p>
+        {:else if factoryBusy}
+          <p class="hint">Loading module catalog…</p>
+        {:else}
+          <div class="module-picker">
+            {#each factoryExtensions as f (f.name)}
+              <label class="module-option" title={f.description || f.ref || ''}>
+                <input type="checkbox" checked={clusterModules.has(f.name)} onchange={() => toggleClusterModule(f.name)} />
+                <span class="mono">{shortModuleName(f.name)}</span>
+                {#if f.author}<span class="hint"> · {f.author}</span>{/if}
+              </label>
             {/each}
-          </p>
+            {#if factoryExtensions.length === 0}
+              <p class="hint">No modules returned for {upgradeTalosVersion || cluster.talosVersion || cluster.talos_version || 'this version'}.</p>
+            {/if}
+          </div>
+          {#if clusterModules.size > 0}
+            <p class="hint">
+              Modules:
+              {#each [...clusterModules].sort() as m (m)}
+                <span class="module-chip mono">{shortModuleName(m)}</span>
+              {/each}
+            </p>
+          {/if}
         {/if}
+
         <div class="form-actions">
-          <Button variant="primary" size="sm" title="Save the cluster's default module set" onclick={saveClusterModules} disabled={busy || !modulesDirty}>Save cluster modules</Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            title="Save the cluster's default module set without starting an upgrade"
+            onclick={saveClusterModules}
+            disabled={busy || !modulesDirty}
+          >Save modules only</Button>
+          <Button
+            variant="primary"
+            size="sm"
+            title="Queue the rolling upgrade described above"
+            onclick={startClusterUpgrade}
+            disabled={busy || targetsBusy}
+          >
+            Start rolling upgrade{upgradeSummary() === 'no change' ? '' : ` — ${upgradeSummary()}`}
+          </Button>
+          <span class="hint">
+            Talos phase: max-unavailable &amp; ordering live in <strong>Cluster actions</strong> below.
+          </span>
         </div>
       {/if}
     </details>
@@ -553,21 +685,20 @@
           <h3>Rolling Talos upgrade</h3>
           <div class="inline-form">
             <label>
-              Installer image
-              <input type="text" title="Talos installer image to roll out, e.g. ghcr.io/siderolabs/installer:v1.9.0" bind:value={upgradeImage} placeholder="ghcr.io/siderolabs/installer:v1.x" />
-            </label>
-            <label class="num">
               Max unavailable
               <input type="number" title="How many nodes may be upgraded concurrently" min="1" max="20" bind:value={upgradeMaxUnavail} />
             </label>
             <label class="check">
               <input type="checkbox" title="Upgrade workers before control-plane nodes for safety" bind:checked={upgradeCpLast} />
-              Workers first (control plane last)
+              Workers first (control plane last) — Talos phase
             </label>
-            <Button variant="primary" size="sm" title="Queue a rolling Talos upgrade across this cluster's nodes" onclick={startClusterUpgrade} disabled={busy}>
-              Start rolling upgrade
-            </Button>
           </div>
+          <p class="hint">
+            Choose the Talos version, modules, and (optionally) the Kubernetes version in the
+            <strong>Cluster default modules</strong> panel above, then press <strong>Start rolling
+            upgrade</strong> there. Talos upgrades reboot nodes; Kubernetes upgrades apply in place
+            (control-plane first, no reboots).
+          </p>
           <div class="upgrade-jobs">
             <h4>Upgrade jobs</h4>
             {#if upgradeJobsLoading && upgradeJobs.length === 0}
@@ -885,6 +1016,22 @@
     border-radius: 6px;
     padding: 0.5rem 0.65rem;
     margin: 0.4rem 0;
+  }
+  .upgrade-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+  }
+  .upgrade-grid label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
+  .upgrade-grid select {
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--tcs-border);
+    border-radius: 6px;
+    background: var(--tcs-surface);
+    color: var(--tcs-text);
+    font-family: ui-monospace, monospace;
+    font-size: 0.8rem;
   }
   .module-option {
     display: flex;

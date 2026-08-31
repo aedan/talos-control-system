@@ -126,6 +126,10 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
             post(handlers::start_cluster_upgrade),
         )
         .route(
+            "/clusters/:id/upgrade-targets",
+            get(handlers::get_upgrade_targets),
+        )
+        .route(
             "/clusters/:id/upgrade-jobs",
             get(handlers::list_cluster_upgrade_jobs),
         )
@@ -164,6 +168,10 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route(
             "/machines/:id/modules",
             get(handlers::get_machine_modules).put(handlers::set_machine_modules),
+        )
+        .route(
+            "/machines/:id/module-overrides",
+            put(handlers::set_machine_module_overrides),
         )
         .route(
             "/machines/:id/apply-modules",

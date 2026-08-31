@@ -11,7 +11,9 @@ use crate::integration::talosctl::{
     backup_root_from_sqlite_path, build_patch_documents, merge_patches_into_machine_config,
     merge_yaml_docs_into_machine_config, pick_control_plane_address, TalosCredentials,
 };
-use crate::integration::talosctl::TalosctlClient;
+use crate::integration::talosctl::{
+    cmp_k8s_versions, latest_k8s_patch_for_minor, parse_k8s_version, TalosctlClient,
+};
 use crate::utils::secrets;
 use crate::AppError;
 
@@ -29,6 +31,16 @@ impl ClusterController {
             pool,
             sqlite_path,
             jwt_secret,
+        }
+    }
+
+    /// Pool-only constructor for callers that don't need talosconfig context
+    /// (e.g. DB-side operations, or where the caller supplies its own).
+    pub fn new(pool: DbPool) -> Self {
+        Self {
+            pool,
+            sqlite_path: String::new(),
+            jwt_secret: String::new(),
         }
     }
 
@@ -531,6 +543,41 @@ impl ClusterController {
         TalosctlClient::upgrade(&machine.address, image.trim(), tc.as_deref()).await
     }
 
+    /// Run `talosctl upgrade-k8s` against one control-plane endpoint. The
+    /// command discovers the rest of the cluster itself, pre-pulls images, and
+    /// patches every node's machineconfig — entirely in place, no reboots.
+    pub async fn run_k8s_upgrade(
+        &self,
+        cluster_id: Uuid,
+        cp_address: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<String, AppError> {
+        let cluster = crate::db::repos::cluster::get(&self.pool, cluster_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Cluster {} not found", cluster_id)))?;
+        let tc = self.talosconfig_yaml(&cluster)?;
+        TalosctlClient::k8s_upgrade(cp_address, from, to, tc.as_deref()).await
+    }
+
+    /// The cluster's current Kubernetes version via the stored kubeconfig
+    /// (API server `/version`), falling back to the stored inventory value.
+    pub async fn cluster_k8s_version(&self, cluster_id: Uuid) -> Result<String, AppError> {
+        let cluster = crate::db::repos::cluster::get(&self.pool, cluster_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Cluster {} not found", cluster_id)))?;
+        if let Some(enc) = &cluster.kubeconfig {
+            let plain = self.dec(enc)?;
+            if let Ok(client) = crate::integration::kubernetes::K8sClient::from_kubeconfig_yaml(&plain).await
+            {
+                if let Ok(v) = client.api_server_version().await {
+                    return Ok(v);
+                }
+            }
+        }
+        Ok(cluster.control_plane_version)
+    }
+
     pub async fn reset_machine(
         &self,
         machine_id: Uuid,
@@ -878,6 +925,79 @@ impl ClusterController {
         TalosctlClient::list_extensions(&machine.address, tc.as_deref()).await
     }
 
+    /// Live Kubernetes upgrade options for a cluster: current version plus the
+    /// targets this Talos build supports (probed via `upgrade-k8s --dry-run` on
+    /// one control-plane node). Used to populate the UI dropdown.
+    ///
+    /// Candidate minors: the current minor (patch bump), the next minor, and the
+    /// one after — any jump >1 minor is fine here because the upgrade job builds
+    /// a sequential per-minor ladder. Only candidates the Talos build actually
+    /// supports as a single hop are listed; the final hop of a ladder is always
+    /// one minor ahead, so listing mi/mi+1/mi+2 covers targets up to +2 minors.
+    pub async fn k8s_upgrade_targets(&self, cluster_id: Uuid) -> Result<serde_json::Value, AppError> {
+        let cluster = crate::db::repos::cluster::get(&self.pool, cluster_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Cluster {} not found", cluster_id)))?;
+        let machines = crate::db::repos::machine::list_by_cluster(&self.pool, cluster_id).await?;
+
+        // Live k8s version first (kubeconfig), fall back to the stored inventory.
+        let current = match self.cluster_k8s_version(cluster_id).await {
+            Ok(v) if !v.trim().is_empty() => v,
+            _ => cluster.control_plane_version.clone(),
+        };
+
+        let tc = self.talosconfig_yaml(&cluster)?;
+        let cp_addr = {
+            let pairs: Vec<(String, Option<String>)> =
+                machines.iter().map(|m| (m.machine_type.clone(), Some(m.address.clone()))).collect();
+            let creds = tc
+                .as_deref()
+                .and_then(|t| TalosCredentials::from_talosconfig_yaml(t).ok())
+                .unwrap_or(TalosCredentials {
+                    endpoints: vec![],
+                    nodes: vec![],
+                });
+            pick_control_plane_address(&pairs, &creds).ok()
+        };
+
+        let mut supported: Vec<String> = Vec::new();
+        if let (Some(addr), Some((ma, mi, pa))) = (cp_addr.clone(), parse_k8s_version(&current)) {
+            if ma == 1 {
+                // Latest patch of each candidate minor line.
+                for target_minor in [mi, mi + 1, mi + 2] {
+                    let latest = match tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        latest_k8s_patch_for_minor(target_minor),
+                    )
+                    .await
+                    {
+                        Ok(Some(v)) => v,
+                        _ => continue,
+                    };
+                    // No point offering the exact current version.
+                    if target_minor == mi && parse_k8s_version(&latest).map(|p| p.2 <= pa).unwrap_or(true) {
+                        continue;
+                    }
+                    // Only offer hops the Talos build supports as a single step.
+                    // The final ladder hop is +1 minor to the exact target; a
+                    // target 2 minors out needs mi+1 (always supported if any
+                    // minor hop is) so we probe mi+1 once and mi+2 separately.
+                    match TalosctlClient::k8s_upgrade_supported(&addr, &current, &latest, tc.as_deref()).await {
+                        Ok(true) => supported.push(latest),
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!(candidate = %latest, error = %e, "k8s upgrade probe failed"),
+                    }
+                }
+            }
+        }
+        supported.sort();
+
+        Ok(serde_json::json!({
+            "current": current,
+            "supported": supported,
+        }))
+    }
+
     /// Store the cluster's factory modules and resolve the resulting schematic id
     /// + installer image. `modules_json` is a JSON array of official extension
     /// names (e.g. `["siderolabs/bnx2-bnx2x"]`) or null/empty for the default.
@@ -917,19 +1037,97 @@ impl ClusterController {
         }))
     }
 
-    /// Effective modules for a machine: its own factory_modules override, else the
-    /// cluster's.
+    /// Effective modules for a machine, applying the delta override model:
+    ///   * if `machine.factory_modules` is set (absolute override, legacy or
+    ///     from the per-machine picker), it wins outright;
+    ///   * otherwise effective = (cluster.factory_modules − machine.module_removes
+    ///     + machine.module_adds), deduped, order-preserving (cluster order first,
+    ///     then additions in stored order).
     pub async fn effective_modules(&self, machine_id: Uuid) -> Result<Vec<String>, AppError> {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
-        let raw = machine.factory_modules.clone().or_else(|| cluster.factory_modules.clone());
-        let raw = raw.filter(|s| !s.trim().is_empty()).unwrap_or_default();
-        if raw.trim().is_empty() {
-            return Ok(Vec::new());
+        let parse = |raw: &Option<String>| -> Result<Vec<String>, AppError> {
+            if let Some(s) = raw {
+                let s = s.trim();
+                if s.is_empty() {
+                    return Ok(Vec::new());
+                }
+                return serde_json::from_str::<Vec<String>>(s)
+                    .map_err(|e| AppError::InvalidInput(format!("Invalid module JSON: {e}")));
+            }
+            Ok(Vec::new())
+        };
+        if !parse(&machine.factory_modules)?.is_empty() {
+            return Ok(parse(&machine.factory_modules)?);
         }
-        serde_json::from_str::<Vec<String>>(&raw)
-            .map_err(|e| AppError::InvalidInput(format!("Invalid factory_modules JSON: {e}")))
+        let mut base = parse(&cluster.factory_modules)?;
+        let removes = parse(&machine.module_removes)?;
+        let adds = parse(&machine.module_adds)?;
+        if !removes.is_empty() {
+            base.retain(|m| !removes.iter().any(|r| r == m));
+        }
+        for a in adds {
+            if !base.contains(&a) {
+                base.push(a);
+            }
+        }
+        Ok(base)
     }
 
+    /// Set a machine's delta module overrides (`adds` / `removes` against the
+    /// cluster default set). Passing `None` for a field clears that delta.
+    /// Passing both `None` with `reset=true` clears the absolute override too.
+    pub async fn set_machine_module_overrides(
+        &self,
+        machine_id: Uuid,
+        adds: Option<Vec<String>>,
+        removes: Option<Vec<String>>,
+        reset: bool,
+    ) -> Result<serde_json::Value, AppError> {
+        let (cluster, mut machine) = self.cluster_and_machine(machine_id).await?;
+        let clean = |v: Option<Vec<String>>| -> Vec<String> {
+            v.unwrap_or_default()
+                .into_iter()
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty())
+                .collect()
+        };
+        let adds = clean(adds);
+        let removes = clean(removes);
+        machine.module_adds = if adds.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&adds).unwrap_or_default())
+        };
+        machine.module_removes = if removes.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&removes).unwrap_or_default())
+        };
+        if reset {
+            machine.factory_modules = None;
+        }
+        machine.updated_at = chrono::Utc::now();
+        crate::db::repos::machine::update(&self.pool, &machine).await?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "adds": adds,
+            "removes": removes,
+            "clusterModules": parse_cluster_modules(&cluster),
+            "effective": self.effective_modules(machine_id).await?,
+        }))
+    }
+}
+
+fn parse_cluster_modules(cluster: &Cluster) -> Vec<String> {
+    cluster
+        .factory_modules
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .unwrap_or_default()
+}
+
+impl ClusterController {
     /// Set a machine's factory modules override (None clears it → inherits cluster).
     pub async fn set_machine_factory_modules(
         &self,

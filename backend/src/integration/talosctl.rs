@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::process::Command;
 use tracing::{info, warn};
 
@@ -167,6 +168,35 @@ impl TalosctlClient {
         }
 
         Ok(stdout)
+    }
+
+    /// Run a talosctl command, returning `(success, stdout, stderr)` instead of
+    /// mapping non-zero exit to `Err`. Needed for commands whose *output* is the
+    /// data we inspect (e.g. `upgrade-k8s --dry-run` printing its plan while a
+    /// node is briefly unreachable, or `--to` validation errors).
+    async fn run_capture(args: &[String]) -> Result<(bool, String, String), AppError> {
+        let talosconfig_tmp = args
+            .iter()
+            .position(|a| a == "--talosconfig")
+            .and_then(|i| args.get(i + 1).cloned())
+            .filter(|p| p.starts_with("/var/lib/tcs/talosctl-tmp/"));
+
+        let out = Command::new("talosctl")
+            .env("TCS_INTERNAL", "1")
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| AppError::Network(format!("talosctl spawn: {e}")))?;
+
+        if let Some(p) = &talosconfig_tmp {
+            let _ = std::fs::remove_file(p);
+        }
+
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        Ok((out.status.success(), stdout, stderr))
     }
 
     // ── Public API ───────────────────────────────────────────────────────────
@@ -443,6 +473,83 @@ impl TalosctlClient {
         Self::run(&args).await?;
         info!(endpoint, image, "talosctl upgrade");
         Ok(())
+    }
+
+    /// Upgrade the cluster's Kubernetes control plane in place (no node reboots).
+    ///
+    /// Wraps `talosctl upgrade-k8s`, which talks to a single control-plane node,
+    /// discovers the rest of the cluster itself, pre-pulls the new images, and
+    /// patches every node's machineconfig. `from`/`to` are exact versions
+    /// (e.g. "v1.36.3"). `dry_run` only prints the plan — used to probe which
+    /// target versions this Talos build supports.
+    ///
+    /// NOTE: this can run for minutes (image pre-pull + reconcile), so it is
+    /// invoked by callers via `run_capture_k8s_upgrade` with a generous timeout,
+    /// never through `Self::run`'s default behavior.
+    pub fn k8s_upgrade_args(
+        endpoint: &str,
+        from: &str,
+        to: &str,
+        dry_run: bool,
+        talosconfig: Option<&str>,
+    ) -> Vec<String> {
+        let mut args: Vec<String> = vec![
+            "upgrade-k8s".into(),
+            "-e".into(),
+            endpoint.into(),
+            "--from".into(),
+            from.into(),
+            "--to".into(),
+            to.into(),
+        ];
+        if dry_run {
+            args.push("--dry-run".into());
+        }
+        args.extend(Self::talosconfig_args(talosconfig));
+        args
+    }
+
+    /// Dry-run probe: true when `upgrade-k8s` accepts the from→to path on this
+    /// build (i.e. the target is supported), false on "unsupported upgrade path"
+    /// or transport errors (a node flapping during the probe is not a verdict).
+    pub async fn k8s_upgrade_supported(
+        endpoint: &str,
+        from: &str,
+        to: &str,
+        talosconfig: Option<&str>,
+    ) -> Result<bool, AppError> {
+        Self::ensure_installed().await?;
+        let args = Self::k8s_upgrade_args(endpoint, from, to, true, talosconfig);
+        let (_ok, stdout, stderr) = Self::run_capture(&args).await?;
+        let combined = format!("{stdout}\n{stderr}");
+        Ok(!combined.contains("unsupported upgrade path"))
+    }
+
+    /// Perform the real in-place k8s upgrade. Long-running; callers wrap in a timeout.
+    pub async fn k8s_upgrade(
+        endpoint: &str,
+        from: &str,
+        to: &str,
+        talosconfig: Option<&str>,
+    ) -> Result<String, AppError> {
+        Self::ensure_installed().await?;
+        let args = Self::k8s_upgrade_args(endpoint, from, to, false, talosconfig);
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(1800),
+            Self::run_capture(&args),
+        )
+        .await
+        .map_err(|_| AppError::Network("talosctl upgrade-k8s timed out".to_string()))?;
+        let (ok, stdout, stderr) = out?;
+        if !ok {
+            return Err(AppError::Network(format!(
+                "talosctl upgrade-k8s failed: {} {}",
+                stdout.trim(),
+                stderr.trim()
+            )));
+        }
+        info!(endpoint, from, to, "talosctl upgrade-k8s");
+        Ok(stdout)
     }
 
     /// Stream an etcd snapshot to a local file.
@@ -1080,6 +1187,119 @@ fn spec_from_mc_json(out: &str) -> Result<String, AppError> {
     // The primary resource spec may itself be a multi-doc YAML (machine
     // config + standalone config documents). Keep only the machine config.
     Ok(spec.split("\n---\n").next().unwrap_or(&spec).to_string())
+}
+
+// ─── Kubernetes upgrade helpers ──────────────────────────────────────────────
+//
+// `talosctl upgrade-k8s` (verified on Talos v1.13.7) performs an in-place k8s
+// control-plane + kubelet upgrade: it takes ONE control-plane endpoint,
+// discovers the rest of the cluster itself, pre-pulls images, and patches every
+// node's machineconfig. No node reboots. It validates the path up front — an
+// unsupported from→to yields "unsupported upgrade path X.Y->A.B" on the first
+// line and exit 1 — which is exactly the signal we use to discover which
+// targets this Talos build supports (`k8s_upgrade_supported`).
+
+/// Parse "v1.36.3" / "1.36.3" → (1, 36, 3). None when not a plain version.
+pub fn parse_k8s_version(v: &str) -> Option<(u32, u32, u32)> {
+    let v = v.trim().trim_start_matches('v');
+    let parts: Vec<&str> = v.split('.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let major: u32 = parts[0].parse().ok()?;
+    let minor: u32 = parts[1].parse().ok()?;
+    let patch: u32 = parts.get(2).and_then(|p| p.parse().ok()).unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// Compare two k8s versions; None when either is unparseable.
+pub fn cmp_k8s_versions(a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    Some(parse_k8s_version(a)?.cmp(&parse_k8s_version(b)?))
+}
+
+/// Latest GA patch for a minor line from the Kubernetes release API
+/// (https://github.com/kubernetes/kubernetes/releases). Fails open: callers
+/// treat an error as "no candidates" rather than breaking the UI.
+pub async fn latest_k8s_patch_for_minor(minor: u32) -> Option<String> {
+    let url = format!(
+        "https://api.github.com/repos/kubernetes/kubernetes/tags?per_page=100"
+    );
+    let resp = reqwest::Client::new()
+        .get(url)
+        .header("User-Agent", "tcs-k8s-release-check")
+        .send()
+        .await
+        .ok()?;
+    let v: serde_json::Value = resp.json().await.ok()?;
+    let tags = v.as_array()?;
+    let mut best: Option<String> = None;
+    for t in tags {
+        let name = t.get("name")?.as_str()?.to_string();
+        let (ma, mi, pa) = parse_k8s_version(&name)?;
+        if ma == 1 && mi == minor && pa > 0 {
+            let bump = best
+                .as_ref()
+                .and_then(|b| parse_k8s_version(b))
+                .map(|b| pa > b.2)
+                .unwrap_or(true);
+            if bump {
+                best = Some(name);
+            }
+        }
+    }
+    best
+}
+
+/// Candidate k8s upgrade targets for a cluster's current version:
+///   * the newest patch of the current minor (when not already there),
+///   * the newest patch of the next minor.
+/// Each candidate is verified against the node with a `upgrade-k8s --dry-run`
+/// probe; only supported ones are returned.
+pub async fn k8s_upgrade_candidates(
+    endpoint: &str,
+    current: &str,
+    talosconfig: Option<&str>,
+) -> Result<Vec<String>, AppError> {
+    let (ma, mi, pa) = parse_k8s_version(current)
+        .ok_or_else(|| AppError::InvalidInput(format!("unparseable k8s version: {current}")))?;
+    if ma != 1 {
+        return Ok(Vec::new());
+    }
+
+    let mut candidates: Vec<String> = Vec::new();
+    if let Ok(latest_same) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        latest_k8s_patch_for_minor(mi),
+    )
+    .await
+    {
+        if let Some(v) = latest_same {
+            if parse_k8s_version(&v).map(|p| p.2 > pa).unwrap_or(false) {
+                candidates.push(v);
+            }
+        }
+    }
+    if let Ok(latest_next) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        latest_k8s_patch_for_minor(mi + 1),
+    )
+    .await
+    {
+        if let Some(v) = latest_next {
+            candidates.push(v);
+        }
+    }
+    candidates.sort();
+
+    let mut supported = Vec::new();
+    for c in candidates {
+        match TalosctlClient::k8s_upgrade_supported(endpoint, current, &c, talosconfig).await {
+            Ok(true) => supported.push(c),
+            Ok(false) => {}
+            Err(e) => warn!(candidate = %c, error = %e, "k8s upgrade probe failed"),
+        }
+    }
+    Ok(supported)
 }
 
 #[cfg(test)]

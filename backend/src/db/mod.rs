@@ -94,6 +94,14 @@ pub async fn run_migrations(pool: &DbPool) -> Result<(), AppError> {
             "016_factory_modules.sql",
             include_str!("migrations/016_factory_modules.sql"),
         ),
+        (
+            "017_upgrade_jobs_v2.sql",
+            include_str!("migrations/017_upgrade_jobs_v2.sql"),
+        ),
+        (
+            "018_module_overrides.sql",
+            include_str!("migrations/018_module_overrides.sql"),
+        ),
     ];
 
     for (name, sql) in migrations {

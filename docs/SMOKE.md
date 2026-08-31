@@ -36,7 +36,9 @@ curl -sk -H "Authorization: Bearer $TOKEN" https://127.0.0.1/api/settings/system
 | 6 | **Create Backup** → ready; **Download** | |
 | 7 | Config patch dry-run / apply | |
 | 8 | **Generate machine configs** (create wizard) | |
-| 9 | Per-cluster rolling upgrade (cluster page) + inline job list — optional cancel | |
+| 9 | **Rolling upgrade** (cluster page → “Rolling upgrade” panel): pick Talos version, adjust modules, optionally pick a Kubernetes version; press **Start rolling upgrade**. Verify job list shows per-node Talos phase, then in-place k8s phase (no reboots, CP first). Optional cancel. | |
+| 9a | **Node module deltas** (machine page → Image & modules): use +/− to add/remove modules on one node against the cluster default; **Save deltas** (no reboot); **Reset to cluster defaults** (reboots). | |
+| 9b | **K8s dropdown** on cluster page: verify it lists supported in-place targets (same-minor patch bump + next minor). Selecting a target 2 minors ahead should queue a sequential 2-step ladder. | |
 | 10 | Scale workers (inventory) | |
 | 11 | Siderolink: create join token | |
 | 12 | Users: **Reset PW** for a local user | |

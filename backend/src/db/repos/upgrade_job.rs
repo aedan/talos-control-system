@@ -17,8 +17,20 @@ pub struct UpgradeJob {
     pub cancel_requested: bool,
     pub created_by: Option<String>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub target_talos_version: Option<String>,
+    #[serde(default)]
+    pub target_k8s_version: Option<String>,
+    #[serde(default = "default_phase")]
+    pub phase: String,
+    #[serde(default)]
+    pub steps: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+fn default_phase() -> String {
+    "talos".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -33,13 +45,21 @@ pub struct UpgradeJobTarget {
     pub status: String,
     pub error: Option<String>,
     pub sort_order: i32,
+    #[serde(default)]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub k8s_version: Option<String>,
+    #[serde(default = "default_phase")]
+    pub phase: String,
+    #[serde(default)]
+    pub completed_steps: Option<String>,
     pub updated_at: DateTime<Utc>,
 }
 
 pub async fn create_job(pool: &DbPool, job: &UpgradeJob) -> Result<(), AppError> {
     pool.execute(
-        "INSERT INTO upgrade_jobs (id, scope, image, status, max_unavailable, control_plane_last, cancel_requested, created_by, error, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO upgrade_jobs (id, scope, image, status, max_unavailable, control_plane_last, cancel_requested, created_by, error, target_talos_version, target_k8s_version, phase, steps, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         &[
             SqlVal::Uuid(job.id),
             SqlVal::text(&job.scope),
@@ -50,6 +70,10 @@ pub async fn create_job(pool: &DbPool, job: &UpgradeJob) -> Result<(), AppError>
             SqlVal::Bool(job.cancel_requested),
             SqlVal::OptText(job.created_by.clone()),
             SqlVal::OptText(job.error.clone()),
+            SqlVal::OptText(job.target_talos_version.clone()),
+            SqlVal::OptText(job.target_k8s_version.clone()),
+            SqlVal::text(&job.phase),
+            SqlVal::OptText(job.steps.clone()),
             SqlVal::DateTime(job.created_at),
             SqlVal::DateTime(job.updated_at),
         ],
@@ -60,8 +84,8 @@ pub async fn create_job(pool: &DbPool, job: &UpgradeJob) -> Result<(), AppError>
 
 pub async fn insert_target(pool: &DbPool, t: &UpgradeJobTarget) -> Result<(), AppError> {
     pool.execute(
-        "INSERT INTO upgrade_job_targets (id, job_id, cluster_id, machine_id, address, machine_type, status, error, sort_order, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO upgrade_job_targets (id, job_id, cluster_id, machine_id, address, machine_type, status, error, sort_order, image, k8s_version, phase, completed_steps, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         &[
             SqlVal::Uuid(t.id),
             SqlVal::Uuid(t.job_id),
@@ -72,6 +96,10 @@ pub async fn insert_target(pool: &DbPool, t: &UpgradeJobTarget) -> Result<(), Ap
             SqlVal::text(&t.status),
             SqlVal::OptText(t.error.clone()),
             SqlVal::I32(t.sort_order),
+            SqlVal::OptText(t.image.clone()),
+            SqlVal::OptText(t.k8s_version.clone()),
+            SqlVal::text(&t.phase),
+            SqlVal::OptText(t.completed_steps.clone()),
             SqlVal::DateTime(t.updated_at),
         ],
     )
@@ -126,6 +154,67 @@ pub async fn update_job_status(
         ],
     )
     .await?;
+    Ok(())
+}
+
+pub async fn update_job_phase(pool: &DbPool, id: Uuid, phase: &str) -> Result<(), AppError> {
+    pool.execute(
+        "UPDATE upgrade_jobs SET phase = ?, updated_at = ? WHERE id = ?",
+        &[
+            SqlVal::text(phase),
+            SqlVal::DateTime(Utc::now()),
+            SqlVal::Uuid(id),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn update_target_fields(
+    pool: &DbPool,
+    id: Uuid,
+    status: Option<&str>,
+    error: Option<&str>,
+    k8s_version: Option<&str>,
+    phase: Option<&str>,
+    completed_steps: Option<&str>,
+) -> Result<(), AppError> {
+    let now = SqlVal::DateTime(Utc::now());
+    if let Some(status) = status {
+        pool.execute(
+            "UPDATE upgrade_job_targets SET status = ?, updated_at = ? WHERE id = ?",
+            &[SqlVal::text(status), now.clone(), SqlVal::Uuid(id)],
+        )
+        .await?;
+    }
+    if let Some(error) = error {
+        pool.execute(
+            "UPDATE upgrade_job_targets SET error = ?, updated_at = ? WHERE id = ?",
+            &[SqlVal::text(error), now.clone(), SqlVal::Uuid(id)],
+        )
+        .await?;
+    }
+    if let Some(k8s_version) = k8s_version {
+        pool.execute(
+            "UPDATE upgrade_job_targets SET k8s_version = ?, updated_at = ? WHERE id = ?",
+            &[SqlVal::text(k8s_version), now.clone(), SqlVal::Uuid(id)],
+        )
+        .await?;
+    }
+    if let Some(phase) = phase {
+        pool.execute(
+            "UPDATE upgrade_job_targets SET phase = ?, updated_at = ? WHERE id = ?",
+            &[SqlVal::text(phase), now.clone(), SqlVal::Uuid(id)],
+        )
+        .await?;
+    }
+    if let Some(completed_steps) = completed_steps {
+        pool.execute(
+            "UPDATE upgrade_job_targets SET completed_steps = ?, updated_at = ? WHERE id = ?",
+            &[SqlVal::text(completed_steps), now, SqlVal::Uuid(id)],
+        )
+        .await?;
+    }
     Ok(())
 }
 

@@ -1188,7 +1188,23 @@ pub struct SetModulesRequest {
     pub modules: Option<Vec<String>>,
 }
 
-/// GET /machines/:id/modules — the machine's effective factory modules.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetModuleOverridesRequest {
+    /// Modules to ADD on top of the cluster default set.
+    #[serde(default)]
+    pub adds: Option<Vec<String>>,
+    /// Modules to REMOVE from the cluster default set.
+    #[serde(default)]
+    pub removes: Option<Vec<String>>,
+    /// When true, also clears the machine's absolute `factory_modules`
+    /// override so it returns fully to the cluster delta model.
+    #[serde(default)]
+    pub reset: bool,
+}
+
+/// GET /machines/:id/modules — the machine's effective factory modules
+/// (delta model: cluster defaults ± node overrides, or absolute override).
 pub async fn get_machine_modules(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
@@ -1200,7 +1216,8 @@ pub async fn get_machine_modules(
     }
 }
 
-/// PUT /machines/:id/modules — set/clear the machine's module override.
+/// PUT /machines/:id/modules — set/clear the machine's absolute module
+/// override (legacy picker: "Apply these exact modules to this node").
 pub async fn set_machine_modules(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
@@ -1208,6 +1225,24 @@ pub async fn set_machine_modules(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let controller = controller_for(&state);
     match controller.set_machine_factory_modules(id, payload.modules).await {
+        Ok(v) => Ok(Json(v)),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+/// PUT /machines/:id/module-overrides — set the node-level delta against the
+/// cluster default module set (adds/removes), optionally resetting the
+/// absolute override. Effective set = cluster − removes + adds.
+pub async fn set_machine_module_overrides(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(payload): Json<SetModuleOverridesRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let controller = controller_for(&state);
+    match controller
+        .set_machine_module_overrides(id, payload.adds, payload.removes, payload.reset)
+        .await
+    {
         Ok(v) => Ok(Json(v)),
         Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
     }
@@ -3357,7 +3392,21 @@ pub async fn restore_cluster_backup(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClusterUpgradeRequest {
-    pub image: String,
+    /// Legacy free-text installer image. Retained for backward compatibility;
+    /// when `talosVersion`/`modules` are supplied the image is derived
+    /// server-side and this field is ignored.
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Target Talos version (e.g. "v1.14.2"). Omit to keep the cluster's current.
+    #[serde(default)]
+    pub talos_version: Option<String>,
+    /// Target Kubernetes version (e.g. "v1.36.4" or "v1.37.x"). Omit to skip
+    /// the in-place k8s phase.
+    #[serde(default)]
+    pub k8s_version: Option<String>,
+    /// New cluster-level module set. Omit to keep the stored set.
+    #[serde(default)]
+    pub modules: Option<Vec<String>>,
     #[serde(default = "default_max_unavail")]
     pub max_unavailable: i32,
     #[serde(default = "default_true")]
@@ -3374,12 +3423,44 @@ pub async fn start_cluster_upgrade(
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
     let claims = extract_claims(&headers)?;
     let ctrl = crate::controllers::UpgradeController::new(state.db_pool.clone());
-    let job = ctrl
+
+    // Back-compat: a bare `image` with no version/modules means "roll to this
+    // exact image". Translate it into a version-only request.
+    let (talos_version, modules) = match (&payload.talos_version, &payload.modules) {
+        (Some(v), m) => (Some(v.clone()), m.clone()),
+        (None, Some(m)) => (None, Some(m.clone())),
+        (None, None) => {
+            match &payload.image {
+                Some(img) if !img.trim().is_empty() => {
+                    // Legacy: derive the version from the image tag if it looks
+                    // like a plain installer ref; otherwise reject.
+                    let tag = img.rsplit(':').next().unwrap_or("");
+                    if tag.starts_with('v') || tag.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+                    {
+                        (Some(tag.to_string()), None)
+                    } else {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            "Provide talosVersion (and optionally modules/k8sVersion) — \
+                             free-text installer images are no longer accepted."
+                                .into(),
+                        ));
+                    }
+                }
+                _ => (None, None),
+            }
+        }
+    };
+
+    let (job, steps) = ctrl
         .start_cluster_upgrade(
             cluster_id,
-            &payload.image,
+            talos_version.as_deref(),
+            payload.k8s_version.as_deref(),
+            modules,
             payload.max_unavailable,
             payload.control_plane_last,
+            &state.config.factory,
             Some(claims.sub.clone()),
         )
         .await
@@ -3389,10 +3470,51 @@ pub async fn start_cluster_upgrade(
         &claims.sub,
         "cluster_upgrade_start",
         &cluster_id.to_string(),
-        &format!("job={} image={}", job.id, job.image),
+        &format!(
+            "job={} talos={:?} k8s={:?} steps={:?}",
+            job.id, job.target_talos_version, job.target_k8s_version, steps
+        ),
     )
     .await;
-    Ok((StatusCode::ACCEPTED, Json(serde_json::json!({ "job": job }))))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "job": job, "k8sSteps": steps })),
+    ))
+}
+
+/// GET /clusters/:id/upgrade-targets — dropdown data for the rolling upgrade
+/// panel: factory-buildable Talos versions + live k8s upgrade options.
+pub async fn get_upgrade_targets(
+    State(state): State<AppState>,
+    _headers: HeaderMap,
+    Path(cluster_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let cluster = crate::db::repos::cluster::get(&state.db_pool, cluster_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Cluster not found".to_string()))?;
+
+    let factory = crate::integration::image_factory::ImageFactoryClient::new(
+        &state.config.factory.normalized_base(),
+    );
+    let talos_versions = factory
+        .list_versions()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    let ctrl = crate::controllers::ClusterController::new(state.db_pool.clone());
+    let k8s_targets = ctrl
+        .k8s_upgrade_targets(cluster_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "talos": {
+            "current": cluster.talos_version,
+            "versions": talos_versions,
+        },
+        "k8s": k8s_targets,
+    })))
 }
 
 pub async fn list_cluster_upgrade_jobs(

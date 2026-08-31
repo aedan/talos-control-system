@@ -642,6 +642,15 @@ impl K8sClient {
         &self.client
     }
 
+    /// Query the API server's `/version` endpoint → gitVersion (e.g. "v1.36.3").
+    pub async fn api_server_version(&self) -> Result<String, AppError> {
+        let info = self.client.apiserver_version().await.map_err(map_kube_err)?;
+        let v = info.git_version;
+        if v.is_empty() {
+            return Err(AppError::Internal("API /version returned no gitVersion".into()));
+        }
+        Ok(v)
+    }
     // ---- discovery --------------------------------------------------------
 
     /// Resolve an arbitrary kind (e.g. "pods", "po", "deploy", "ingress", "mycrd")

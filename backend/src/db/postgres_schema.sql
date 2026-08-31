@@ -158,6 +158,10 @@ CREATE TABLE IF NOT EXISTS upgrade_jobs (
     cancel_requested INTEGER NOT NULL DEFAULT 0,
     created_by TEXT,
     error TEXT,
+    target_talos_version TEXT,
+    target_k8s_version TEXT,
+    phase TEXT NOT NULL DEFAULT 'talos',
+    steps TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -172,6 +176,10 @@ CREATE TABLE IF NOT EXISTS upgrade_job_targets (
     status TEXT NOT NULL,
     error TEXT,
     sort_order INTEGER NOT NULL DEFAULT 0,
+    image TEXT,
+    k8s_version TEXT,
+    phase TEXT NOT NULL DEFAULT 'talos',
+    completed_steps TEXT,
     updated_at TEXT NOT NULL
 );
 

@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-08-30
+
+### Added
+- **Consolidated cluster rolling upgrade** — the cluster page now has a single "Rolling upgrade" panel that derives everything: pick a **Talos version** (dropdown from the Image Factory), adjust the **module** set, and optionally pick a **Kubernetes version**. Pressing **Start rolling upgrade** queues one job that runs a per-node Talos image roll (reboots, workers-first by default) and then an in-place, no-reboot `talosctl upgrade-k8s` for the Kubernetes bump. No more free-text installer image.
+- **Kubernetes upgrade phase** — in-place, control-plane-first, no reboots. The UI dropdown lists only targets this Talos build supports (probed via `upgrade-k8s --dry-run`): a same-minor patch bump and the next minor(s). Selecting a version more than one minor ahead runs a **sequential ladder** (one minor at a time, as Kubernetes requires).
+- **Node-level module deltas** — on the machine page, add (+) or remove (−) individual modules relative to the cluster default. Effective set = cluster defaults − removes + adds, and it recomputes automatically when the cluster defaults change. A **Reset to cluster defaults** button clears a node's override. This coexists with the existing absolute "Apply modules" picker (an explicit absolute selection wins).
+- **`GET /clusters/:id/upgrade-targets`** — returns the cluster's current Talos version, available factory Talos versions, current Kubernetes version, and the supported in-place Kubernetes upgrade targets.
+- **`PUT /machines/:id/module-overrides`** — set/clear a node's add/remove deltas against its cluster default module set (`{adds, removes, reset}`).
+
+### Changed
+- `POST /clusters/:id/upgrade` now accepts `{talosVersion, k8sVersion, modules, maxUnavailable, controlPlaneLast}`. A legacy `image` (installer tag) is still accepted and translated, but the derived fields are the primary path.
+- Upgrade jobs are versioned (`upgrade_jobs`/`upgrade_job_targets` migrations) to carry the per-node derived image, the k8s target, the phase (`talos` → `k8s`), and the k8s step ladder.
+- Image Factory schematic requests are cached per (version, modules) so deriving a per-node image for a whole cluster doesn't hammer the factory API.
+
+### Fixed
+- Kubernetes "current version" detection now uses the live API-server `/version` (via the stored kubeconfig) instead of falling back to the machine's Talos version.
+- Removed invalid `--with-docs` / `--with-examples` flags from the `talosctl upgrade-k8s` invocation (the build's `upgrade-k8s` subcommand does not accept them).
+
 ## [0.5.0] — 2026-08-21
 
 ### Added
