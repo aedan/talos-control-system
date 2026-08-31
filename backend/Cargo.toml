@@ -1,6 +1,6 @@
 [package]
 name = "talos-control-system"
-version = "0.5.7"
+version = "0.5.8"
 edition = "2021"
 description = "Talos Control System - Kubernetes Management Platform"
 license = "Apache-2.0"

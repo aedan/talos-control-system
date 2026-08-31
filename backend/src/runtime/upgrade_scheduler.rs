@@ -304,16 +304,19 @@ async fn run_k8s_phase(
         }
     }
 
-    poll_k8s_step(pool, cluster_id, &step_to, &targets).await
+    poll_k8s_step(pool, sqlite_path, jwt_secret, cluster_id, &step_to, &targets).await
 }
 
 async fn poll_k8s_step(
     pool: &DbPool,
+    sqlite_path: &str,
+    jwt_secret: &str,
     cluster_id: Uuid,
     step_to: &str,
     targets: &[UpgradeJobTarget],
 ) -> Result<(), crate::AppError> {
-    let controller = ClusterController::with_context(pool.clone(), String::new(), String::new());
+    let controller =
+        ClusterController::with_context(pool.clone(), sqlite_path.to_string(), jwt_secret.to_string());
     match controller.cluster_k8s_version(cluster_id).await {
         Ok(ver) => {
             let reached = cmp_k8s_versions(&ver, step_to)

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.5.8] — 2026-08-31
+
+### Fixed
+- **In-place Kubernetes upgrade never actually ran (stuck in a dispatch retry loop).** Two independent bugs in the k8s upgrade path:
+  1. `talosctl upgrade-k8s` was invoked with the global `-e/--endpoints` flag, which talosctl v1.13+ ignores for node selection — the command failed every tick with "nodes are not set for the command" and the job retried forever without touching the cluster. Now invoked with `--nodes <bare-host>` (the endpoint is normalized to strip scheme/port, since the talosconfig supplies the port). Verified against a live Talos 1.13.7 / K8s 1.36.2 cluster: `--nodes` discovers all 15 nodes and the 1.36.2 → 1.36.4 dry-run plan succeeds.
+  2. The k8s step *poll* (`poll_k8s_step`) built its `ClusterController` with an empty `jwt_secret` (`String::new()`), so even a successfully-dispatched upgrade could never be detected as complete — it looped on "Decrypt failed — JWT secret may have changed". The poll now receives the real `sqlite_path` and `jwt_secret` from `run_k8s_phase`, matching every other scheduler.
+
 ## [0.5.7] — 2026-08-31
 
 ### Fixed

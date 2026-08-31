@@ -499,10 +499,23 @@ impl TalosctlClient {
         dry_run: bool,
         talosconfig: Option<&str>,
     ) -> Vec<String> {
+        // talosctl v1.13+ `upgrade-k8s` selects nodes via `--nodes` (bare
+        // host, no scheme/port — the talosconfig supplies the port). The old
+        // `-e/--endpoints` global flag is ignored for node selection and the
+        // command fails with "nodes are not set". Normalize to a bare host so
+        // both `IP` and `https://IP:50000` forms work.
+        let host = endpoint
+            .trim()
+            .strip_prefix("https://")
+            .or_else(|| endpoint.trim().strip_prefix("http://"))
+            .unwrap_or(endpoint.trim())
+            .split(':')
+            .next()
+            .unwrap_or(endpoint.trim());
         let mut args: Vec<String> = vec![
             "upgrade-k8s".into(),
-            "-e".into(),
-            endpoint.into(),
+            "--nodes".into(),
+            host.to_string(),
             "--from".into(),
             from.into(),
             "--to".into(),
