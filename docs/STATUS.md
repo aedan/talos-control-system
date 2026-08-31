@@ -1,6 +1,6 @@
 # TCS Status (Alpha)
 
-**Last updated:** 2026-08-20 · **Release: v0.4.5**
+**Last updated:** 2026-08-31 · **Release: v0.5.10**
 
 Talos Control System is an **alpha** management UI for Talos Linux clusters.
 It runs as a **host systemd service** (or bare binary), **outside** the managed
@@ -20,7 +20,9 @@ cluster.
 | Dashboard-centric IA | **Supported** | No sidebar; clusters + counts on home, Settings top-bar dropdown |
 | Config apply (pure-Rust COSI) | **Supported** | |
 | Etcd backup / restore / schedule | **Supported** | Leader-only when multi-replica |
-| Rolling upgrade jobs (per-cluster) | **Supported (alpha)** | Leader-elected scheduler; jobs listed on the cluster page |
+| Rolling upgrade jobs (per-cluster) | **Supported (alpha)** | Talos image roll (reboots) + optional in-place Kubernetes upgrade; max-unavailable, control-plane-last |
+| In-place Kubernetes upgrade | **Supported (alpha)** | `talosctl upgrade-k8s` (no reboots, CP first); multi-minor ladders via sequential steps; drain/uncordon of workers via stored kubeconfig |
+| Image-Factory modules | **Supported (alpha)** | Cluster-default set + per-node +/− deltas + reset-to-defaults; effective set drives the installer schematic |
 | Greenfield config factory | **Supported (alpha)** | Pure-Rust PKI + machine configs (no talosctl) |
 | **Bare-metal install assist** | **Supported (alpha)** | Disk list, set install disk, apply+reboot install, bootstrap CP |
 | **PXE + full DHCP** | **Supported (alpha)** | Dedicated provision iface; MAC allowlist; HTTP iPXE + assets |

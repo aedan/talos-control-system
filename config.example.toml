@@ -44,12 +44,19 @@ jwt_secret = "change-me-to-a-long-random-string"
 # default_role = "reader"
 
 [siderolink]
-# Not implemented in alpha (config reserved for future discovery).
+# WireGuard control-plane: manages host WG iface (tcs-sl0) and hands registering
+# nodes their tunnel peer config. Needs wireguard-tools + root for the tunnel
+# (inventory-only mode works without it). See docs/SIDEROLINK.md.
 bind_port = 8082
 listen_port = 443
 mtu = 1420
 subnet = "100.64.0.0/10"
 rate_limit_bytes = 0
+
+[factory]
+# Talos Image Factory (builds installer images bundling the module set).
+base_url = "https://factory.talos.dev"
+registry = "factory.talos.dev"
 
 [branding]
 name = "Talos Control System"

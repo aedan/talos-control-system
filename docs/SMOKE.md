@@ -10,7 +10,7 @@ Use after deploy or before a release. Requires a reachable Talos cluster and mTL
 # Password: set via TCS_DEFAULT_ADMIN_PASSWORD (empty DB only) or Users → Reset PW
 ```
 
-Open the TCS UI (e.g. `https://devstation.jakelab.info`), log in.
+Open the TCS UI (e.g. `https://tcs.example.com`), log in.
 
 ## API quick smoke (from TCS host)
 

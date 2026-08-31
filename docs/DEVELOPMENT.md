@@ -12,7 +12,7 @@
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/siderolabs/talos-control-system.git
+git clone https://github.com/aedan/talos-control-system.git
 cd talos-control-system
 ```
 
@@ -38,10 +38,13 @@ cargo run
 ```
 
 The backend starts on:
-- **gRPC**: `localhost:8080`
-- **HTTP**: `localhost:8081`
-- **Metrics**: `localhost:9090`
-- **Siderolink**: `localhost:8082`
+- **HTTP (REST + embedded Web UI)**: `localhost:8081` (`server.http_port`)
+
+That is the only listener in HTTP-only mode. With TLS enabled, TCS additionally
+binds port **80** for ACME HTTP-01 challenges and redirects to HTTPS on
+`http_port`. The `server.grpc_port` (8080) and `server.metrics_port` (9090)
+config keys are **reserved** — TCS talks to Talos nodes *outbound* over their
+`:50000` gRPC API and does not run its own gRPC/metrics listeners.
 
 ### With custom config
 
@@ -91,8 +94,7 @@ npm run dev
 
 The frontend starts on `http://localhost:5173` with:
 - Hot module replacement
-- Vite proxy to backend at `localhost:8080`
-- WebSocket proxy for SSE endpoints
+- Vite proxy for `/api` (and `/ws`) to the backend at `localhost:8081`
 
 ### Build for production
 

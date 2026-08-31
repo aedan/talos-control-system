@@ -35,7 +35,7 @@ Do **not** commit lab passwords into git.
 | `letsencrypt` | Public hostname + ports 80/443 (watch LE rate limits) |
 | `provided` | You manage cert/key files |
 
-Lab FTC currently uses **self-signed** for `devstation.jakelab.info`. Prefer that until LE rate limits clear.
+For an internal/air-gapped lab, **self-signed** is the simplest path. Reach out to your security team if you need CA-signed certs instead; `provided` mode works with any PEM pair.
 
 ## Backups
 

@@ -33,18 +33,18 @@ export TCS_SERVER_HTTP_PORT=9090
 [server]
 bind_addr = "0.0.0.0"          # Host to bind on
 advertised_url = ""            # External URL (auto-set from bind + port if empty)
-grpc_port = 8080               # gRPC server port (Talos API, machine connections)
-http_port = 8081               # REST API + Web UI port
-metrics_port = 9090            # Prometheus metrics endpoint port
+grpc_port = 8080               # Reserved (not bound) — outbound Talos uses node :50000
+http_port = 8081               # REST API + Web UI port (the listener)
+metrics_port = 9090            # Reserved (not bound)
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `bind_addr` | string | `"0.0.0.0"` | Network interface to listen on |
 | `advertised_url` | string | `""` | Public-facing URL for redirects and links |
-| `grpc_port` | u16 | `8080` | gRPC port for Talos API and siderolink |
-| `http_port` | u16 | `8081` | HTTP port for REST API and web UI |
-| `metrics_port` | u16 | `9090` | Prometheus metrics endpoint |
+| `grpc_port` | u16 | `8080` | **Reserved** — TCS has no inbound gRPC server; it dials Talos nodes' `:50000` |
+| `http_port` | u16 | `8081` | HTTP port for REST API and web UI (the only listener in HTTP-only mode; port 80 is added for ACME challenges when TLS is enabled) |
+| `metrics_port` | u16 | `9090` | **Reserved** — no metrics endpoint is currently served |
 
 ## Database Configuration
 
@@ -97,12 +97,16 @@ See [TLS.md](./TLS.md) for detailed TLS and ACME configuration.
 
 ## Siderolink Configuration
 
-Siderolink provides encrypted tunnel connectivity between Talos machines and TCS.
+Siderolink here is TCS's **WireGuard control-plane** side: it manages a host WG
+interface (default `tcs-sl0`) and hands registering Talos nodes their tunnel
+peer config (assigned CGNAT IP + server public key + `listen_port`). It is not a
+gRPC tunnel server — nodes reach TCS over UDP `bind_port`. See
+[SIDEROLINK.md](SIDEROLINK.md).
 
 ```toml
 [siderolink]
-bind_port = 8082               # Port TCS accepts siderolink connections on
-listen_port = 443               # Advertised port machines should connect to
+bind_port = 8082               # UDP port nodes reach TCS on (advertised as listen_port)
+listen_port = 443               # Advertised port for machines to connect to
 mtu = 1420                      # Maximum transmission unit
 subnet = "100.64.0.0/10"        # Carrier-grade NAT subnet for tunnel IPs
 rate_limit_bytes = 0            # Rate limit in bytes/sec (0 = unlimited)
@@ -153,6 +157,58 @@ support_url = ""                # External support link
 | `docs_url` | string | `""` | External docs link (empty = hidden) |
 | `support_url` | string | `""` | External support link (empty = hidden) |
 
+## Bare-metal (metal) Configuration
+
+Full DHCP + PXE + BMC path for provisioning bare metal. **Off by default** —
+enable it on a dedicated provisioning VLAN only. See [METAL.md](METAL.md) for the
+operator workflow and host requirements. A live overlay can also be written to
+`/var/lib/tcs/metal.toml` from the Settings UI without a process restart.
+
+```toml
+[metal]
+enabled = false                # master switch for DHCP/PXE/BMC runtimes
+
+[metal.dhcp]
+enabled = false
+interface = "eth1"             # REQUIRED when enabled — dedicated provision NIC
+bind_ip = ""                   # optional; else the interface's primary address
+subnet = "10.88.0.0/24"
+range_start = "10.88.0.100"
+range_end = "10.88.0.200"
+gateway = "10.88.0.1"
+dns = ["10.88.0.1"]
+lease_ttl_secs = 3600
+allow_unknown = false          # only inventory MACs get leases
+
+[metal.pxe]
+enabled = false
+http_port = 6969               # iPXE + asset HTTP server
+tftp_enabled = false           # serve chainloaders (undionly.kpxe/snponly.efi) over TFTP
+asset_dir = "/var/lib/tcs/pxe"
+default_talos_version = "v1.13.7"
+mirror_base = "https://github.com/siderolabs/talos/releases/download"
+extra_cmdline = ""             # extra kernel cmdline (console, earlycon, …)
+ipxe_bios_file = "undionly.kpxe"
+ipxe_uefi_file = "snponly.efi"
+
+[metal.bmc]
+connect_timeout_secs = 15
+prefer_redfish = true          # Redfish first, IPMI (ipmitool) fallback
+ipmi_interface = "lanplus"
+```
+
+## Image Factory Configuration
+
+TCS uses the [Talos Image Factory](https://factory.talos.dev) to build installer
+images that bundle the cluster's module set (system extensions). Point these at a
+self-hosted factory if the public one is unavailable.
+
+```toml
+[factory]
+base_url = "https://factory.talos.dev"  # factory API base
+registry = "factory.talos.dev"          # OCI registry host for installer images
+```
+
 ## Full Example
 
 ```toml
@@ -166,6 +222,10 @@ metrics_port = 9090
 [database]
 backend = "sqlite"
 sqlite_path = "/var/lib/tcs/data.db"
+
+[auth]
+# REQUIRED in production; prefer /etc/tcs/env TCS_AUTH_JWT_SECRET (see OPS.md)
+jwt_secret = "a-long-random-string"
 
 [tls]
 enabled = true
@@ -181,6 +241,14 @@ bind_port = 8082
 listen_port = 443
 mtu = 1420
 subnet = "100.64.0.0/10"
+
+[factory]
+base_url = "https://factory.talos.dev"
+registry = "factory.talos.dev"
+
+# Bare-metal is off by default; see METAL.md
+[metal]
+enabled = false
 
 [branding]
 name = "Acme Kubernetes"

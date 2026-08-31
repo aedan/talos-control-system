@@ -1,6 +1,6 @@
 # Talos Control System
 
-**Status: Alpha (v0.4.5)** — see [docs/STATUS.md](docs/STATUS.md) and [CHANGELOG.md](CHANGELOG.md).
+**Status: Alpha (v0.5.10)** — see [docs/STATUS.md](docs/STATUS.md) and [CHANGELOG.md](CHANGELOG.md).
 
 **Talos Control System (TCS)** is a self-hosted web UI for managing [Talos Linux](https://www.talos.dev/) clusters. Import existing clusters, inventory machines, apply config patches, take etcd snapshots, and run limited machine actions over the Talos gRPC API.
 
@@ -17,6 +17,8 @@ TCS runs **on a management host** (systemd binary). It is **not** deployed with 
 - Real etcd snapshots (download, schedule, retention, disaster-recovery restore)
 - Machine version probe, reboot, upgrade
 - **Per-cluster rolling upgrade jobs** (max-unavailable, control-plane-last)
+- **In-place Kubernetes upgrade** (no reboots, control-plane first) alongside the Talos image roll — a job can change Talos and/or Kubernetes and/or modules
+- **Cluster-default + per-node Image-Factory modules** with per-node +/− deltas and reset-to-defaults
 - Dashboard-centric UI: clusters + machine counts on the home page, Settings as a top-bar dropdown
 - Greenfield config factory + apply/bootstrap/scale helpers (metal still external)
 - Machine reset (Talos wipe) with confirm
@@ -27,7 +29,7 @@ TCS runs **on a management host** (systemd binary). It is **not** deployed with 
 ## What does **not** work yet
 
 - ~~Full bare-metal PXE/IPMI orchestration~~ → **alpha** in-tree (see [docs/METAL.md](docs/METAL.md))
-- Automatic SQLite→Postgres data migrator
+- Automatic (schema-mapped) SQLite→Postgres migrator — a one-shot row copy exists (`tcs migrate-sqlite-to-postgres`, see [docs/POSTGRES.md](docs/POSTGRES.md)) but bool/date edge cases need verification
 - In-cluster / Helm deployment (by design)
 
 ## Quick start

@@ -60,7 +60,7 @@ Click **Create token**. Copy the token immediately — it's only shown once.
 **Via API:**
 
 ```bash
-curl -X POST https://devstation.jakelab.info/api/siderolink/tokens \
+curl -X POST https://tcs.example.com/api/siderolink/tokens \
   -H "Authorization: Bearer $TCS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"label": "prod-batch-1", "expiresHours": 168}'
@@ -79,7 +79,7 @@ Add a `siderolink` section to the machine's Talos configuration
 ```yaml
 siderolink:
   enabled: true
-  endpoint: devstation.jakelab.info:8082
+  endpoint: tcs.example.com:8082
   token: abc123def456...
 ```
 
@@ -116,11 +116,11 @@ transfer bytes, and last handshake time.
 
 ```bash
 # List peers
-curl https://devstation.jakelab.info/api/siderolink/peers \
+curl https://tcs.example.com/api/siderolink/peers \
   -H "Authorization: Bearer $TCS_TOKEN"
 
 # List tokens
-curl https://devstation.jakelab.info/api/siderolink/tokens \
+curl https://tcs.example.com/api/siderolink/tokens \
   -H "Authorization: Bearer $TCS_TOKEN"
 ```
 
@@ -149,7 +149,7 @@ If you see "Siderolink WireGuard not active" instead:
 1. **DNS**: Ensure the Talos node can resolve the TCS endpoint hostname.
 2. **Firewall**: Verify UDP `bind_port` is open from the node to TCS:
    ```bash
-   nc -uvu devstation.jakelab.info 8082
+   nc -uvu tcs.example.com 8082
    ```
 3. **Token expired**: Create a new join token and re-apply the machine config.
 4. **Check WG state**: On the TCS host, `sudo wg show tcs-sl0` should show the
@@ -190,7 +190,7 @@ works (IP allocation, DB record) but the tunnel isn't created. Install
   "wireguard": {
     "enabled": true,
     "serverPublicKey": "base64serverpubkey...",
-    "endpoint": "devstation.jakelab.info:8082",
+    "endpoint": "tcs.example.com:8082",
     "listenPort": 8082,
     "allowedIps": "100.64.0.0/10",
     "persistentKeepalive": 25

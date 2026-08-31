@@ -57,10 +57,16 @@ PUT /api/machines/{id}
 | Upgrade (single machine) | `POST /api/machines/{id}/upgrade` | `{ "image": "ghcr.io/siderolabs/installer:v1.x" }` |
 | Reset / wipe machine | `POST /api/machines/{id}/reset` | `{ "confirm": true, "graceful": true, "reboot": true }` |
 | Bootstrap control plane | `POST /api/machines/{id}/bootstrap` | initial etcd formation |
-| Rolling upgrade (cluster) | `POST /api/clusters/{id}/upgrade` | `{ "image", "maxUnavailable", "controlPlaneLast" }` |
+| Rolling upgrade (cluster) | `POST /api/clusters/{id}/upgrade` | `{ "talosVersion", "k8sVersion", "modules", "maxUnavailable", "controlPlaneLast" }` (all optional; at least one required). Talos phase reboots nodes; k8s phase is in-place (no reboots, CP first). Legacy `image` is accepted only as a version-only shortcut. |
 | Scale workers (desired) | `POST /api/clusters/{id}/scale` | `{ "desiredWorkers": N }` inventory target |
 | Cluster upgrade jobs | `GET /api/clusters/{id}/upgrade-jobs` | jobs targeting this cluster |
+| Upgrade targets (probe) | `GET /api/clusters/{id}/upgrade-targets` | live Talos versions + supported in-place k8s targets (degrades gracefully) |
 | Upgrade job status | `GET /api/upgrade-jobs/{id}` | cancel via `POST /api/upgrade-jobs/{id}/cancel` |
+| Set cluster default modules | `PUT /api/clusters/{id}/modules` | `{ "modules": ["owner/name", …] }` (absolute set) |
+| Get machine modules | `GET /api/machines/{id}/modules` | effective set + cluster default + per-node deltas |
+| Set machine modules (absolute) | `PUT /api/machines/{id}/modules` | `{ "modules": ["owner/name", …] }` — full override |
+| Set machine module deltas | `PUT /api/machines/{id}/module-overrides` | `{ "adds": […], "removes": […], "reset": bool }` vs cluster default |
+| Apply machine modules | `POST /api/machines/{id}/apply-modules` | re-roll this node's image (reboot) |
 | Generate machine configs | `POST /api/clusters/generate-config` | greenfield assist (`talosctl` or stub) |
 | Apply provision config | `POST /api/provision/apply-config` | `{ "machineId", "configYaml" }` |
 | Apply config patches | `POST /api/clusters/{id}/config/apply` | optional `{ "dry_run": true }` |
