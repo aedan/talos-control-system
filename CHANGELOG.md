@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.9] — 2026-08-31
+
+### Fixed
+- **A k8s upgrade job that had already converged was stamped "cancelled" if you clicked Cancel mid-flight.** `run_job` force-cancelled on the first tick after a cancel request, *before* the phase's completion check could record the finished step — so the job showed `cancelled` even though the live API server had already rolled to the target version. The top-level cancel now only force-cancels when no target is actively `running` and the work isn't already done; an in-flight `talosctl upgrade-k8s` is allowed to finish (it can't be safely aborted mid-roll), and the phase loops stop before the next unit. Verified on kronos: a 1.36.2→1.36.4 k8s upgrade cancelled at 16:37 still completed the roll at 16:42, but the job was mislabeled `cancelled` — with this fix the status reflects the converged cluster.
+
 ## [0.5.8] — 2026-08-31
 
 ### Fixed

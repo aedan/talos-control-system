@@ -55,10 +55,30 @@ async fn run_job(
     let Some(job) = upgrade_job::get_job(pool, job_id).await? else {
         return Ok(());
     };
+    // Honor a cancel only when nothing is actively in flight. A k8s step, once
+    // dispatched, runs `talosctl upgrade-k8s` to convergence (minutes of image
+    // pre-pull + in-place roll) and can't be safely aborted mid-flight; letting
+    // it finish and then stopping is correct. Force-cancelling here unconditionally
+    // would stamp the job "cancelled" even after the cluster already converged
+    // (observed: job showed cancelled while the live API server was at the target
+    // version). When a target IS running, let the phase loops run so the in-flight
+    // unit completes; their own per-unit cancel checks (run_talos_phase /
+    // run_k8s_phase) stop it before the next unit starts.
     if job.cancel_requested {
-        upgrade_job::update_job_status(pool, job_id, "cancelled", Some("cancel requested"))
-            .await?;
-        return Ok(());
+        let targets = upgrade_job::list_targets(pool, job_id).await?;
+        let any_in_flight = targets.iter().any(|t| t.status == "running");
+        if !any_in_flight {
+            // Still give converged work a chance to be recorded complete before
+            // we overwrite the status: if the phase's completion check would
+            // already mark it done, defer to that by falling through.
+            let all_done = !targets.is_empty()
+                && targets.iter().all(|t| t.status == "completed" || t.status == "failed");
+            if !all_done {
+                upgrade_job::update_job_status(pool, job_id, "cancelled", Some("cancel requested"))
+                    .await?;
+                return Ok(());
+            }
+        }
     }
 
     match job.phase.as_str() {
