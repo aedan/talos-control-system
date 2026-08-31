@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.5] — 2026-08-31
+
+### Fixed
+- **"Start rolling upgrade" not applying a modules-only change.** The button's change detection relied on a `modulesDirty` flag that could be stale (out of sync with the cluster's stored module set), so toggling modules and clicking Start silently no-opped. It now recomputes the difference between the selected module set and the cluster's *stored* default at click time, always sends the full selected set so the backend is authoritative, and shows a clear "Nothing to change" message (with a per-item breakdown in the confirm dialog) when there is genuinely no change.
+
 ## [0.5.4] — 2026-08-31
 
 ### Changed

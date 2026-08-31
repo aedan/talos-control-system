@@ -310,7 +310,7 @@
     if (upgradeTalosVersion && upgradeTalosVersion !== currentTalos) {
       parts.push(`Talos ${currentTalos || '?'} → ${upgradeTalosVersion}`);
     }
-    if (modulesDirty) {
+    if (modulesDifferFromStored()) {
       parts.push('module set change');
     }
     if (upgradeK8sVersion) {
@@ -319,24 +319,31 @@
     return parts.length ? parts.join(' + ') : 'no change';
   }
 
+  // Compare the working module set to the cluster's *stored* default set.
+  // Returns true when the user has selected something different from what the
+  // cluster currently has — the actual "is there a module change to apply" test.
+  function modulesDifferFromStored(): boolean {
+    const cur = [...(cluster?.factoryModules || [])].sort().join('|');
+    const next = [...clusterModules].sort().join('|');
+    return cur !== next;
+  }
+
   async function startClusterUpgrade() {
-    const doingTalos =
-      (upgradeTalosVersion && upgradeTalosVersion !== currentTalos) || modulesDirty;
+    const talosChanged = !!(upgradeTalosVersion && upgradeTalosVersion !== currentTalos);
+    const moduleChanged = modulesDifferFromStored();
+    const doingTalos = talosChanged || moduleChanged;
     const doingK8s = !!upgradeK8sVersion;
     if (!doingTalos && !doingK8s) {
-      notifyError('Select a new Talos version, change modules, or pick a Kubernetes version');
+      notifyError('Nothing to change — pick a new Talos version, toggle a module, or choose a Kubernetes version.');
       return;
     }
     const msg = [
       `Start rolling upgrade: ${upgradeSummary()}?`,
       '',
-      doingTalos
-        ? '• Talos phase reboots nodes one at a time (workers first).'
-        : '',
-      doingK8s
-        ? `• Kubernetes phase applies in place, no reboots, control-plane first.` +
-          (k8sSupported.length > 1 ? '' : '')
-        : '',
+      talosChanged ? '• New Talos version selected.' : '',
+      moduleChanged ? '• Module set differs from the cluster default — the new set will be applied.' : '',
+      doingTalos ? '• Talos phase reboots nodes one at a time (workers first).' : '',
+      doingK8s ? `• Kubernetes phase applies in place, no reboots, control-plane first.` : '',
     ]
       .filter(Boolean)
       .join('\n');
@@ -344,9 +351,11 @@
     busy = true;
     try {
       const res = (await client.post(`/clusters/${cid}/upgrade`, {
+        // Always send the selected module set when a Talos-phase change is in
+        // play; the backend decides whether it actually differs from stored.
         talosVersion: doingTalos ? upgradeTalosVersion : undefined,
         k8sVersion: doingK8s ? upgradeK8sVersion : undefined,
-        modules: modulesDirty ? [...clusterModules] : undefined,
+        modules: doingTalos ? [...clusterModules] : undefined,
         maxUnavailable: upgradeMaxUnavail,
         controlPlaneLast: true,
       })) as { job?: { id: string }; k8sSteps?: string[] };
@@ -356,11 +365,13 @@
       } else {
         success(`Upgrade job queued${res.job?.id ? `: ${res.job.id}` : ''}`);
       }
-      if (modulesDirty) {
+      // Reflect the applied module set locally so the dirty flag clears.
+      if (moduleChanged) {
         cluster.factoryModules = [...clusterModules];
         modulesDirty = false;
       }
       await loadUpgradeTargets();
+      loadUpgradeJobs();
     } catch (e: unknown) {
       notifyError(e instanceof Error ? e.message : 'Failed to start cluster upgrade');
     } finally {
@@ -655,7 +666,7 @@
             size="sm"
             title="Save the cluster's default module set without starting an upgrade"
             onclick={saveClusterModules}
-            disabled={busy || !modulesDirty}
+            disabled={busy || !modulesDifferFromStored()}
           >Save modules only</Button>
           <Button
             variant="primary"
