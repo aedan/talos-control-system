@@ -3505,7 +3505,7 @@ pub async fn get_upgrade_targets(
         Err(e) => (Vec::new(), format!("Talos version list unavailable: {e}")),
     };
 
-    let ctrl = crate::controllers::ClusterController::new(state.db_pool.clone());
+    let ctrl = controller_for(&state);
     let (k8s_targets, k8s_note) = match ctrl.k8s_upgrade_targets(cluster_id).await {
         Ok(v) => (v, String::new()),
         Err(e) => (

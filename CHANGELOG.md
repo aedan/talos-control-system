@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.7] — 2026-08-31
+
+### Fixed
+- **Rolling-upgrade panel showed "Kubernetes probe skipped: Decrypt failed — JWT secret may have changed" on every cluster page.** `GET /clusters/:id/upgrade-targets` built its `ClusterController` with the pool-only `new()` constructor, which leaves `jwt_secret` empty — so decrypting the cluster's stored talosconfig/kubeconfig used a wrong AES key and always failed. It now uses the shared `controller_for(state)` helper, which passes the real `auth.jwt_secret` (and sqlite path), exactly like every other handler. The Talos-only upgrade path was unaffected (it reads the factory image, not the encrypted secrets); this restores the live k8s version + supported-target probe.
+
 ## [0.5.6] — 2026-08-31
 
 ### Fixed
