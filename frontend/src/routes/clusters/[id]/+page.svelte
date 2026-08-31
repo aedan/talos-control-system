@@ -119,7 +119,6 @@
   let upgradeTalosVersion = $state('');
   let upgradeK8sVersion = $state('');
   let upgradeMaxUnavail = $state(1);
-  let upgradeCpLast = $state(true);
   let talosVersions = $state<string[]>([]);
   let currentTalos = $state('');
   let k8sCurrent = $state('');
@@ -349,7 +348,7 @@
         k8sVersion: doingK8s ? upgradeK8sVersion : undefined,
         modules: modulesDirty ? [...clusterModules] : undefined,
         maxUnavailable: upgradeMaxUnavail,
-        controlPlaneLast: upgradeCpLast,
+        controlPlaneLast: true,
       })) as { job?: { id: string }; k8sSteps?: string[] };
       const steps = res.k8sSteps || [];
       if (steps.length > 1) {
@@ -621,10 +620,6 @@
             Max unavailable
             <input type="number" title="How many nodes may be upgraded concurrently (Talos phase)" min="1" max="20" bind:value={upgradeMaxUnavail} />
           </label>
-          <label class="check" style="align-self:end">
-            <input type="checkbox" title="Upgrade workers before control-plane nodes for safety" bind:checked={upgradeCpLast} />
-            Workers first
-          </label>
         </div>
 
         {#if factoryError}
@@ -672,6 +667,52 @@
             Start rolling upgrade{upgradeSummary() === 'no change' ? '' : ` — ${upgradeSummary()}`}
           </Button>
         </div>
+
+        <div class="upgrade-jobs">
+          <h4>Upgrade jobs</h4>
+          {#if upgradeJobsLoading && upgradeJobs.length === 0}
+            <p class="hint">Loading…</p>
+          {:else if upgradeJobs.length === 0}
+            <p class="hint">No upgrade jobs for this cluster yet.</p>
+          {:else}
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Image</th>
+                  <th>Status</th>
+                  <th>Created</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each upgradeJobs as job (job.id)}
+                  <tr>
+                    <td class="mono">{job.image || '—'}</td>
+                    <td><span class="status-badge {job.status}">{job.status}</span></td>
+                    <td>{job.createdAt || job.created_at ? new Date(job.createdAt || job.created_at || '').toLocaleString() : '—'}</td>
+                    <td>
+                      <div class="row-actions">
+                        <Button variant="ghost" size="sm" title="View the full status and progress of this upgrade job" onclick={() => openUpgradeJob(job.id)}>Details</Button>
+                        {#if job.status === 'pending' || job.status === 'running'}
+                          <Button variant="danger" size="sm" title="Request cancellation of this running upgrade job" onclick={() => cancelUpgradeJob(job.id)}>Cancel</Button>
+                        {/if}
+                      </div>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
+          {#if upgradeJobDetail}
+            <div class="job-detail">
+              <div class="job-detail-header">
+                <h4>Job {upgradeJobDetail.job?.id || upgradeJobDetail.id}</h4>
+                <Button variant="ghost" size="sm" title="Close this job detail view" onclick={() => (upgradeJobDetail = null)}>Close</Button>
+              </div>
+              <pre class="job-json">{JSON.stringify(upgradeJobDetail, null, 2)}</pre>
+            </div>
+          {/if}
+        </div>
       {/if}
     </details>
 
@@ -692,53 +733,6 @@
           {:else}
             <WorkloadsExplorer clusterId={cid ?? ''} />
           {/if}
-        </div>
-        <div class="action-block">
-          <div class="upgrade-jobs">
-            <h4>Upgrade jobs</h4>
-            {#if upgradeJobsLoading && upgradeJobs.length === 0}
-              <p class="hint">Loading…</p>
-            {:else if upgradeJobs.length === 0}
-              <p class="hint">No upgrade jobs for this cluster yet.</p>
-            {:else}
-              <table class="data-table">
-                <thead>
-                  <tr>
-                    <th>Image</th>
-                    <th>Status</th>
-                    <th>Created</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each upgradeJobs as job (job.id)}
-                    <tr>
-                      <td class="mono">{job.image || '—'}</td>
-                      <td><span class="status-badge {job.status}">{job.status}</span></td>
-                      <td>{job.createdAt || job.created_at ? new Date(job.createdAt || job.created_at || '').toLocaleString() : '—'}</td>
-                      <td>
-                        <div class="row-actions">
-                          <Button variant="ghost" size="sm" title="View the full status and progress of this upgrade job" onclick={() => openUpgradeJob(job.id)}>Details</Button>
-                          {#if job.status === 'pending' || job.status === 'running'}
-                            <Button variant="danger" size="sm" title="Request cancellation of this running upgrade job" onclick={() => cancelUpgradeJob(job.id)}>Cancel</Button>
-                          {/if}
-                        </div>
-                      </td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            {/if}
-            {#if upgradeJobDetail}
-              <div class="job-detail">
-                <div class="job-detail-header">
-                  <h4>Job {upgradeJobDetail.job?.id || upgradeJobDetail.id}</h4>
-                  <Button variant="ghost" size="sm" title="Close this job detail view" onclick={() => (upgradeJobDetail = null)}>Close</Button>
-                </div>
-                <pre class="job-json">{JSON.stringify(upgradeJobDetail, null, 2)}</pre>
-              </div>
-            {/if}
-          </div>
         </div>
       </div>
     </details>

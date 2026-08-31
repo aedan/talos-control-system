@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.5.4] — 2026-08-31
+
+### Changed
+- **Dropped the "Workers first" toggle** from the rolling-upgrade panel. Workers-first / control-plane-last is the safe ordering for Talos, so it's now always applied rather than a user option that could be flipped into a risky ordering.
+- **Moved the Upgrade jobs list into the Rolling upgrade panel** and removed it from the "Cluster actions" section (which now only holds the Kubernetes Workloads explorer). Jobs sit right under the Start button where they belong.
+
 ## [0.5.3] — 2026-08-31
 
 ### Changed
