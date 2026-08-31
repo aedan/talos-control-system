@@ -463,10 +463,16 @@ impl TalosctlClient {
     ) -> Result<(), AppError> {
         Self::ensure_installed().await?;
 
+        // --drain=false: talosctl cannot drain a worker itself — it tries to
+        // `get kubeconfig` from the target node, which only works on CP nodes
+        // ("kubeconfig is only available on control plane nodes"). The caller
+        // (upgrade scheduler) cordons + drains via the cluster's stored
+        // kubeconfig before the upgrade and uncordons after.
         let mut args: Vec<String> = vec![
             "upgrade".into(), "-e".into(), endpoint.into(), "-n".into(), endpoint.into(),
             "--image".into(), image.into(),
             "--preserve".into(),
+            "--drain=false".into(),
         ];
         args.extend(Self::talosconfig_args(talosconfig));
 

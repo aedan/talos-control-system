@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.5.6] — 2026-08-31
+
+### Fixed
+- **Rolling upgrade marked every node "failed" on a healthy upgrade.** `talosctl upgrade` was internally trying to drain each node by fetching a kubeconfig *from the worker itself*, which only works on control-plane nodes — so every worker target failed after the Talos image swap actually succeeded. Now the scheduler cordons + drains a worker via the cluster's stored kubeconfig *before* the upgrade, runs `talosctl upgrade --drain=false`, and uncordons it when the node returns. Control-plane nodes are cordoned only (never drained) so etcd/apiserver aren't evicted.
+- **"Start rolling upgrade" appeared to do nothing in Firefox/Safari/Chrome.** The handler used the native `window.confirm()`, which browser extensions can silently auto-dismiss (returning false with no dialog), so the click returned before any toast or network call. Replaced it with an in-page confirm modal that extensions cannot suppress.
+
 ## [0.5.5] — 2026-08-31
 
 ### Fixed

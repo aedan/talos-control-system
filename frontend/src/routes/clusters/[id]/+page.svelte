@@ -323,12 +323,39 @@
   // Returns true when the user has selected something different from what the
   // cluster currently has — the actual "is there a module change to apply" test.
   function modulesDifferFromStored(): boolean {
-    const cur = [...(cluster?.factoryModules || [])].sort().join('|');
-    const next = [...clusterModules].sort().join('|');
-    return cur !== next;
+    try {
+      const cur = [...(cluster?.factoryModules || [])].sort().join('|');
+      const next = [...clusterModules].sort().join('|');
+      return cur !== next;
+    } catch (e) {
+      console.error('modulesDifferFromStored failed', e);
+      return false;
+    }
   }
 
   async function startClusterUpgrade() {
+    try {
+      await _startClusterUpgrade();
+    } catch (e: unknown) {
+      console.error('startClusterUpgrade unhandled', e);
+      notifyError(e instanceof Error ? e.message : 'Failed to start cluster upgrade');
+    }
+  }
+
+  // In-page confirm (immune to browser extensions that silently auto-dismiss
+  // native window.confirm() dialogs — which made the Start button appear dead).
+  let confirmState = $state<{ message: string; resolve: (ok: boolean) => void } | null>(null);
+  function askConfirm(message: string): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      confirmState = { message, resolve };
+    });
+  }
+  function settleConfirm(ok: boolean) {
+    confirmState?.resolve(ok);
+    confirmState = null;
+  }
+
+  async function _startClusterUpgrade() {
     const talosChanged = !!(upgradeTalosVersion && upgradeTalosVersion !== currentTalos);
     const moduleChanged = modulesDifferFromStored();
     const doingTalos = talosChanged || moduleChanged;
@@ -347,7 +374,8 @@
     ]
       .filter(Boolean)
       .join('\n');
-    if (!confirm(msg)) return;
+    const ok = await askConfirm(msg);
+    if (!ok) return;
     busy = true;
     try {
       const res = (await client.post(`/clusters/${cid}/upgrade`, {
@@ -984,7 +1012,39 @@
   {/if}
 </div>
 
+{#if confirmState}
+  <div class="confirm-overlay" role="dialog" aria-modal="true">
+    <div class="confirm-box">
+      <pre class="confirm-msg">{confirmState.message}</pre>
+      <div class="confirm-actions">
+        <Button variant="ghost" size="sm" title="Cancel the rolling upgrade" onclick={() => settleConfirm(false)}>Cancel</Button>
+        <Button variant="primary" size="sm" title="Confirm and queue the rolling upgrade" onclick={() => settleConfirm(true)}>Start upgrade</Button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
+  .confirm-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000; padding: 1rem;
+  }
+  .confirm-box {
+    background: var(--tcs-surface);
+    border: 1px solid var(--tcs-border);
+    border-radius: 10px;
+    padding: 1.25rem 1.5rem;
+    max-width: 480px; width: 100%;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+  }
+  .confirm-msg {
+    margin: 0 0 1rem; white-space: pre-wrap;
+    font-family: inherit; font-size: 0.9rem; line-height: 1.5;
+    color: var(--tcs-text);
+  }
+  .confirm-actions { display: flex; gap: 0.6rem; justify-content: flex-end; }
   .cluster-detail h1 { margin: 0; }
   .header-row { display: flex; justify-content: space-between; align-items: center; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
   .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }

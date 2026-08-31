@@ -543,6 +543,71 @@ impl ClusterController {
         TalosctlClient::upgrade(&machine.address, image.trim(), tc.as_deref()).await
     }
 
+    /// Cordon + drain a machine's Kubernetes node (by its hostname, which is
+    /// the k8s node name) using the cluster's stored kubeconfig. Best-effort:
+    /// if there's no kubeconfig or the node isn't in k8s, it's skipped — the
+    /// Talos upgrade still proceeds (talosctl is called with --drain=false).
+    ///
+    /// Control-plane nodes are cordoned but NOT drained: a full drain of a CP
+    /// node would evict etcd/apiserver/scheduler pods and take the cluster down.
+    /// Workers are fully drained (force) so their workloads move before reboot.
+    /// Returns the node name if it was drained/cordoned, else None.
+    pub async fn drain_machine_for_upgrade(&self, machine_id: Uuid) -> Result<Option<String>, AppError> {
+        let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
+        let Some(enc) = &cluster.kubeconfig else {
+            return Ok(None);
+        };
+        let plain = self.dec(enc)?;
+        let Ok(k8s) = crate::integration::kubernetes::K8sClient::from_kubeconfig_yaml(&plain).await else {
+            return Ok(None);
+        };
+        let node_name = machine.hostname.trim();
+        if node_name.is_empty() {
+            return Ok(None);
+        }
+        // Only act if the node actually exists in k8s.
+        let api = kube::Api::<k8s_openapi::api::core::v1::Node>::all(k8s.raw().clone());
+        if api.get(node_name).await.is_err() {
+            tracing::debug!(node = %node_name, "node not in k8s; skipping drain");
+            return Ok(None);
+        }
+        let is_cp = is_control_plane(&machine.machine_type);
+        if is_cp {
+            k8s.cordon(node_name).await?;
+        } else {            let res = k8s.drain(node_name, true).await?;
+            if !res.errors.is_empty() {
+                // Uncordon so we don't leave the node unschedulable on failure.
+                let _ = k8s.uncordon(node_name).await;
+                return Err(AppError::Internal(format!(
+                    "drain of {node_name} had errors: {}",
+                    res.errors.join("; ")
+                )));
+            }
+        }
+        Ok(Some(node_name.to_string()))
+    }
+
+    /// Uncordon a machine's Kubernetes node after its upgrade completes.
+    pub async fn uncordon_machine(&self, machine_id: Uuid) -> Result<(), AppError> {
+        let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
+        let Some(enc) = &cluster.kubeconfig else {
+            return Ok(());
+        };
+        let plain = self.dec(enc)?;
+        let Ok(k8s) = crate::integration::kubernetes::K8sClient::from_kubeconfig_yaml(&plain).await else {
+            return Ok(());
+        };
+        let node_name = machine.hostname.trim();
+        if node_name.is_empty() {
+            return Ok(());
+        }
+        // Uncordon is best-effort; a missing node is not an error.
+        if k8s.uncordon(node_name).await.is_err() {
+            tracing::warn!(node = %node_name, "uncordon failed (node may still be booting)");
+        }
+        Ok(())
+    }
+
     /// Run `talosctl upgrade-k8s` against one control-plane endpoint. The
     /// command discovers the rest of the cluster itself, pre-pulls images, and
     /// patches every node's machineconfig — entirely in place, no reboots.
@@ -1127,6 +1192,11 @@ impl ClusterController {
             "effective": self.effective_modules(machine_id).await?,
         }))
     }
+}
+
+fn is_control_plane(machine_type: &str) -> bool {
+    let t = machine_type.to_ascii_lowercase();
+    t == "control-plane" || t == "controlplane"
 }
 
 fn parse_cluster_modules(cluster: &Cluster) -> Vec<String> {

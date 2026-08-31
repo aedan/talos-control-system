@@ -109,9 +109,21 @@ async fn run_talos_phase(
             let image = t.image.clone().unwrap_or_else(|| job.image.clone());
             let controller =
                 ClusterController::with_context(pool.clone(), sqlite_path.to_string(), jwt_secret.to_string());
+            // Cordon + drain this node's k8s workload first (via the stored
+            // kubeconfig), so talosctl upgrade --drain=false can't fail trying
+            // to fetch a kubeconfig from a worker.
+            match controller.drain_machine_for_upgrade(t.machine_id).await {
+                Ok(Some(node)) => info!(machine = %t.machine_id, node, "drained node before upgrade"),
+                Ok(None) => {}
+                Err(e) => {
+                    upgrade_job::update_target_status(pool, t.id, "failed", Some(&format!("drain failed: {e}"))).await?;
+                    continue;
+                }
+            }
             match controller.upgrade_machine(t.machine_id, &image).await {
                 Ok(()) => info!(machine = %t.machine_id, image, "Talos upgrade initiated"),
                 Err(e) => {
+                    let _ = controller.uncordon_machine(t.machine_id).await;
                     upgrade_job::update_target_status(pool, t.id, "failed", Some(&e.to_string()))
                         .await?;
                 }
@@ -143,6 +155,8 @@ async fn poll_talos_target(
             let got_n = norm_v(&ver);
             if got_n == want_n || got_n.contains(&want_n) || want_n.contains(&got_n) {
                 upgrade_job::update_target_status(pool, t.id, "completed", None).await?;
+                // Node is back — return it to the scheduler.
+                let _ = controller.uncordon_machine(t.machine_id).await;
                 if let Ok(Some(mut m)) = repos::machine::get(pool, t.machine_id).await {
                     m.talos_version = ver;
                     m.updated_at = chrono::Utc::now();
