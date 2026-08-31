@@ -344,20 +344,29 @@ fn rewrite_placeholders(sql: &str) -> String {
 
 fn split_sql_statements(script: &str) -> Vec<String> {
     // Our migrations don't embed `;` inside strings in complex ways.
-    // Strip full-line `--` comments so a header comment cannot swallow the
-    // following CREATE TABLE in the same `;`-separated chunk.
-    script
-        .split(';')
-        .map(|chunk| {
-            chunk
-                .lines()
-                .filter(|l| {
-                    let t = l.trim();
-                    !t.is_empty() && !t.starts_with("--")
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
+    //
+    // CRITICAL: strip `--` line comments *before* splitting on `;`. A naive
+    // split-on-`;` first would break a comment line that contains a semicolon
+    // (e.g. `-- phase A; then B`) into a chunk whose remainder no longer starts
+    // with `--`, leaking comment text in as a bogus "statement" and failing the
+    // migration with a syntax error.
+    let without_comments = script
+        .lines()
+        .map(|line| {
+            // Only treat `--` as a comment start when it is at the beginning of
+            // the trimmed line (our DDL never has inline `--` after SQL).
+            let t = line.trim_start();
+            if t.starts_with("--") {
+                ""
+            } else {
+                line
+            }
         })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    without_comments
+        .split(';')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
@@ -371,4 +380,28 @@ pub fn sqlite_ddl_to_postgres(sql: &str) -> String {
     s = s.replace("datetime('now')", "NOW()");
     // SQLite BOOLEAN affinity often stored as INTEGER — keep INTEGER for compatibility
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_sql_statements;
+
+    #[test]
+    fn comment_with_semicolon_does_not_leak() {
+        // Regression: a `;` inside a `--` comment used to split the comment and
+        // leak its remainder in as a bogus statement ("near a: syntax error").
+        let sql = "-- lifecycle: phase A; then phase B\nALTER TABLE t ADD COLUMN x TEXT;\nALTER TABLE t ADD COLUMN y TEXT;";
+        let stmts = split_sql_statements(sql);
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].starts_with("ALTER TABLE t ADD COLUMN x TEXT"));
+        assert!(stmts[1].starts_with("ALTER TABLE t ADD COLUMN y TEXT"));
+        assert!(!stmts.iter().any(|s| s.contains("lifecycle")));
+    }
+
+    #[test]
+    fn plain_statements_split() {
+        let sql = "CREATE TABLE a (id TEXT);\nINSERT INTO a VALUES ('1');";
+        let stmts = split_sql_statements(sql);
+        assert_eq!(stmts.len(), 2);
+    }
 }
