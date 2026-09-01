@@ -580,12 +580,46 @@ fn machine_to_json(machine: &crate::db::models::machine::Machine) -> Result<serd
     Ok(v)
 }
 
+/// Same as `machine_to_json` but also resolves the machine's **effective
+/// management endpoint** (Siderolink tunnel IP when connected + fresh, else the
+/// LAN address) and its Siderolink-assigned IP, so the UI can show *how* TCS is
+/// reaching the node. Async because it looks the peer up in the DB.
+async fn machine_to_json_with_endpoint(
+    pool: &crate::db::pool::DbPool,
+    machine: &crate::db::models::machine::Machine,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut v = machine_to_json(machine)?;
+    if let Some(obj) = v.as_object_mut() {
+        let endpoint = crate::controllers::cluster::effective_endpoint(pool, machine)
+            .await
+            .unwrap_or_else(|_| machine.address.clone());
+        obj.insert(
+            "effectiveEndpoint".to_string(),
+            serde_json::Value::String(endpoint.clone()),
+        );
+        let via_tunnel = !machine.address.is_empty() && endpoint != machine.address;
+        obj.insert(
+            "viaSiderolink".to_string(),
+            serde_json::Value::Bool(via_tunnel),
+        );
+        if let Ok(Some(peer)) =
+            crate::db::repos::siderolink::find_by_uuid(pool, &machine.system_uuid).await
+        {
+            obj.insert(
+                "siderolinkIp".to_string(),
+                serde_json::Value::String(peer.assigned_ip),
+            );
+        }
+    }
+    Ok(v)
+}
+
 pub async fn get_machine(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     match repos::machine::get(&state.db_pool, id).await {
-        Ok(Some(machine)) => match machine_to_json(&machine) {
+        Ok(Some(machine)) => match machine_to_json_with_endpoint(&state.db_pool, &machine).await {
             Ok(v) => Ok(Json(v)),
             Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
         },

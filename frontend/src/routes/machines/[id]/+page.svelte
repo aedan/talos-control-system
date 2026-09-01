@@ -781,6 +781,20 @@
         <div class="info-row"><span class="label">System UUID</span><span class="value mono">{machine.systemUuid}</span></div>
         <div class="info-row"><span class="label">Status</span><span class="value">{machine.status}</span></div>
         <div class="info-row"><span class="label">Talos</span><span class="value">{machine.talosVersion || '—'}</span></div>
+        <div class="info-row">
+          <span class="label">Management path</span>
+          {#if machine.viaSiderolink}
+            <span class="value">
+              <span class="badge tunnel" title="TCS reaches this node through its Siderolink WireGuard tunnel (NAT/firewall safe), not the LAN address">via Siderolink tunnel</span>
+              <span class="value mono">{machine.effectiveEndpoint || machine.siderolinkIp || '—'}</span>
+            </span>
+          {:else}
+            <span class="value" title="TCS reaches this node directly at its LAN/inventory address">
+              <span class="badge lan">direct</span>
+              <span class="value mono">{machine.effectiveEndpoint || machine.address || '—'}</span>
+            </span>
+          {/if}
+        </div>
         <div class="info-row"><span class="label">Created</span><span class="value">{machine.createdAt ? new Date(machine.createdAt).toLocaleString() : '—'}</span></div>
         <div class="form-row">
           <label>Hostname<input type="text" title="Node hostname as it appears in Talos" bind:value={editHostname} placeholder="cp-1" /></label>
@@ -1454,6 +1468,17 @@ cluster:
   }
   .label { color: var(--tcs-text-muted); }
   .mono { font-family: ui-monospace, monospace; font-size: 0.8rem; word-break: break-all; }
+  .value { display: inline-flex; align-items: center; gap: 0.5rem; }
+  .badge {
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 0.1rem 0.45rem;
+    border-radius: 10px;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+  .badge.tunnel { background: rgba(34, 197, 94, 0.15); color: var(--tcs-secondary); border: 1px solid rgba(34, 197, 94, 0.4); }
+  .badge.lan { background: var(--tcs-surface); color: var(--tcs-text-muted); border: 1px solid var(--tcs-border); }
   .form-row {
     display: flex;
     flex-wrap: wrap;

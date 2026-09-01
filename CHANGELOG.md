@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.5.14] — 2026-08-31
+
+### Added
+- **Siderolink-based remote management.** When a node is Siderolink-connected, TCS now reaches it through its **WireGuard tunnel IP** (`100.64.x.x`) for *every* management operation instead of (or in preference to) its LAN address — the only path that works for nodes behind NAT/firewalls. Wired through: version probe, reboot, upgrade (Talos + in-place k8s, including the rolling-upgrade scheduler's CP pick), config read/apply (single + batch + merge-with-live), reset, bootstrap, disks, extensions, and the background status reconciler. The tunnel IP is used only while the peer is fresh (last seen < 5 min); a dropped tunnel automatically falls back to the LAN address.
+- **Machine page "Management path" indicator** — a green `via Siderolink tunnel` badge (with the tunnel IP) or a `direct` badge (with the LAN address) shows exactly how TCS is reaching that node. The machine API now returns `effectiveEndpoint`, `viaSiderolink`, and `siderolinkIp`.
+- New unit test `effective_endpoint_prefers_fresh_siderolink_tunnel` covering tunnel-preferred / stale-fallback / not-connected cases.
+
+### Documentation
+- `docs/SIDEROLINK.md`: added "How TCS uses the tunnel for management", "Enabling the tunnel on a TCS host (opt-in)" (install `wireguard-tools`, config, firewall, restart, verify), and a "Known limitation" note that join tokens are one-time-use so Siderolink is configured per node manually (auto-baking into generated configs is a follow-up needing a per-cluster token model).
+
 ## [0.5.13] — 2026-08-31
 
 ### Changed

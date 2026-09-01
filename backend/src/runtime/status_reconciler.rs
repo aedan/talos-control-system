@@ -213,7 +213,13 @@ async fn probe_and_update(
         None => None,
     };
 
-    let version = TalosctlClient::get_version(&machine.address, talosconfig.as_deref()).await;
+    let version = {
+        // Prefer the Siderolink tunnel IP when connected; else the LAN address.
+        let endpoint = crate::controllers::cluster::effective_endpoint(pool, &machine)
+            .await
+            .unwrap_or_else(|_| machine.address.clone());
+        TalosctlClient::get_version(&endpoint, talosconfig.as_deref()).await
+    };
 
     let mut updated = machine;
     match version {

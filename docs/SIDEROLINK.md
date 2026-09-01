@@ -49,6 +49,40 @@ must be allowed:
 sudo ufw allow 8082/udp
 ```
 
+## How TCS uses the tunnel for management
+
+When a machine is Siderolink-connected, **every TCS management operation for that
+machine is routed through its tunnel IP** (`100.64.x.x`), not its LAN address. This
+is the "prefer tunnel when connected" policy: version probe, reboot, upgrade
+(including in-place k8s), config read/apply, reset, bootstrap, and the background
+status reconciler all resolve the node's *effective endpoint* first. The machine
+page shows this under **Management path** — a green `via Siderolink tunnel` badge
+with the tunnel IP, or a `direct` badge with the LAN address.
+
+The tunnel IP is used only while the peer is **fresh** (last seen within ~5
+minutes). If a node's tunnel drops, TCS automatically falls back to the LAN
+address instead of sending traffic to a dead IP.
+
+## Enabling the tunnel on a TCS host (opt-in)
+
+Siderolink is dormant by default. To give TCS a live tunnel it can manage NAT'd
+nodes through:
+
+1. Install `wireguard-tools` on the TCS host:
+   ```bash
+   sudo apt-get install -y wireguard-tools
+   ```
+2. (Optional) add a `[siderolink]` section to `/etc/tcs/config.toml` — defaults
+   (`bind_port = 8082`, `subnet = "100.64.0.0/10"`) are fine for most setups.
+3. Open UDP `bind_port` to your nodes (`sudo ufw allow 8082/udp`).
+4. Restart TCS: `sudo systemctl restart tcs`.
+   - Confirm the interface came up: `sudo wg show tcs-sl0`
+5. Create a join token (Settings → Siderolink, or `POST /api/siderolink/tokens`).
+6. Put the `siderolink:` block (below) into the node's Talos config so it dials in.
+
+Until a node registers via Siderolink, all nodes are managed by direct LAN
+routing and none of this changes behavior.
+
 ## Creating join tokens
 
 Join tokens are one-time-use credentials that machines use to register with TCS.
@@ -197,3 +231,15 @@ works (IP allocation, DB record) but the tunnel isn't created. Install
   }
 }
 ```
+
+## Known limitation: joining is manual, not auto-baked
+
+TCS does **not** yet automatically emit the `siderolink:` block into generated
+greenfield machine configs. Join tokens are one-time-use and short-lived by
+design, so auto-baking them into every generated config would need a distinct
+token model (e.g. a per-cluster persistent token with rotation) that isn't
+built yet. Until then, configure Siderolink per node manually as described above.
+
+This does **not** affect the management path: once a node has a tunnel, TCS uses
+it for all operations automatically (see "How TCS uses the tunnel for
+management").

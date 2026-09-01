@@ -60,6 +60,13 @@ impl ClusterController {
         }
     }
 
+    /// Effective endpoint to reach `machine` with talosctl. Delegates to the
+    /// free function [`effective_endpoint`] (see its docs for the tunnel-vs-LAN
+    /// preference order).
+    async fn effective_endpoint(&self, machine: &Machine) -> Result<String, AppError> {
+        effective_endpoint(&self.pool, machine).await
+    }
+
     pub async fn import_cluster(
         &self,
         name: String,
@@ -280,19 +287,20 @@ impl ClusterController {
         let machines = crate::db::repos::machine::list_by_cluster(&self.pool, cluster_id).await?;
         let mut results = Vec::new();
         for m in machines {
-            if m.address.is_empty() {
+            let endpoint = self.effective_endpoint(&m).await.unwrap_or_else(|_| m.address.clone());
+            if endpoint.is_empty() {
                 continue;
             }
-            match TalosctlClient::get_version(&m.address, tc.as_deref()).await {
+            match TalosctlClient::get_version(&endpoint, tc.as_deref()).await {
                 Ok(v) => results.push(serde_json::json!({
                     "machineId": m.id,
-                    "address": m.address,
+                    "address": endpoint,
                     "ok": true,
                     "talosVersion": v,
                 })),
                 Err(e) => results.push(serde_json::json!({
                     "machineId": m.id,
-                    "address": m.address,
+                    "address": endpoint,
                     "ok": false,
                     "error": e.to_string(),
                 })),
@@ -447,12 +455,18 @@ impl ClusterController {
             .map(|(machine, patch_preview)| {
                 let tc = tc.clone();
                 async move {
+                    // Prefer the Siderolink tunnel IP when this machine is
+                    // connected + fresh; else the LAN address.
+                    let endpoint = self
+                        .effective_endpoint(&machine)
+                        .await
+                        .unwrap_or_else(|_| machine.address.clone());
                     let document = serde_json::json!({
                         "machineId": machine.id,
-                        "address": machine.address,
+                        "address": endpoint,
                         "patchPreview": patch_preview,
                     });
-                    if machine.address.is_empty() {
+                    if endpoint.is_empty() {
                         return (
                             document,
                             Err(format!("{}: no address", machine.system_uuid)),
@@ -460,7 +474,7 @@ impl ClusterController {
                     }
 
                     // Get live config, merge patch, apply
-                    match TalosctlClient::get_machine_config(&machine.address, tc.as_deref()).await {
+                    match TalosctlClient::get_machine_config(&endpoint, tc.as_deref()).await {
                         Ok(live) => {
                             let merged = match merge_yaml_docs_into_machine_config(&live, &patch_preview) {
                                 Ok(m) => m,
@@ -472,7 +486,7 @@ impl ClusterController {
                                 }
                             };
                             match TalosctlClient::apply_config(
-                                &machine.address, &merged, false, dry_run, tc.as_deref(),
+                                &endpoint, &merged, false, dry_run, tc.as_deref(),
                             ).await {
                                 Ok(()) => {
                                     let tag = if dry_run { "dry-run" } else { "applied" };
@@ -480,7 +494,7 @@ impl ClusterController {
                                         document,
                                         Ok(format!(
                                             "{} {} ({})",
-                                            machine.system_uuid, tag, machine.address
+                                            machine.system_uuid, tag, endpoint
                                         )),
                                     )
                                 }
@@ -531,7 +545,8 @@ impl ClusterController {
     pub async fn reboot_machine(&self, machine_id: Uuid) -> Result<(), AppError> {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
         let tc = self.talosconfig_yaml(&cluster)?;
-        TalosctlClient::reboot(&machine.address, tc.as_deref()).await
+        let endpoint = self.effective_endpoint(&machine).await?;
+        TalosctlClient::reboot(&endpoint, tc.as_deref()).await
     }
 
     pub async fn upgrade_machine(&self, machine_id: Uuid, image: &str) -> Result<(), AppError> {
@@ -540,7 +555,8 @@ impl ClusterController {
         }
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
         let tc = self.talosconfig_yaml(&cluster)?;
-        TalosctlClient::upgrade(&machine.address, image.trim(), tc.as_deref()).await
+        let endpoint = self.effective_endpoint(&machine).await?;
+        TalosctlClient::upgrade(&endpoint, image.trim(), tc.as_deref()).await
     }
 
     /// Cordon + drain a machine's Kubernetes node (by its hostname, which is
@@ -651,7 +667,8 @@ impl ClusterController {
     ) -> Result<(), AppError> {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
         let tc = self.talosconfig_yaml(&cluster)?;
-        TalosctlClient::reset(&machine.address, graceful, reboot, tc.as_deref()).await?;
+        let endpoint = self.effective_endpoint(&machine).await?;
+        TalosctlClient::reset(&endpoint, graceful, reboot, tc.as_deref()).await?;
         let mut m = machine;
         m.status = "resetting".to_string();
         m.updated_at = chrono::Utc::now();
@@ -667,7 +684,8 @@ impl ClusterController {
             ));
         }
         let tc = self.talosconfig_yaml(&cluster)?;
-        TalosctlClient::bootstrap(&machine.address, tc.as_deref()).await?;
+        let endpoint = self.effective_endpoint(&machine).await?;
+        TalosctlClient::bootstrap(&endpoint, tc.as_deref()).await?;
         let mut m = machine;
         m.status = "running".to_string();
         m.updated_at = chrono::Utc::now();
@@ -686,7 +704,8 @@ impl ClusterController {
         } else {
             let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
             let tc = self.talosconfig_yaml(&cluster)?;
-            TalosctlClient::list_disks_postinstall(&machine.address, tc.as_deref()).await
+            let endpoint = self.effective_endpoint(&machine).await?;
+            TalosctlClient::list_disks_postinstall(&endpoint, tc.as_deref()).await
         }
     }
 
@@ -748,14 +767,16 @@ impl ClusterController {
     ) -> Result<(), AppError> {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
         let tc = self.talosconfig_yaml(&cluster)?;
-        TalosctlClient::apply_config(&machine.address, config_yaml, false, false, tc.as_deref()).await
+        let endpoint = self.effective_endpoint(&machine).await?;
+        TalosctlClient::apply_config(&endpoint, config_yaml, false, false, tc.as_deref()).await
     }
 
     /// Fetch live machine config from the node (requires address + talosconfig).
     pub async fn get_live_machine_config(&self, machine_id: Uuid) -> Result<String, AppError> {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
         let tc = self.talosconfig_yaml(&cluster)?;
-        TalosctlClient::get_machine_config(&machine.address, tc.as_deref()).await
+        let endpoint = self.effective_endpoint(&machine).await?;
+        TalosctlClient::get_machine_config(&endpoint, tc.as_deref()).await
     }
 
     /// Desired (saved) config YAML for a machine, if any.
@@ -824,13 +845,15 @@ impl ClusterController {
         if merge_with_live {
             let (cluster, m) = self.cluster_and_machine(machine_id).await?;
             let tc = self.talosconfig_yaml(&cluster)?;
-            let live = TalosctlClient::get_machine_config(&m.address, tc.as_deref()).await?;
+            let endpoint = self.effective_endpoint(&m).await?;
+            let live = TalosctlClient::get_machine_config(&endpoint, tc.as_deref()).await?;
             yaml = merge_yaml_docs_into_machine_config(&live, &yaml)?;
         }
 
         let (cluster, m) = self.cluster_and_machine(machine_id).await?;
         let tc = self.talosconfig_yaml(&cluster)?;
-        TalosctlClient::apply_config(&m.address, &yaml, reboot, dry_run, tc.as_deref()).await?;
+        let endpoint = self.effective_endpoint(&m).await?;
+        TalosctlClient::apply_config(&endpoint, &yaml, reboot, dry_run, tc.as_deref()).await?;
 
         if !dry_run {
             // Keep desired in sync with what we applied
@@ -927,7 +950,8 @@ impl ClusterController {
     pub async fn machine_version(&self, machine_id: Uuid) -> Result<String, AppError> {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
         let tc = self.talosconfig_yaml(&cluster)?;
-        let version = TalosctlClient::get_version(&machine.address, tc.as_deref()).await?;
+        let endpoint = self.effective_endpoint(&machine).await?;
+        let version = TalosctlClient::get_version(&endpoint, tc.as_deref()).await?;
         let mut m = machine;
         m.talos_version = version.clone();
         m.updated_at = chrono::Utc::now();
@@ -964,20 +988,23 @@ impl ClusterController {
     ) -> Result<Vec<serde_json::Value>, AppError> {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
         let tc = self.talosconfig_yaml(&cluster)?;
-        TalosctlClient::service_list(&machine.address, tc.as_deref()).await
+        let endpoint = self.effective_endpoint(&machine).await?;
+        TalosctlClient::service_list(&endpoint, tc.as_deref()).await
     }
 
     pub async fn machine_hostname(&self, machine_id: Uuid) -> Result<String, AppError> {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
         let tc = self.talosconfig_yaml(&cluster)?;
-        TalosctlClient::hostname(&machine.address, tc.as_deref()).await
+        let endpoint = self.effective_endpoint(&machine).await?;
+        TalosctlClient::hostname(&endpoint, tc.as_deref()).await
     }
 
     /// The node's installed/upgradable Talos versions (raw `talosctl get versions` JSON).
     pub async fn machine_versions(&self, machine_id: Uuid) -> Result<serde_json::Value, AppError> {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
         let tc = self.talosconfig_yaml(&cluster)?;
-        TalosctlClient::get_versions(&machine.address, tc.as_deref()).await
+        let endpoint = self.effective_endpoint(&machine).await?;
+        TalosctlClient::get_versions(&endpoint, tc.as_deref()).await
     }
 
     /// The node's installed Talos extensions (modules).
@@ -987,7 +1014,8 @@ impl ClusterController {
     ) -> Result<Vec<crate::integration::talosctl::MachineExtension>, AppError> {
         let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
         let tc = self.talosconfig_yaml(&cluster)?;
-        TalosctlClient::list_extensions(&machine.address, tc.as_deref()).await
+        let endpoint = self.effective_endpoint(&machine).await?;
+        TalosctlClient::list_extensions(&endpoint, tc.as_deref()).await
     }
 
     /// Live Kubernetes upgrade options for a cluster: current version plus the
@@ -1257,7 +1285,8 @@ impl ClusterController {
         let image = factory.installer_image(&schematic, &cluster.talos_version);
 
         // talosctl upgrade --image <factory installer> --preserve (reboots the node).
-        TalosctlClient::upgrade(&machine.address, &image, tc.as_deref()).await?;
+        let endpoint = self.effective_endpoint(&machine).await?;
+        TalosctlClient::upgrade(&endpoint, &image, tc.as_deref()).await?;
 
         Ok(serde_json::json!({
             "ok": true,
@@ -1594,6 +1623,35 @@ pub fn inject_install_disk(config_yaml: &str, disk: &str) -> String {
     config_yaml.to_string()
 }
 
+/// Effective endpoint to reach `machine` with talosctl.
+///
+/// Preference order (per operator decision "prefer tunnel when connected"):
+/// 1. The machine's **Siderolink tunnel IP** (from `siderolink_peers`, keyed by
+///    `system_uuid`) — used when the machine is flagged `siderolink_connected`
+///    AND its peer `last_seen` is fresh (within 5 minutes). This is the only
+///    path that reaches nodes behind NAT/firewalls.
+/// 2. The machine's **LAN `address`** from inventory (direct routing).
+///
+/// Free function so non-controller callers (e.g. the status reconciler) can
+/// reuse it. Returns the chosen IP; an empty string means neither path is
+/// available and will surface as a talosctl connection error.
+pub async fn effective_endpoint(
+    pool: &crate::db::pool::DbPool,
+    machine: &Machine,
+) -> Result<String, AppError> {
+    if machine.siderolink_connected {
+        if let Some(peer) =
+            crate::db::repos::siderolink::find_by_uuid(pool, &machine.system_uuid).await?
+        {
+            let fresh = peer.last_seen > chrono::Utc::now() - chrono::Duration::minutes(5);
+            if fresh && !peer.assigned_ip.is_empty() {
+                return Ok(peer.assigned_ip.clone());
+            }
+        }
+    }
+    Ok(machine.address.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1645,5 +1703,64 @@ mod tests {
         );
         assert!(merged.contains("bond0"));
         assert!(merged.contains("clusterName: demo") || merged.contains("clusterName:demo"));
+    }
+
+    #[tokio::test]
+    async fn effective_endpoint_prefers_fresh_siderolink_tunnel() {
+        use crate::config::{DatabaseBackend, DatabaseConfig};
+        use crate::db::pool::{connect, DbPool};
+        use crate::db::repos::siderolink::{self, SiderolinkPeer};
+        use chrono::{Duration, Utc};
+
+        // Fresh temp SQLite DB + migrations.
+        let path = std::env::temp_dir().join(format!("tcs-eff-ep-{}.db", Uuid::new_v4().simple()));
+        let _ = std::fs::remove_file(&path);
+        let cfg = DatabaseConfig {
+            backend: DatabaseBackend::Sqlite,
+            sqlite_path: path.to_string_lossy().into(),
+            postgres_url: String::new(),
+            max_connections: 1,
+            connection_timeout: 5,
+        };
+        let pool: DbPool = connect(&cfg).await.expect("connect");
+        crate::db::run_migrations(&pool).await.expect("migrate");
+
+        let mut m = Machine::new("uuid-abc-123".into(), "worker".into());
+        m.address = "192.168.1.50".into();
+        m.siderolink_connected = true;
+
+        // (3) No peer registered yet → falls back to LAN address.
+        assert_eq!(effective_endpoint(&pool, &m).await.unwrap(), "192.168.1.50");
+
+        // (1) Peer registered with a fresh last_seen → tunnel IP wins.
+        let peer = SiderolinkPeer {
+            id: Uuid::new_v4(),
+            system_uuid: "uuid-abc-123".into(),
+            public_key: "pubkey".into(),
+            assigned_ip: "100.64.0.7".into(),
+            last_seen: Utc::now(),
+            created_at: Utc::now(),
+        };
+        siderolink::upsert_peer(&pool, &peer).await.unwrap();
+        assert_eq!(effective_endpoint(&pool, &m).await.unwrap(), "100.64.0.7");
+
+        // (2) Stale peer (last seen 10 min ago > 5 min window) → back to LAN.
+        let stale = SiderolinkPeer {
+            id: peer.id,
+            system_uuid: peer.system_uuid.clone(),
+            public_key: peer.public_key.clone(),
+            assigned_ip: peer.assigned_ip.clone(),
+            last_seen: Utc::now() - Duration::minutes(10),
+            created_at: peer.created_at,
+        };
+        siderolink::upsert_peer(&pool, &stale).await.unwrap();
+        assert_eq!(effective_endpoint(&pool, &m).await.unwrap(), "192.168.1.50");
+
+        // Not connected at all → LAN even with a fresh peer present.
+        m.siderolink_connected = false;
+        siderolink::upsert_peer(&pool, &peer).await.unwrap();
+        assert_eq!(effective_endpoint(&pool, &m).await.unwrap(), "192.168.1.50");
+
+        let _ = std::fs::remove_file(&path);
     }
 }

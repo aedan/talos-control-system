@@ -37,6 +37,9 @@ export interface Machine {
   bmcType?: string;
   lastPowerState?: string;
   hasBmc?: boolean;
+  effectiveEndpoint?: string;
+  viaSiderolink?: boolean;
+  siderolinkIp?: string;
   createdAt: string;
   updatedAt: string;
 }

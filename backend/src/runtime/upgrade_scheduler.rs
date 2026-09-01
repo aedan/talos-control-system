@@ -302,7 +302,7 @@ async fn run_k8s_phase(
         }
         let controller =
             ClusterController::with_context(pool.clone(), sqlite_path.to_string(), jwt_secret.to_string());
-        let Some((cp_addr,)) = pick_control_plane_address(&targets).await else {
+        let Some((cp_addr,)) = pick_control_plane_address(pool, &targets).await else {
             return Err(crate::AppError::InvalidInput(
                 "k8s phase: no control-plane machine address available".into(),
             ));
@@ -390,7 +390,10 @@ fn completed_steps(t: &UpgradeJobTarget) -> Vec<String> {
         .unwrap_or_default()
 }
 
-async fn pick_control_plane_address(targets: &[UpgradeJobTarget]) -> Option<(String,)> {
+async fn pick_control_plane_address(
+    pool: &DbPool,
+    targets: &[UpgradeJobTarget],
+) -> Option<(String,)> {
     let cp = targets
         .iter()
         .find(|t| {
@@ -401,13 +404,23 @@ async fn pick_control_plane_address(targets: &[UpgradeJobTarget]) -> Option<(Str
                     .as_str(),
             )
         })
-        .or_else(|| targets.first());
-    cp.and_then(|t| {
-        t.address
-            .clone()
-            .filter(|a| !a.trim().is_empty())
-            .map(|a| (a,))
-    })
+        .or_else(|| targets.first())?;
+
+    // Resolve the CP node's effective endpoint: prefer its Siderolink tunnel IP
+    // when connected, else the LAN address recorded on the target. This lets a
+    // remote k8s upgrade run against a NAT'd control plane through the tunnel.
+    if let Ok(Some(machine)) = repos::machine::get(pool, cp.machine_id).await {
+        let endpoint = crate::controllers::cluster::effective_endpoint(pool, &machine)
+            .await
+            .unwrap_or_else(|_| machine.address.clone());
+        if !endpoint.trim().is_empty() {
+            return Some((endpoint,));
+        }
+    }
+    cp.address
+        .clone()
+        .filter(|a| !a.trim().is_empty())
+        .map(|a| (a,))
 }
 
 async fn cancel_requested(pool: &DbPool, job_id: Uuid) -> Result<bool, crate::AppError> {
