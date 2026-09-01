@@ -71,7 +71,8 @@
       </div>
       <div class="info-card">
         <h3>Server</h3>
-        <div class="info-row"><span class="label">Bind</span><span class="value mono">{info.serverBindAddr}:{info.httpPort}</span></div>
+        <div class="info-row"><span class="label">Bind</span><span class="value mono">{info.serverBindAddr}</span></div>
+        <div class="info-row"><span class="label">Ports</span><span class="value mono">80 (HTTP→redirect) · 443 (HTTPS)</span></div>
       </div>
       {#if info.features}
         <div class="info-card wide">

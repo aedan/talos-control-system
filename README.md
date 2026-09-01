@@ -40,9 +40,13 @@ TCS runs **on a management host** (systemd binary). It is **not** deployed with 
 cd frontend && npm install && npm run build && cd ..
 export TCS_ALLOW_INSECURE=1
 export TCS_DEFAULT_ADMIN_PASSWORD=admin
-cd backend && cargo run
+export TCS_HTTPS_PORT=0 TCS_HTTP_PORT=8081   # non-root dev: skip :443/:80
+cd backend && cargo run -- serve
 # Open http://localhost:8081  →  admin@tcs.local / admin
 ```
+
+> Shipped binaries always bind **:443 (HTTPS)** + **:80 (redirect)**; the dev
+> port overrides above are only for running without root.
 
 **Production:** set `TCS_AUTH_JWT_SECRET` (never ship the default secret).
 

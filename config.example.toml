@@ -2,11 +2,12 @@
 # Copy to config.toml. Env vars with prefix TCS_ override (e.g. TCS_SERVER_HTTP_PORT).
 
 [server]
+# TCS always listens on :80 (HTTP → redirect / ACME) and :443 (HTTPS).
+# There is no separate http_port — 80/443 are the only listeners.
 bind_addr = "0.0.0.0"
-advertised_url = ""
-grpc_port = 8080          # reserved; outbound Talos uses node :50000
-http_port = 8081
-metrics_port = 9090
+advertised_url = ""          # e.g. "https://tcs.example.com" — used for Siderolink + cert SAN
+grpc_port = 8080             # reserved; outbound Talos uses node :50000
+metrics_port = 9090          # reserved
 
 [database]
 # "sqlite" (default) or "postgres" (alpha, dual-backend runtime)
@@ -74,10 +75,12 @@ favicon_path = ""
 docs_url = ""
 support_url = ""
 
-# TLS — disabled by default (HTTP-only on http_port)
+# TLS — TCS always serves :443. With no [tls] (or mode="disabled") it
+# auto-generates a self-signed cert so HTTPS works immediately. Pick a mode for
+# a real cert: self_signed, provided (your own PEMs), or letsencrypt.
 # [tls]
 # enabled = true
-# mode = "disabled"  # disabled | self_signed | provided | letsencrypt
+# mode = "self_signed"  # disabled | self_signed | provided | letsencrypt
 #
 # [tls.letsencrypt]
 # domains = ["tcs.example.com"]

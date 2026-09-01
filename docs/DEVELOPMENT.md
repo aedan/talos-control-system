@@ -34,17 +34,18 @@ npm install
 
 ```bash
 cd backend
-cargo run
+TCS_HTTPS_PORT=0 TCS_HTTP_PORT=8081 cargo run -- serve
 ```
 
-The backend starts on:
-- **HTTP (REST + embedded Web UI)**: `localhost:8081` (`server.http_port`)
-
-That is the only listener in HTTP-only mode. With TLS enabled, TCS additionally
-binds port **80** for ACME HTTP-01 challenges and redirects to HTTPS on
-`http_port`. The `server.grpc_port` (8080) and `server.metrics_port` (9090)
-config keys are **reserved** — TCS talks to Talos nodes *outbound* over their
-`:50000` gRPC API and does not run its own gRPC/metrics listeners.
+The backend starts on **HTTP `localhost:8081`** for development. In dev you run
+without root, so the privileged :443/:80 listeners are disabled via
+`TCS_HTTPS_PORT=0` and the plain HTTP port is set with `TCS_HTTP_PORT=8081` (the
+HTTP listener serves the real app when HTTPS is off). Shipped binaries ignore
+those vars and always bind **:443 (HTTPS)** + **:80 (HTTP → redirect)** — there
+is no `http_port` listener in production. `server.grpc_port` (8080) and
+`server.metrics_port` (9090) are **reserved** — TCS talks to Talos nodes
+*outbound* over their `:50000` gRPC API and does not run its own
+gRPC/metrics listeners.
 
 ### With custom config
 

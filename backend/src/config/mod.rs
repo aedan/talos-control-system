@@ -85,7 +85,7 @@ impl Config {
         let mut result = config.try_deserialize::<Config>()?;
 
         if result.server.advertised_url.is_empty() {
-            result.server.advertised_url = format!("http://localhost:{}", result.server.http_port);
+            result.server.advertised_url = "https://localhost:443".to_string();
         }
 
         Ok(result)

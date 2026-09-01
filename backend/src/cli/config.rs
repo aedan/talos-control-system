@@ -87,13 +87,13 @@ impl CliConfig {
             return Some(url.to_string());
         }
 
-        // Otherwise, if the server binds a concrete IP, target it on the http port.
+        // Otherwise, if the server binds a concrete IP, target it on :443 (TCS
+        // always serves HTTPS on 443; there is no separate http_port listener).
         let bind = server.get("bind_addr").and_then(|v| v.as_str()).unwrap_or("0.0.0.0");
         if bind == "0.0.0.0" || bind.is_empty() {
             return None;
         }
-        let port = server.get("http_port").and_then(|v| v.as_integer()).unwrap_or(8081);
-        Some(format!("http://{}:{}", bind, port))
+        Some(format!("https://{}:443", bind))
     }
 
     /// Resolve the bearer token (flags > env > config).

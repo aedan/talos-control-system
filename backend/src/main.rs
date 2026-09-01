@@ -344,9 +344,9 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 
 /// Always-on server: binds :443 (HTTPS, via a live-reloadable cert) and :80
-/// (HTTP: ACME challenges + redirect-to-HTTPS, or serves the app directly when
-/// no valid cert is present), plus the configured `http_port` if it's set and
-/// distinct from 80 (backward compat).
+/// (HTTP: ACME challenges + redirect-to-HTTPS). TCS only ever listens on 80 and
+/// 443 — there is no separate `http_port` listener (alpha: no backward-compat
+/// escape hatch needed).
 ///
 /// A `TlsRuntime` always exists so enabling/switching certs from the UI works
 /// live from any starting mode (including "disabled", which falls back to a
@@ -381,62 +381,68 @@ async fn run_server_all(
     // The app we serve (same router as before; branding applied).
     let rest_app = create_rest_router(state.clone(), &config.branding);
 
-    // :443 — HTTPS with live-reloadable cert.
-    let https_addr: SocketAddr = format!("{bind}:443").parse()?;
+    // Listener ports. Default :443 (HTTPS) + :80 (HTTP). Overridable for
+    // non-root dev (`TCS_HTTPS_PORT=8443 TCS_HTTP_PORT=8081 cargo run`); set
+    // either to 0 to skip that listener entirely.
+    let https_port: u16 = std::env::var("TCS_HTTPS_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(443);
+    let http_port: u16 = std::env::var("TCS_HTTP_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(80);
+
+    // HTTPS with live-reloadable cert.
     let rustls_config = tls_runtime.rustls_config();
     let https_app = rest_app.clone();
-    let https_handle = tokio::spawn(async move {
-        info!(addr = %https_addr, "Starting HTTPS server (:443, live cert reload)");
-        if let Err(e) = axum_server::bind_rustls(https_addr, rustls_config)
-            .serve(https_app.into_make_service())
-            .await
-        {
-            error!(error = %e, "HTTPS server error");
-        }
-    });
-
-    // :80 — HTTP: ACME challenges + redirect-to-HTTPS (the redirect is what
-    // browsers follow; ACME validation paths bypass it).
-    let http_addr: SocketAddr = format!("{bind}:80").parse()?;
-    let http_app = build_http_redirect_router(acme_store.clone());
-    let http_handle = tokio::spawn(async move {
-        info!(addr = %http_addr, "Starting HTTP server (:80, ACME + HTTPS redirect)");
-        match tokio::net::TcpListener::bind(http_addr).await {
-            Ok(listener) => {
-                if let Err(e) = axum::serve(listener, http_app).await {
-                    error!(error = %e, "HTTP server error");
-                }
-            }
-            Err(e) => {
-                // :80 may be held by another process (e.g. an existing web
-                // server). Not fatal: ACME HTTP-01 won't work, but :443 and the
-                // app on http_port still do. Self-signed/provided/LE-DNS certs
-                // don't need :80.
-                error!(error = %e, "Could not bind :80 — continuing without HTTP listener (ACME HTTP-01 unavailable)");
-            }
-        }
-    });
-
-    // Optional legacy http_port listener (backward compat; e.g. kronos on 8081).
-    // Only bind if it's configured and distinct from :80. Bind failures here are
-    // non-fatal (logged) so a taken port can't take down the whole server.
-    let http_port = config.server.http_port;
-    let legacy_handle = if http_port != 80 {
-        let legacy_addr: SocketAddr = format!("{bind}:{http_port}").parse().expect("valid http_port");
-        let legacy_app = rest_app.clone();
+    let https_handle = if https_port == 0 {
+        info!("TCS_HTTPS_PORT=0 — skipping HTTPS listener");
+        None
+    } else {
+        let https_addr: SocketAddr = format!("{bind}:{https_port}").parse()?;
         Some(tokio::spawn(async move {
-            info!(addr = %legacy_addr, "Starting legacy HTTP listener (http_port)");
-            match tokio::net::TcpListener::bind(legacy_addr).await {
-                Ok(listener) => {
-                    if let Err(e) = axum::serve(listener, legacy_app).await {
-                        error!(error = %e, "legacy http_port listener error");
-                    }
-                }
-                Err(e) => error!(error = %e, "could not bind legacy http_port; continuing"),
+            info!(addr = %https_addr, "Starting HTTPS server (live cert reload)");
+            if let Err(e) = axum_server::bind_rustls(https_addr, rustls_config)
+                .serve(https_app.into_make_service())
+                .await
+            {
+                error!(error = %e, "HTTPS server error");
             }
         }))
+    };
+
+    // HTTP listener. When HTTPS is the primary path it serves ACME + a
+    // redirect-to-HTTPS (browsers follow the redirect). When HTTPS is disabled
+    // (non-root dev: `TCS_HTTPS_PORT=0`) it serves the real app directly so the
+    // UI/API work on a plain high port.
+    let serve_app_on_http = https_port == 0;
+    let http_app = if serve_app_on_http {
+        rest_app.clone()
     } else {
+        build_http_redirect_router(acme_store.clone())
+    };
+    let http_handle = if http_port == 0 {
+        info!("TCS_HTTP_PORT=0 — skipping HTTP listener");
         None
+    } else {
+        let http_addr: SocketAddr = format!("{bind}:{http_port}").parse()?;
+        Some(tokio::spawn(async move {
+            info!(addr = %http_addr, "Starting HTTP server (ACME + redirect, or app in dev)");
+            match tokio::net::TcpListener::bind(http_addr).await {
+                Ok(listener) => {
+                    if let Err(e) = axum::serve(listener, http_app).await {
+                        error!(error = %e, "HTTP server error");
+                    }
+                }
+                Err(e) => {
+                    // :80 may be held by another process. Not fatal: ACME HTTP-01
+                    // won't work, but :443 does. Self-signed/provided/LE-DNS certs
+                    // don't need :80.
+                    error!(error = %e, "Could not bind HTTP port — continuing without it (ACME HTTP-01 unavailable)");
+                }
+            }
+        }))
     };
 
     // Certificate renewal task (LE).
@@ -452,21 +458,31 @@ async fn run_server_all(
     });
 
     let signals = run_signal_handlers();
+    // A skipped (None) listener must not trip the select! — make it a future
+    // that only resolves on shutdown, not instantly.
+    type ListenerFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+    let mut https_done: ListenerFut = if let Some(h) = https_handle {
+        Box::pin(async move { let _ = h.await; })
+    } else {
+        Box::pin(std::future::pending())
+    };
+    let mut http_done: ListenerFut = if let Some(h) = http_handle {
+        Box::pin(async move { let _ = h.await; })
+    } else {
+        Box::pin(std::future::pending())
+    };
     tokio::select! {
         res = signals => {
             info!("Shutdown signal received: {}", res);
         }
-        _ = https_handle => {
+        _ = &mut https_done => {
             info!("HTTPS server exited");
         }
-        _ = http_handle => {
+        _ = &mut http_done => {
             info!("HTTP server exited");
         }
         _ = renewal_handle => {
             info!("Certificate renewal task exited");
-        }
-        _ = (async { if let Some(h) = legacy_handle { h.await; } }) => {
-            info!("Legacy http_port listener exited");
         }
     }
 

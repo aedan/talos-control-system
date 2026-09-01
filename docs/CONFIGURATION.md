@@ -21,10 +21,10 @@ All config keys are available as environment variables with the `TCS_` prefix an
 
 ```bash
 # Equivalent to:
-# [server]
-# http_port = 9090
+# [tls]
+# mode = "self_signed"
 
-export TCS_SERVER_HTTP_PORT=9090
+export TCS_TLS_MODE=self_signed
 ```
 
 ## Server Configuration
@@ -32,19 +32,26 @@ export TCS_SERVER_HTTP_PORT=9090
 ```toml
 [server]
 bind_addr = "0.0.0.0"          # Host to bind on
-advertised_url = ""            # External URL (auto-set from bind + port if empty)
+advertised_url = ""            # External URL (used for Siderolink + cert SAN; defaults to https://localhost:443)
 grpc_port = 8080               # Reserved (not bound) — outbound Talos uses node :50000
-http_port = 8081               # REST API + Web UI port (the listener)
 metrics_port = 9090            # Reserved (not bound)
 ```
+
+TCS always listens on **:80 (HTTP → redirect to HTTPS / ACME challenges)** and
+**:443 (HTTPS)**. There is no separate `http_port` listener. For non-root
+development, override the bind ports with `TCS_HTTPS_PORT` (0 disables) and
+`TCS_HTTP_PORT`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `bind_addr` | string | `"0.0.0.0"` | Network interface to listen on |
-| `advertised_url` | string | `""` | Public-facing URL for redirects and links |
+| `advertised_url` | string | `""` | Public-facing URL (Siderolink endpoint + cert SAN); defaults to `https://localhost:443` |
 | `grpc_port` | u16 | `8080` | **Reserved** — TCS has no inbound gRPC server; it dials Talos nodes' `:50000` |
-| `http_port` | u16 | `8081` | HTTP port for REST API and web UI (the only listener in HTTP-only mode; port 80 is added for ACME challenges when TLS is enabled) |
 | `metrics_port` | u16 | `9090` | **Reserved** — no metrics endpoint is currently served |
+
+> TCS always binds **:443 (HTTPS)** and **:80 (HTTP → redirect/ACME)**. There is
+> no `http_port` listener. Dev-only env overrides: `TCS_HTTPS_PORT` (0 disables)
+> and `TCS_HTTP_PORT`.
 
 ## Database Configuration
 
@@ -216,7 +223,6 @@ registry = "factory.talos.dev"          # OCI registry host for installer images
 bind_addr = "0.0.0.0"
 advertised_url = "https://tcs.example.com"
 grpc_port = 8080
-http_port = 8081
 metrics_port = 9090
 
 [database]

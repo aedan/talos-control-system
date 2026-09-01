@@ -1,6 +1,6 @@
 # TLS Configuration
 
-TCS supports four TLS modes for securing the HTTP server. When TLS is enabled, TCS listens on the configured `http_port` with HTTPS. When using Let's Encrypt with HTTP-01 challenges, an additional listener is opened on port 80 for ACME validation.
+TCS **always** listens on **:443 (HTTPS)** and **:80 (HTTP → redirect / ACME challenges)** — there is no `http_port` listener. A TLS "mode" only decides *which certificate* serves :443: a fresh install with no `[tls]` (or `mode = "disabled"`) auto-generates a **self-signed** cert so HTTPS works immediately, and you can switch to a real cert later **live** (no restart) via Settings → Certificates.
 
 ## TLS Modes
 
@@ -141,13 +141,14 @@ sudo systemctl restart tcs
 
 ## Firewall Requirements
 
+TCS always needs **443 (HTTPS)**. It also opens **80 (HTTP)** for the redirect and, when using Let's Encrypt HTTP-01, for ACME validation.
+
 | Mode | Ports Required |
 |------|---------------|
-| `disabled` | `http_port` (default 8081) |
-| `letsencrypt` (http-01) | 80 (ACME) + `http_port` |
-| `letsencrypt` (dns-01) | `http_port` only |
-| `self-signed` | `http_port` |
-| `provided` | `http_port` |
+| `disabled` / self-signed | 443 + 80 (self-signed :443) |
+| `letsencrypt` (http-01) | 443 + 80 (ACME) |
+| `letsencrypt` (dns-01) | 443 + 80 (redirect; 80 optional) |
+| `provided` | 443 + 80 |
 
 ## Troubleshooting
 
@@ -171,7 +172,7 @@ journalctl -u tcs --since "1 day ago" | grep -i "renew\|cert\|acme"
 Force a manual renewal by toggling the certificate settings via the API:
 
 ```bash
-curl -X POST http://localhost:8081/api/settings/certificates/renew \
+curl -k -X POST https://localhost:443/api/settings/certificates/renew \
   -H "Authorization: Bearer $TOKEN"
 ```
 

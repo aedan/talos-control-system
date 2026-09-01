@@ -2,7 +2,15 @@
 
 ## [Unreleased]
 
-## [0.5.15] — 2026-08-31
+## [0.5.16] — 2026-08-31
+
+### Changed
+- **Removed the legacy `http_port` (8081) listener.** TCS is alpha with a single live deployment, so the backward-compat 8081 listener added in v0.5.15 is gone. Shipped binaries now bind **only :80 (HTTP → redirect/ACME) and :443 (HTTPS)** — no more `http_port`. `server.http_port` in config is ignored; `advertised_url` defaults to `https://localhost:443` when unset; the CLI's local server discovery now targets `https://<bind>:443`.
+- **Non-root dev support.** New env overrides `TCS_HTTPS_PORT` (0 disables the :443 listener) and `TCS_HTTP_PORT` let `cargo run -- serve` bind plain high ports without root (dev: `TCS_HTTPS_PORT=0 TCS_HTTP_PORT=8081 cargo run -- serve`). When HTTPS is disabled, the HTTP listener serves the real app (not the redirect router), so the Vite dev proxy keeps working. A skipped listener no longer trips the shutdown `select!`.
+- System Settings page now shows **Ports: 80 (HTTP→redirect) · 443 (HTTPS)** instead of a stale `bind:8081`.
+
+### Documentation
+- `docs/{CONFIGURATION,TLS,DEVELOPMENT}.md` + `README.md` + `config.example.toml`: removed all `http_port`/8081 production references; documented the always-on 80/443 model and the dev port overrides.
 
 ### Changed
 - **TCS now always listens on 80 + 443, with or without a certificate.** Previously a TLS-disabled install only bound `http_port` (8081) and could not be switched to HTTPS without a restart; a TLS-enabled install hard-bound :443 but only served it. Now every install:
