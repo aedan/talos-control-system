@@ -818,17 +818,6 @@
       </div>
 
       <div class="info-section">
-        <h2>Talos ops</h2>
-        <p class="muted-hint">
-          Single-node image upgrades are driven by <strong>Image &amp; modules</strong> below
-          (the factory image for this node's effective module set). Cluster-wide rolling
-          upgrades live on the cluster page. Per-node network and mounts — and the rare
-          factory/custom <code>machine.install.image</code> — live in the
-          <strong>Machine config</strong> section further below.
-        </p>
-      </div>
-
-      <div class="info-section">
         <h2>Image &amp; modules</h2>
         <div class="info-row">
           <span class="label">Running version</span>

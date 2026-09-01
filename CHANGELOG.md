@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.11] — 2026-08-31
+
+### Changed
+- **Machine page: removed the "Talos ops" filler header.** A section that was only a heading + a paragraph pointing at the "Image & modules" and "Machine config" sections below it — which already label themselves — took ~1/4 of the screen for zero information. Gone. The page now flows straight into the actionable content.
+
 ## [0.5.10] — 2026-08-31
 
 ### Changed
