@@ -95,6 +95,15 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
             "/siderolink/tokens",
             get(handlers::list_siderolink_tokens).post(handlers::create_siderolink_token),
         )
+        .route("/siderolink/cluster-token", get(handlers::get_cluster_siderolink_token))
+        .route(
+            "/siderolink/cluster-token/rotate",
+            post(handlers::rotate_cluster_siderolink_token),
+        )
+        .route(
+            "/siderolink/cluster-token/revoke",
+            post(handlers::revoke_cluster_siderolink_token),
+        )
         .route("/clusters/:id", get(handlers::get_cluster))
         .route("/clusters/:id", put(handlers::update_cluster))
         .route("/clusters/:id", delete(handlers::delete_cluster))

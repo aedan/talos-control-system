@@ -108,10 +108,20 @@ pub async fn validate_token(pool: &DbPool, token: &str) -> Result<bool, AppError
             &[SqlVal::text(token)],
         )
         .await?;
-    Ok(match row {
-        None => false,
-        Some(t) => t.expires_at.map(|e| e > Utc::now()).unwrap_or(true),
-    })
+    if let Some(t) = row {
+        let ok = t.expires_at.map(|e| e > Utc::now()).unwrap_or(true);
+        if ok {
+            return Ok(true);
+        }
+    }
+    // Persistent per-cluster token (auto-baked into generated configs).
+    let n = pool
+        .fetch_scalar_i64(
+            "SELECT COUNT(*) FROM cluster_siderolink_tokens WHERE token = ?",
+            &[SqlVal::text(token)],
+        )
+        .await?;
+    Ok(n > 0)
 }
 
 pub async fn delete_token(pool: &DbPool, token: &str) -> Result<(), AppError> {
@@ -136,6 +146,52 @@ pub async fn delete_peer(pool: &DbPool, id: Uuid) -> Result<(), AppError> {
     pool.execute(
         "DELETE FROM siderolink_peers WHERE id = ?",
         &[SqlVal::Uuid(id)],
+    )
+    .await?;
+    Ok(())
+}
+
+// ── Persistent per-cluster Siderolink token ──────────────────────────
+
+pub async fn get_cluster_token(
+    pool: &DbPool,
+    cluster_id: Uuid,
+) -> Result<Option<String>, AppError> {
+    let row: Option<(String,)> = pool
+        .fetch_optional_as(
+            "SELECT token FROM cluster_siderolink_tokens WHERE cluster_id = ?",
+            &[SqlVal::Uuid(cluster_id)],
+        )
+        .await?;
+    Ok(row.map(|r| r.0))
+}
+
+/// Create-or-rotate the persistent token for a cluster. Returns the (new) token.
+pub async fn set_cluster_token(
+    pool: &DbPool,
+    cluster_id: Uuid,
+    token: &str,
+) -> Result<(), AppError> {
+    let now = Utc::now().to_rfc3339();
+    pool.execute(
+        "INSERT INTO cluster_siderolink_tokens (cluster_id, token, created_at, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(cluster_id) DO UPDATE SET token = excluded.token, updated_at = excluded.updated_at",
+        &[
+            SqlVal::Uuid(cluster_id),
+            SqlVal::text(token),
+            SqlVal::text(&now),
+            SqlVal::text(&now),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn revoke_cluster_token(pool: &DbPool, cluster_id: Uuid) -> Result<(), AppError> {
+    pool.execute(
+        "DELETE FROM cluster_siderolink_tokens WHERE cluster_id = ?",
+        &[SqlVal::Uuid(cluster_id)],
     )
     .await?;
     Ok(())

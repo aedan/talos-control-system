@@ -60,12 +60,40 @@ impl ClusterController {
         }
     }
 
-    /// Effective endpoint to reach `machine` with talosctl. Delegates to the
-    /// free function [`effective_endpoint`] (see its docs for the tunnel-vs-LAN
-    /// preference order).
+/// Effective endpoint to reach `machine` with talosctl. Delegates to the
+/// free function [`effective_endpoint`] (see its docs for the tunnel-vs-LAN
+/// preference order).
     async fn effective_endpoint(&self, machine: &Machine) -> Result<String, AppError> {
         effective_endpoint(&self.pool, machine).await
     }
+
+    /// Return the cluster's persistent Siderolink token, creating one if absent.
+    pub async fn ensure_cluster_siderolink_token(&self, cluster_id: Uuid) -> Result<String, AppError> {
+        if let Some(existing) =
+            crate::db::repos::siderolink::get_cluster_token(&self.pool, cluster_id).await?
+        {
+            return Ok(existing);
+        }
+        let token = format!("slc_{}", Uuid::new_v4().simple());
+        crate::db::repos::siderolink::set_cluster_token(&self.pool, cluster_id, &token)
+            .await?;
+        Ok(token)
+    }
+
+    /// Rotate the cluster's persistent Siderolink token. Returns the new token.
+    pub async fn rotate_cluster_siderolink_token(&self, cluster_id: Uuid) -> Result<String, AppError> {
+        let token = format!("slc_{}", Uuid::new_v4().simple());
+        crate::db::repos::siderolink::set_cluster_token(&self.pool, cluster_id, &token)
+            .await?;
+        Ok(token)
+    }
+
+    /// Revoke the cluster's persistent Siderolink token (nodes must be
+    /// re-provisioned with a new one).
+    pub async fn revoke_cluster_siderolink_token(&self, cluster_id: Uuid) -> Result<(), AppError> {
+        crate::db::repos::siderolink::revoke_cluster_token(&self.pool, cluster_id).await
+    }
+
 
     pub async fn import_cluster(
         &self,

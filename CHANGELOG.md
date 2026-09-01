@@ -2,7 +2,25 @@
 
 ## [Unreleased]
 
-## [0.5.14] — 2026-08-31
+## [0.5.15] — 2026-08-31
+
+### Changed
+- **TCS now always listens on 80 + 443, with or without a certificate.** Previously a TLS-disabled install only bound `http_port` (8081) and could not be switched to HTTPS without a restart; a TLS-enabled install hard-bound :443 but only served it. Now every install:
+  - binds **:443 (HTTPS)** — always. If no usable certificate exists it generates a self-signed one at startup, so HTTPS works immediately out of the box;
+  - binds **:80 (HTTP)** — always, serving ACME challenges and redirecting everything else to :443;
+  - keeps the legacy **`http_port` (8081)** listener as a backward-compat escape hatch, and still starts even if :80 is taken by something else.
+- **Self-signed is the default for fresh installs.** A new `[tls]` section with `mode = "disabled"` (or no cert) now boots HTTPS on a generated self-signed certificate rather than dropping to HTTP-only — so the UI/API are reachable over `https://<host>:` from day one. Existing installs keep working (their 8081 listener is preserved).
+- Certificate reload is now fully live: enabling/updating TLS from a non-TLS process no longer requires a restart — the `:443` rustls config hot-swaps the new certificate via `ReloadableCertResolver`.
+
+### Added
+- **Siderolink auto-bake for greenfield configs.** New persistent **per-cluster join tokens** (`cluster_siderolink_tokens`, migration 019). When you generate machine configs for a cluster (Provision wizard / generate-config API), the `machine.siderolink { enabled, endpoint, token }` block is now spliced into both the controlplane and worker configs automatically, so provisioned nodes dial in and form the WireGuard tunnel on first boot — no manual per-node config. Resolves the known limitation called out in v0.5.14.
+- **Siderolink per-cluster token management** — `GET /api/siderolink/cluster-token?cluster_id=…`, `POST …/rotate`, `POST …/revoke` (admin), plus a new "Per-cluster tokens" card on the Siderolink settings page (pick a cluster, create/rotate/revoke, copy a ready-to-paste `machine.siderolink` snippet).
+- Join-token validation now also accepts the persistent per-cluster tokens, so auto-baked configs register cleanly.
+- Unit tests: `siderolink_block_splices_into_machine_valid_yaml` + `empty_siderolink_block_yields_no_siderolink_key` (90 backend tests pass).
+
+### Notes
+- The metal-scheduler (PXEl+BMC) greenfield path omits the Siderolink block for now; the wizard/generate-config path is the primary one. Threading it through the metal scheduler is a small follow-up.
+
 
 ### Added
 - **Siderolink-based remote management.** When a node is Siderolink-connected, TCS now reaches it through its **WireGuard tunnel IP** (`100.64.x.x`) for *every* management operation instead of (or in preference to) its LAN address — the only path that works for nodes behind NAT/firewalls. Wired through: version probe, reboot, upgrade (Talos + in-place k8s, including the rolling-upgrade scheduler's CP pick), config read/apply (single + batch + merge-with-live), reset, bootstrap, disks, extensions, and the background status reconciler. The tunnel IP is used only while the peer is fresh (last seen < 5 min); a dropped tunnel automatically falls back to the LAN address.

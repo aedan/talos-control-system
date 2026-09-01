@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 
 use talos_control_system::api::rest::create_rest_router;
 use talos_control_system::branding::BrandingManager;
-use talos_control_system::config::{Config, TlsMode};
+use talos_control_system::config::Config;
 use talos_control_system::db::{init_pool, run_migrations};
 use talos_control_system::runtime::cache::AppCache;
 use talos_control_system::runtime::event::EventBus;
@@ -288,7 +288,6 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let event_bus = Arc::new(EventBus::new());
     let app_cache = AppCache::new();
 
-    let tls_enabled = config.tls.enabled && config.tls.mode != TlsMode::Disabled;
     let acme_store: AcmeChallengeStore = Arc::new(DashMap::new());
 
     // Metal runtime: merge /var/lib/tcs/metal.toml overlay, own DHCP/PXE tasks
@@ -336,63 +335,36 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config.auth.jwt_secret.clone(),
     );
 
-    if tls_enabled {
-        run_with_tls(config, state, acme_store).await
-    } else {
-        run_without_tls(config, state).await
-    }
+    let _status_sched = talos_control_system::runtime::spawn_status_reconciler(
+        db_pool.clone(),
+        config.auth.jwt_secret.clone(),
+    );
+
+    run_server_all(config, state, acme_store).await
 }
 
-async fn run_with_tls(
+/// Always-on server: binds :443 (HTTPS, via a live-reloadable cert) and :80
+/// (HTTP: ACME challenges + redirect-to-HTTPS, or serves the app directly when
+/// no valid cert is present), plus the configured `http_port` if it's set and
+/// distinct from 80 (backward compat).
+///
+/// A `TlsRuntime` always exists so enabling/switching certs from the UI works
+/// live from any starting mode (including "disabled", which falls back to a
+/// generated self-signed cert so :443 is reachable immediately).
+async fn run_server_all(
     config: Config,
     mut state: AppState,
     acme_store: AcmeChallengeStore,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Start HTTP server FIRST (required for ACME HTTP-01 challenge validation)
-    let http_addr: SocketAddr = format!("{}:80", config.server.bind_addr).parse()?;
-    let http_app = build_http_redirect_router(acme_store.clone());
-    let http_listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
-    info!(
-        addr = %http_addr,
-        "Starting HTTP server (ACME challenges + HTTPS redirect)"
-    );
-    let http_handle = tokio::spawn(async move {
-        if let Err(e) = axum::serve(http_listener, http_app).await {
-            error!(error = %e, "HTTP server error");
-        }
-    });
-
-    // Now obtain certificate (HTTP challenge endpoint is live)
-    let (cert_pem, key_pem) = if config.tls.mode == TlsMode::LetsEncrypt {
-        if let Some(le) = &config.tls.letsencrypt {
-            match talos_control_system::cert::acme::obtain_http01_certificate(
-                &le.domains,
-                &le.email,
-                &acme_store,
-            )
-            .await
-            {
-                Ok((cert, key)) => {
-                    info!("Let's Encrypt certificate obtained successfully");
-                    (cert, key)
-                }
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        "Let's Encrypt issuance failed, falling back to self-signed certificate"
-                    );
-                    talos_control_system::cert::self_signed::generate_self_signed(&le.domains).await?
-                }
-            }
-        } else {
-            warn!("Let's Encrypt mode selected but not configured, falling back to self-signed");
-            talos_control_system::cert::self_signed::generate_self_signed(&["localhost".to_string()]).await?
-        }
-    } else {
-        load_certificates_from_config(&config.tls).await?
-    };
-
+    let bind = config.server.bind_addr.clone();
     let data_dir = std::env::var("TCS_DATA_DIR").unwrap_or_else(|_| "/var/lib/tcs".into());
+
+    // Resolve the initial certificate. Let's Encrypt is best-effort (needs
+    // :80 reachable from the internet); on failure fall back to self-signed so
+    // the HTTPS listener is always up. "disabled" also falls back to
+    // self-signed.
+    let (cert_pem, key_pem, initial_note) = resolve_initial_certificate(&config, &acme_store).await?;
+    info!(%initial_note, "Initial TLS certificate ready");
 
     let tls_runtime = Arc::new(
         talos_control_system::cert::TlsRuntime::new(
@@ -406,10 +378,68 @@ async fn run_with_tls(
     );
     state.tls_runtime = Some(tls_runtime.clone());
 
+    // The app we serve (same router as before; branding applied).
     let rest_app = create_rest_router(state.clone(), &config.branding);
 
-    let https_addr: SocketAddr = format!("{}:443", config.server.bind_addr).parse()?;
+    // :443 — HTTPS with live-reloadable cert.
+    let https_addr: SocketAddr = format!("{bind}:443").parse()?;
+    let rustls_config = tls_runtime.rustls_config();
+    let https_app = rest_app.clone();
+    let https_handle = tokio::spawn(async move {
+        info!(addr = %https_addr, "Starting HTTPS server (:443, live cert reload)");
+        if let Err(e) = axum_server::bind_rustls(https_addr, rustls_config)
+            .serve(https_app.into_make_service())
+            .await
+        {
+            error!(error = %e, "HTTPS server error");
+        }
+    });
 
+    // :80 — HTTP: ACME challenges + redirect-to-HTTPS (the redirect is what
+    // browsers follow; ACME validation paths bypass it).
+    let http_addr: SocketAddr = format!("{bind}:80").parse()?;
+    let http_app = build_http_redirect_router(acme_store.clone());
+    let http_handle = tokio::spawn(async move {
+        info!(addr = %http_addr, "Starting HTTP server (:80, ACME + HTTPS redirect)");
+        match tokio::net::TcpListener::bind(http_addr).await {
+            Ok(listener) => {
+                if let Err(e) = axum::serve(listener, http_app).await {
+                    error!(error = %e, "HTTP server error");
+                }
+            }
+            Err(e) => {
+                // :80 may be held by another process (e.g. an existing web
+                // server). Not fatal: ACME HTTP-01 won't work, but :443 and the
+                // app on http_port still do. Self-signed/provided/LE-DNS certs
+                // don't need :80.
+                error!(error = %e, "Could not bind :80 — continuing without HTTP listener (ACME HTTP-01 unavailable)");
+            }
+        }
+    });
+
+    // Optional legacy http_port listener (backward compat; e.g. kronos on 8081).
+    // Only bind if it's configured and distinct from :80. Bind failures here are
+    // non-fatal (logged) so a taken port can't take down the whole server.
+    let http_port = config.server.http_port;
+    let legacy_handle = if http_port != 80 {
+        let legacy_addr: SocketAddr = format!("{bind}:{http_port}").parse().expect("valid http_port");
+        let legacy_app = rest_app.clone();
+        Some(tokio::spawn(async move {
+            info!(addr = %legacy_addr, "Starting legacy HTTP listener (http_port)");
+            match tokio::net::TcpListener::bind(legacy_addr).await {
+                Ok(listener) => {
+                    if let Err(e) = axum::serve(listener, legacy_app).await {
+                        error!(error = %e, "legacy http_port listener error");
+                    }
+                }
+                Err(e) => error!(error = %e, "could not bind legacy http_port; continuing"),
+            }
+        }))
+    } else {
+        None
+    };
+
+    // Certificate renewal task (LE).
     let renewal_config = config.clone();
     let renewal_acme = acme_store.clone();
     let renewal_handle = tokio::spawn(async move {
@@ -421,97 +451,133 @@ async fn run_with_tls(
         }
     });
 
-    let rustls_config = tls_runtime.rustls_config();
-
-    let https_handle = tokio::spawn(async move {
-        info!(addr = %https_addr, "Starting HTTPS server (TLS, live reload enabled)");
-        if let Err(e) = axum_server::bind_rustls(https_addr, rustls_config)
-            .serve(rest_app.into_make_service())
-            .await
-        {
-            error!(error = %e, "HTTPS server error");
-        }
-    });
-
     let signals = run_signal_handlers();
     tokio::select! {
         res = signals => {
             info!("Shutdown signal received: {}", res);
-        }
-        _ = http_handle => {
-            info!("HTTP server exited");
         }
         _ = https_handle => {
             info!("HTTPS server exited");
         }
+        _ = http_handle => {
+            info!("HTTP server exited");
+        }
         _ = renewal_handle => {
             info!("Certificate renewal task exited");
         }
+        _ = (async { if let Some(h) = legacy_handle { h.await; } }) => {
+            info!("Legacy http_port listener exited");
+        }
     }
 
     info!("Shutting down gracefully...");
     Ok(())
 }
 
-async fn load_certificates_from_config(
-    tls_config: &talos_control_system::config::tls::TlsConfig,
-) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
-    match tls_config.mode {
+/// Resolve the initial cert to load into the always-on HTTPS listener.
+async fn resolve_initial_certificate(
+    config: &Config,
+    acme_store: &AcmeChallengeStore,
+) -> Result<(String, String, String), Box<dyn std::error::Error + Send + Sync>> {
+    use talos_control_system::config::TlsMode;
+    let fallback_domain = || {
+        // Prefer a configured domain; else the advertised host; else localhost.
+        config
+            .tls
+            .letsencrypt
+            .as_ref()
+            .and_then(|l| l.domains.first().cloned())
+            .or_else(|| config.tls.self_signed.as_ref().and_then(|s| s.domains.first().cloned()))
+            .or_else(|| advertised_host(config))
+            .unwrap_or_else(|| "localhost".to_string())
+    };
+
+    let tls_enabled = config.tls.enabled && config.tls.mode != TlsMode::Disabled;
+    if !tls_enabled {
+        let domain = fallback_domain();
+        info!(%domain, "TLS disabled — generating self-signed so :443 is reachable");
+        let (c, k) =
+            talos_control_system::cert::self_signed::generate_self_signed(std::slice::from_ref(&domain)).await?;
+        return Ok((c, k, format!("self-signed ({domain}) — TLS disabled in config")));
+    }
+
+    match config.tls.mode {
+        TlsMode::LetsEncrypt => {
+            if let Some(le) = &config.tls.letsencrypt {
+                if !le.domains.is_empty() {
+                    match talos_control_system::cert::acme::obtain_http01_certificate(
+                        &le.domains,
+                        &le.email,
+                        acme_store,
+                    )
+                    .await
+                    {
+                        Ok((c, k)) => {
+                            return Ok((c, k, "Let's Encrypt issued".to_string()))
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Let's Encrypt issuance failed at boot; using self-signed fallback");
+                        }
+                    }
+                }
+                let domain = fallback_domain();
+                let (c, k) =
+                    talos_control_system::cert::self_signed::generate_self_signed(std::slice::from_ref(&domain)).await?;
+                return Ok((
+                    c,
+                    k,
+                    format!("self-signed ({domain}) — LE not ready (no domains or :80 unreachable)"),
+                ));
+            }
+            let domain = fallback_domain();
+            let (c, k) =
+                talos_control_system::cert::self_signed::generate_self_signed(std::slice::from_ref(&domain)).await?;
+            Ok((c, k, format!("self-signed ({domain}) — LE mode not fully configured")))
+        }
         TlsMode::SelfSigned => {
-            let domains = tls_config
+            let domains = config
+                .tls
                 .self_signed
                 .as_ref()
-                .map(|c| c.domains.clone())
-                .unwrap_or_else(|| vec!["localhost".to_string()]);
-            Ok(talos_control_system::cert::self_signed::generate_self_signed(&domains).await?)
+                .map(|s| s.domains.clone())
+                .filter(|d| !d.is_empty())
+                .unwrap_or_else(|| vec![fallback_domain()]);
+            let (c, k) = talos_control_system::cert::self_signed::generate_self_signed(&domains).await?;
+            Ok((c, k, "self-signed (configured)".to_string()))
         }
         TlsMode::Provided => {
-            let provided = tls_config.provided.as_ref().ok_or(
-                "Provided TLS mode requires cert_path and key_path in config",
-            )?;
-            Ok(talos_control_system::cert::provided::load_provided_certs(
-                &provided.cert_path,
-                &provided.key_path,
-            )
-            .await?)
+            let provided = config
+                .tls
+                .provided
+                .as_ref()
+                .ok_or("Provided TLS mode requires cert_path and key_path")?;
+            let (c, k) =
+                talos_control_system::cert::provided::load_provided_certs(
+                    &provided.cert_path,
+                    &provided.key_path,
+                )
+                .await?;
+            Ok((c, k, "provided (uploaded)".to_string()))
         }
-        TlsMode::Disabled => Err("TLS mode is Disabled".into()),
-        TlsMode::LetsEncrypt => {
-            Err("Let's Encrypt handled separately in run_with_tls".into())
+        TlsMode::Disabled => {
+            let domain = fallback_domain();
+            let (c, k) =
+                talos_control_system::cert::self_signed::generate_self_signed(std::slice::from_ref(&domain)).await?;
+            Ok((c, k, format!("self-signed ({domain}) — mode disabled")))
         }
     }
 }
 
-async fn run_without_tls(
-    config: Config,
-    state: AppState,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let rest_app = create_rest_router(state.clone(), &config.branding);
-    let rest_addr: SocketAddr =
-        format!("{}:{}", config.server.bind_addr, config.server.http_port)
-            .parse()
-            .expect("Invalid HTTP bind address");
-
-    let rest_handle = tokio::spawn(async move {
-        info!(addr = %rest_addr, "Starting REST server (no TLS)");
-        let listener = tokio::net::TcpListener::bind(rest_addr).await.unwrap();
-        if let Err(e) = axum::serve(listener, rest_app).await {
-            error!(error = %e, "REST server error");
-        }
-    });
-
-    let signals = run_signal_handlers();
-    tokio::select! {
-        res = signals => {
-            info!("Shutdown signal received: {}", res);
-        }
-        _ = rest_handle => {
-            info!("REST server exited");
-        }
+/// Best-effort public host for the self-signed SAN: the advertised_url host, if
+/// parseable, else the bind address.
+fn advertised_host(config: &Config) -> Option<String> {
+    let url = config.server.advertised_url.trim();
+    if url.is_empty() {
+        return None;
     }
-
-    info!("Shutting down gracefully...");
-    Ok(())
+    url.split("//").nth(1)?
+        .split('/').next()?
+        .split(':').next()?.to_string().into()
 }
 
 fn build_http_redirect_router(acme_store: AcmeChallengeStore) -> Router {

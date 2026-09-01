@@ -13,15 +13,27 @@
   let expiresHours = $state(168);
   let lastToken = $state('');
 
+  // Per-cluster tokens
+  let clusters = $state<Array<{ id: string; name: string }>>([]);
+  let selectedCluster = $state('');
+  let clusterToken = $state('');
+  let clusterEndpoint = $state('');
+  let clusterTokenLoading = $state(false);
+  let clusterTokenBusy = $state(false);
+  let copied = $state(false);
+
   async function load() {
     loading = true;
     try {
-      const [p, t] = await Promise.all([
+      const [p, t, c] = await Promise.all([
         client.get('/siderolink/peers') as Promise<any[]>,
         client.get('/siderolink/tokens') as Promise<any[]>,
+        client.get('/clusters') as Promise<any[]>,
       ]);
       peers = p || [];
       tokens = t || [];
+      clusters = c || [];
+      if (!selectedCluster && clusters.length > 0) selectedCluster = clusters[0].id;
     } catch (e: unknown) {
       notifyError(e instanceof Error ? e.message : 'Failed to load Siderolink data');
     } finally {
@@ -30,6 +42,72 @@
   }
 
   onMount(load);
+
+  $effect(() => {
+    if (selectedCluster) loadClusterToken();
+  });
+
+  async function loadClusterToken() {
+    clusterTokenLoading = true;
+    try {
+      const res = (await client.get(
+        `/siderolink/cluster-token?cluster_id=${selectedCluster}`,
+      )) as { token: string | null; endpoint: string };
+      clusterToken = res.token || '';
+      clusterEndpoint = res.endpoint || '';
+    } catch {
+      clusterToken = '';
+    } finally {
+      clusterTokenLoading = false;
+    }
+  }
+
+  async function rotateClusterToken() {
+    clusterTokenBusy = true;
+    try {
+      const res = (await client.post('/siderolink/cluster-token/rotate', {
+        cluster_id: selectedCluster,
+      })) as { token: string; endpoint: string };
+      clusterToken = res.token || '';
+      clusterEndpoint = res.endpoint || '';
+      success('Cluster token rotated');
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Failed to rotate token');
+    } finally {
+      clusterTokenBusy = false;
+    }
+  }
+
+  async function revokeClusterToken() {
+    if (!confirm('Revoke this cluster’s Siderolink token? Machines using it will not be able to (re)register.')) return;
+    clusterTokenBusy = true;
+    try {
+      await client.post('/siderolink/cluster-token/revoke', { cluster_id: selectedCluster });
+      clusterToken = '';
+      success('Cluster token revoked');
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Failed to revoke token');
+    } finally {
+      clusterTokenBusy = false;
+    }
+  }
+
+  function clusterSnippet() {
+    if (!clusterToken || !clusterEndpoint) return '';
+    return `  siderolink:\n    enabled: true\n    endpoint: ${clusterEndpoint}\n    token: ${clusterToken}`;
+  }
+
+  async function copySnippet() {
+    const s = clusterSnippet();
+    if (!s) return;
+    try {
+      await navigator.clipboard.writeText(s);
+      copied = true;
+      setTimeout(() => (copied = false), 1500);
+    } catch {
+      notifyError('Copy failed');
+    }
+  }
 
   async function createToken() {
     busy = true;
@@ -79,6 +157,57 @@
       Machines register with <code>POST /api/siderolink/register</code> using
       <code>token</code>, <code>systemUuid</code>, and <code>publicKey</code>.
     </p>
+  </section>
+
+  <section class="card">
+    <h2>Per-cluster tokens</h2>
+    <p class="muted">
+      Greenfield configs generated for a cluster automatically embed its token under
+      <code>machine.siderolink</code>, so provisioned nodes dial in and form the tunnel on
+      first boot. Rotate to issue a new token (old one stops working), revoke to remove it.
+    </p>
+    {#if clusters.length === 0}
+      <p class="muted">No clusters yet — create one and its token will appear here.</p>
+    {:else}
+      <div class="form-row">
+        <label>
+          Cluster
+          <select bind:value={selectedCluster}>
+            {#each clusters as c (c.id)}
+              <option value={c.id}>{c.name}</option>
+            {/each}
+          </select>
+        </label>
+        <Button variant="primary" title="Issue a new token for the selected cluster" onclick={rotateClusterToken} disabled={clusterTokenBusy || clusterTokenLoading}>
+          {#if clusterToken}Rotate token{:else}Create token{/if}
+        </Button>
+        {#if clusterToken}
+          <Button variant="ghost" title="Remove this cluster’s token" onclick={revokeClusterToken} disabled={clusterTokenBusy}>Revoke</Button>
+        {/if}
+      </div>
+      {#if clusterTokenLoading}
+        <p class="muted">Loading…</p>
+      {:else if clusterToken}
+        <div class="token-out">
+          <div class="form-row">
+            <label>
+              Token
+              <input readonly value={clusterToken} class="mono" />
+            </label>
+            <label>
+              Endpoint
+              <input readonly value={clusterEndpoint} class="mono" />
+            </label>
+          </div>
+          <div class="form-row">
+            <pre class="snippet">{clusterSnippet()}</pre>
+            <Button variant="ghost" title="Copy the machine.siderolink snippet" onclick={copySnippet}>{copied ? 'Copied!' : 'Copy snippet'}</Button>
+          </div>
+        </div>
+      {:else}
+        <p class="muted">No token for this cluster yet. Click “Create token”.</p>
+      {/if}
+    {/if}
   </section>
 
   {#if loading}
@@ -185,6 +314,26 @@
     border-radius: 6px;
     padding: 0.5rem 0.7rem;
     color: var(--tcs-text);
+  }
+  select {
+    background: var(--tcs-background);
+    border: 1px solid var(--tcs-border);
+    border-radius: 6px;
+    padding: 0.5rem 0.7rem;
+    color: var(--tcs-text);
+    min-width: 200px;
+  }
+  .snippet {
+    background: var(--tcs-background);
+    border: 1px solid var(--tcs-border);
+    border-radius: 6px;
+    padding: 0.6rem 0.8rem;
+    font-family: ui-monospace, monospace;
+    font-size: 0.78rem;
+    color: var(--tcs-text);
+    margin: 0;
+    white-space: pre;
+    flex: 1;
   }
   .token-out {
     font-size: 0.9rem;

@@ -3782,6 +3782,13 @@ pub async fn generate_cluster_config(
             &payload.cert_sans,
             &[],
             if payload.cluster_domain.is_empty() { "cluster.local" } else { &payload.cluster_domain },
+            &siderolink_block_for_cluster(
+                &state.db_pool,
+                payload.cluster_id,
+                &state.config.siderolink,
+                &state.config.server,
+            )
+            .await,
         )
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
@@ -3865,6 +3872,55 @@ pub async fn get_provision_artifact(
 }
 
 // ─── Siderolink inventory ──────────────────────────────────────────────
+
+/// Render the `siderolink:` YAML block (2-space indented, trailing newline) to
+/// bake into a cluster's generated machine configs, so provisioned nodes dial
+/// in and form the WireGuard tunnel automatically. Returns an empty string when
+/// there's no cluster to tie a token to. The block is omitted (empty) if we
+/// cannot determine an endpoint, so config generation never breaks.
+async fn siderolink_block_for_cluster(
+    pool: &crate::db::pool::DbPool,
+    cluster_id: Option<uuid::Uuid>,
+    sl: &crate::config::SideroLinkConfig,
+    server: &crate::config::ServerConfig,
+) -> String {
+    let Some(cid) = cluster_id else {
+        return String::new();
+    };
+    // Persistent per-cluster token (created on first use).
+    let token = match crate::controllers::ClusterController::new(pool.clone())
+        .ensure_cluster_siderolink_token(cid)
+        .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not ensure cluster siderolink token; omitting block");
+            return String::new();
+        }
+    };
+    // Advertised endpoint nodes dial: env override, else advertised_url host +
+    // bind_port, else bind_addr + bind_port.
+    let endpoint = std::env::var("TCS_SIDEROLINK_ENDPOINT").ok().filter(|s| !s.is_empty());
+    let endpoint = match endpoint {
+        Some(e) => e,
+        None => {
+            let host = server
+                .advertised_url
+                .trim()
+                .split("//")
+                .nth(1)
+                .and_then(|h| h.split('/').next())
+                .and_then(|h| h.split(':').next())
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| server.bind_addr.clone());
+            format!("{host}:{}", sl.bind_port)
+        }
+    };
+    format!(
+        "  siderolink:\n    enabled: true\n    endpoint: {endpoint}\n    token: {token}\n"
+    )
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -3992,6 +4048,102 @@ pub async fn create_siderolink_token(
         StatusCode::CREATED,
         Json(serde_json::json!({ "token": token, "expiresAt": exp })),
     ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiderolinkClusterTokenQuery {
+    pub cluster_id: Uuid,
+}
+
+fn siderolink_advertised_endpoint(sl: &crate::config::SideroLinkConfig, server: &crate::config::ServerConfig) -> String {
+    if let Ok(e) = std::env::var("TCS_SIDEROLINK_ENDPOINT") {
+        if !e.is_empty() {
+            return e;
+        }
+    }
+    let host = server
+        .advertised_url
+        .trim()
+        .split("//")
+        .nth(1)
+        .and_then(|h| h.split('/').next())
+        .and_then(|h| h.split(':').next())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| server.bind_addr.clone());
+    format!("{host}:{}", sl.bind_port)
+}
+
+pub async fn get_cluster_siderolink_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<SiderolinkClusterTokenQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _ = extract_claims(&headers)?;
+    let token = crate::db::repos::siderolink::get_cluster_token(&state.db_pool, q.cluster_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "clusterId": q.cluster_id,
+        "token": token,
+        "endpoint": siderolink_advertised_endpoint(&state.config.siderolink, &state.config.server),
+    })))
+}
+
+pub async fn rotate_cluster_siderolink_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<SiderolinkClusterTokenQuery>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" {
+        return Err((StatusCode::FORBIDDEN, "Admin required".into()));
+    }
+    let token = crate::controllers::ClusterController::new(state.db_pool.clone())
+        .rotate_cluster_siderolink_token(payload.cluster_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "siderolink_cluster_token_rotated",
+        "siderolink",
+        &format!("cluster:{}", payload.cluster_id),
+    )
+    .await;
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "clusterId": payload.cluster_id,
+            "token": token,
+            "endpoint": siderolink_advertised_endpoint(&state.config.siderolink, &state.config.server),
+        })),
+    ))
+}
+
+pub async fn revoke_cluster_siderolink_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<SiderolinkClusterTokenQuery>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" {
+        return Err((StatusCode::FORBIDDEN, "Admin required".into()));
+    }
+    crate::controllers::ClusterController::new(state.db_pool.clone())
+        .revoke_cluster_siderolink_token(payload.cluster_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "siderolink_cluster_token_revoked",
+        "siderolink",
+        &format!("cluster:{}", payload.cluster_id),
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn list_siderolink_tokens(

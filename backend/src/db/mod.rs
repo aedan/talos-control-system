@@ -102,6 +102,10 @@ pub async fn run_migrations(pool: &DbPool) -> Result<(), AppError> {
             "018_module_overrides.sql",
             include_str!("migrations/018_module_overrides.sql"),
         ),
+        (
+            "019_cluster_siderolink_token.sql",
+            include_str!("migrations/019_cluster_siderolink_token.sql"),
+        ),
     ];
 
     for (name, sql) in migrations {

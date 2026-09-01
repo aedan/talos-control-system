@@ -518,6 +518,7 @@ async fn load_config_yaml(
                         &all_addresses,
                         &cp_addresses,
                         "cluster.local",
+                        "", // Siderolink block baked in the wizard path; metal path omits for now
                     )
                     .await?;
 
