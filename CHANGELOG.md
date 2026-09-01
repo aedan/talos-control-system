@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.13] — 2026-08-31
+
+### Changed
+- **Clarified the dashboard's cluster/machine entry points.** The bright-blue primary button was mislabeled "Add inventory" but actually opened the bare-metal **provision** wizard, while the real "import a machine list" page had no dashboard button and the "adopt existing cluster" button was a quiet ghost. There are now three equally-weighted primary buttons, each labeled to match its destination: **Import cluster** (adopt a running cluster via kubeconfig/talosconfig), **Add machines** (import a machine list as inventory, YAML/CSV), and **Provision cluster** (build a new cluster from bare metal via PXE+BMC). The empty-state and the header/subtitle of each of the three destination pages now cross-reference the other two so the distinction is clear on arrival.
+
 ## [0.5.12] — 2026-08-31
 
 ### Fixed

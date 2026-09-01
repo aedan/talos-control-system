@@ -98,8 +98,11 @@ machines:
     <a href="/"><Button variant="ghost" size="sm" title="Return to the dashboard">Back to Dashboard</Button></a>
   </div>
   <p class="hint">
-    Bulk-add servers for PXE provisioning (MAC + BMC) or address-based assisted install.
-    YAML is canonical; CSV uses a flat header row.
+    Bulk-add a list of machines to TCS inventory (YAML or CSV). Attach them to an
+    <strong>existing</strong> cluster or create a new one — useful before PXE
+    provisioning or assisted install. To build a cluster from scratch, use
+    <a href="/clusters/create">Provision cluster</a>; to adopt a cluster that's
+    already running, use <a href="/clusters/import">Import cluster</a>.
   </p>
 
   <div class="row">

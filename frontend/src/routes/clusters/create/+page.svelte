@@ -407,9 +407,12 @@
 </script>
 
 <div class="provision-page">
-  <h1>Provision bare metal cluster</h1>
+  <h1>Provision cluster</h1>
   <p class="hint">
-    Configure a new Talos cluster with full network control — bond, VLAN, DNS, and gateway — then provision machines via PXE + BMC.
+    Build a new Talos cluster from bare metal — configure the network (bond, VLAN, DNS,
+    gateway), register machines, then install via PXE + BMC. (Adopt a cluster that's
+    already running? Use <a href="/clusters/import">Import cluster</a>. Just add a machine
+    list to inventory first? Use <a href="/machines/import">Add machines</a>.)
   </p>
 
   <!-- ── Step navigation ── -->

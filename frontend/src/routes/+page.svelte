@@ -42,8 +42,9 @@
   <div class="page-header">
     <h1>Dashboard</h1>
     <div class="header-actions">
-      <a href="/clusters/import"><Button variant="ghost" title="Import an existing Talos cluster by pasting its kubeconfig">Import Cluster</Button></a>
-      <a href="/clusters/create"><Button variant="primary" title="Register new bare-metal machines into TCS inventory">Add inventory</Button></a>
+      <a href="/clusters/import"><Button variant="primary" title="Adopt an existing Talos cluster by pasting its kubeconfig / talosconfig">Import cluster</Button></a>
+      <a href="/machines/import"><Button variant="primary" title="Add a list of machines to TCS inventory (YAML or CSV) for an existing or new cluster">Add machines</Button></a>
+      <a href="/clusters/create"><Button variant="primary" title="Build a new cluster from bare metal via PXE + BMC">Provision cluster</Button></a>
     </div>
   </div>
 
@@ -66,7 +67,11 @@
     {#if $clusters.length === 0}
       <div class="empty-state">
         <p>No clusters yet</p>
-        <a href="/clusters/import">Import a Talos cluster</a>
+        <div class="empty-actions">
+          <a href="/clusters/import"><Button variant="primary" title="Adopt an existing Talos cluster by pasting its kubeconfig / talosconfig">Import cluster</Button></a>
+          <a href="/clusters/create"><Button variant="primary" title="Build a new cluster from bare metal via PXE + BMC">Provision cluster</Button></a>
+        </div>
+        <p class="empty-hint">You can also <a href="/machines/import">add machines to inventory</a> first, then import or provision.</p>
       </div>
     {:else}
       <table class="data-table">
@@ -153,6 +158,15 @@
   }
   .empty-state a {
     color: var(--tcs-secondary);
+  }
+  .empty-actions {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: center;
+    margin: 1rem 0;
+  }
+  .empty-hint {
+    font-size: 0.875rem;
   }
   .data-table {
     width: 100%;

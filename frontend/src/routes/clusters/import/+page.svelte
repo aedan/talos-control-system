@@ -76,8 +76,8 @@
 <div class="import-page">
   <div class="page-header">
     <div>
-      <h1>Import Cluster</h1>
-      <p class="subtitle">Import an existing Talos Linux cluster using its kubeconfig</p>
+      <h1>Import cluster</h1>
+      <p class="subtitle">Adopt a Talos cluster that's already running — paste its kubeconfig / talosconfig to pull in its nodes. (Building a new one from bare metal? Use <a href="/clusters/create">Provision cluster</a>. Adding a machine list to inventory? Use <a href="/machines/import">Add machines</a>.)</p>
     </div>
     <a href="/">
       <Button variant="ghost" title="Return to the dashboard">Back to Dashboard</Button>
