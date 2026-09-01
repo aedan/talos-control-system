@@ -46,8 +46,13 @@ export class TcsClient {
     const res = await fetch(`${API_BASE}${path}`, opts);
 
     if (res.status === 401 && typeof window !== 'undefined') {
-      if (window.location.pathname !== '/login') {
+      const alreadyOnLogin = window.location.pathname === '/login';
+      if (!alreadyOnLogin) {
+        // Credential expired/rejected: drop the token and bounce to the login
+        // screen. A hard navigation (not Svelte's goto) discards stale in-memory
+        // state on the current page and re-runs the root layout's auth check.
         localStorage.removeItem('tcs_token');
+        window.location.href = '/login';
       }
       const err: ApiError = new Error('Authentication required');
       err.status = 401;

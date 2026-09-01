@@ -13,6 +13,7 @@
   let settingsOpen = $state(false);
   let settingsMenu = $state<HTMLElement | null>(null);
   let authGen = 0;
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
 
   function onDocClick(e: MouseEvent) {
     if (settingsOpen && settingsMenu && !settingsMenu.contains(e.target as Node)) {
@@ -39,6 +40,7 @@
 
     const token = localStorage.getItem('tcs_token');
     if (!token) {
+      stopHeartbeat();
       authenticated = false;
       user = null;
       if (gen === authGen) checking = false;
@@ -52,6 +54,7 @@
       });
       if (gen !== authGen) return;
       if (!res.ok) {
+        stopHeartbeat();
         localStorage.removeItem('tcs_token');
         authenticated = false;
         user = null;
@@ -61,8 +64,10 @@
       }
       user = await res.json();
       authenticated = true;
+      startHeartbeat();
     } catch {
       if (gen !== authGen) return;
+      stopHeartbeat();
       localStorage.removeItem('tcs_token');
       authenticated = false;
       user = null;
@@ -79,6 +84,7 @@
   });
 
   onDestroy(() => {
+    stopHeartbeat();
     document.removeEventListener('click', onDocClick);
   });
 
@@ -94,10 +100,35 @@
   });
 
   async function handleLogout() {
+    stopHeartbeat();
     localStorage.removeItem('tcs_token');
     authenticated = false;
     user = null;
     goto('/login');
+  }
+
+  // Periodically re-validate the token so an expired credential bounces us to
+  // /login even when the current page has no in-flight API polling (idle pages
+  // would otherwise sit on stale state indefinitely).
+  function stopHeartbeat() {
+    if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
+  }
+  function startHeartbeat() {
+    stopHeartbeat();
+    heartbeat = setInterval(async () => {
+      const token = localStorage.getItem('tcs_token');
+      if (!token) return; // not authenticated; checkAuth handles the redirect
+      try {
+        const res = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok) {
+          localStorage.removeItem('tcs_token');
+          stopHeartbeat();
+          window.location.href = '/login';
+        }
+      } catch {
+        // Network blip — don't log out on transient failures; retry next tick.
+      }
+    }, 60_000);
   }
 </script>
 

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.12] — 2026-08-31
+
+### Fixed
+- **Expired credentials no longer leave you stranded on the current page.** When a JWT expired, the UI just sat wherever you were — the token was cleared but nothing navigated. Now: (1) any API call that returns 401 (including background polls on the cluster/machine pages) immediately hard-redirects to the login screen, discarding stale in-memory state; and (2) the root layout runs a 60-second `/api/auth/me` heartbeat so even an idle page with no active polling detects expiry and bounces you to login.
+
 ## [0.5.11] — 2026-08-31
 
 ### Changed
