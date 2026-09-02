@@ -2,7 +2,10 @@
 
 ## [Unreleased]
 
-## [0.5.21] — 2026-08-31
+## [0.5.22] — 2026-08-31
+
+### Fixed
+- **Let's Encrypt DNS-01 secondary validation race.** Primary validation passed but LE's *secondary* validator (different vantage point, can lag by 10-60s) saw NXDOMAIN because GoDaddy's authoritative NSes had not all refreshed yet. TCS now (a) waits until the TXT record resolves at **two independent public resolvers** (8.8.8.8 + 1.1.1.1), not just one, and (b) settles a **20s buffer** before asking LE to validate. The record remains published through finalization + download (cleanup only happens after the cert is in hand), so both validators observe it. Combined with v0.5.21's relative record-name fix, this completes a reliable Let's Encrypt DNS-01 flow via GoDaddy.
 
 ### Fixed
 - **GoDaddy DNS-01 record name (the actual blocker).** GoDaddy's API *stores* a TXT record given the full FQDN as the name but **never publishes it** to its nameservers, so Let's Encrypt sees NXDOMAIN. The fix: GoDaddy's record name must be the **relative** name under the zone (e.g. `_acme-challenge.tcs.kronos` under `cloudmunchers.net`, not the full `_acme-challenge.tcs.kronos.cloudmunchers.net`). Verified empirically against a live GoDaddy zone: the relative-name form resolves publicly in <45s; the full-FQDN form did not. `split_zone` now derives the base domain + relative name; an explicit `dns_zone` override still wins. This completes a working Let's Encrypt DNS-01 flow via GoDaddy.

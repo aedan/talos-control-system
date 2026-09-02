@@ -258,26 +258,37 @@ async fn wait_for_dns_txt(txt_fqdn: &str, expected_value: &str) -> Result<(), Ce
 
 /// Query a public resolver for the TXT record. Returns None if no lookup tool
 /// is available, Some(true) if the expected value is present, Some(false)
-/// otherwise.
+/// otherwise. Checks multiple independent resolvers (8.8.8.8 + 1.1.1.1) so we
+/// only report success once the record is broadly visible — not just at one
+/// resolver that may have cached the GoDaddy NS before it refreshed.
 async fn lookup_txt_public(txt_fqdn: &str, expected_value: &str) -> Option<bool> {
     let fqdn = txt_fqdn.to_string();
     let want = expected_value.to_string();
-    // Prefer `dig @8.8.8.8` (works even when the host's local resolver is broken).
-    if which_cmd("dig").await {
-        let fqdn2 = fqdn.clone();
-        let want2 = want.clone();
-        let out = tokio::task::spawn_blocking(move || {
-            std::process::Command::new("dig")
-                .args(["+short", "+time=4", "+tries=2", "@8.8.8.8", "TXT", &fqdn2])
-                .output()
-        })
-        .await
-        .ok()
-        .and_then(|r| r.ok());
-        if let Some(out) = out {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            return Some(stdout.contains(&want2));
+    let mut any_result = false;
+    let mut all_have = true;
+    for resolver in ["8.8.8.8", "1.1.1.1"] {
+        if which_cmd("dig").await {
+            let fqdn2 = fqdn.clone();
+            let want2 = want.clone();
+            let r = resolver.to_string();
+            let out = tokio::task::spawn_blocking(move || {
+                std::process::Command::new("dig")
+                    .args(["+short", "+time=4", "+tries=2", &format!("@{r}"), "TXT", &fqdn2])
+                    .output()
+            })
+            .await
+            .ok()
+            .and_then(|x| x.ok());
+            if let Some(out) = out {
+                any_result = true;
+                if !String::from_utf8_lossy(&out.stdout).contains(&want2) {
+                    all_have = false;
+                }
+            }
         }
+    }
+    if any_result {
+        return Some(all_have);
     }
     // Fallback: system getent TXT (uses the host resolver).
     if which_cmd("getent").await {
@@ -293,8 +304,7 @@ async fn lookup_txt_public(txt_fqdn: &str, expected_value: &str) -> Option<bool>
         .and_then(|r| r.ok());
         if let Some(out) = out {
             if out.status.success() {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                return Some(stdout.contains(&want3));
+                return Some(String::from_utf8_lossy(&out.stdout).contains(&want3));
             }
             return Some(false);
         }
@@ -385,13 +395,19 @@ pub async fn obtain_dns01_certificate(
 
         // GoDaddy (and other providers) can take a while to actually *publish*
         // a new TXT record to their authoritative nameservers after the API
-        // returns 200. Let's Encrypt does a single authoritative check, so we
-        // wait here until the record is publicly resolvable before validating.
+        // returns 200. Let's Encrypt validates from a primary *and* a secondary
+        // vantage point, and the secondary can lag. So: wait until the record is
+        // visible at multiple public resolvers, then settle a fixed buffer before
+        // asking LE to validate. The record stays up through finalize+download
+        // (cleanup happens only after the cert is in hand), so the secondary
+        // validation observes it.
         if let Err(e) = wait_for_dns_txt(&txt_fqdn, &value).await {
             return Err(CertError::Acme(format!(
                 "TXT record for {domain} did not become publicly resolvable: {e}"
             )));
         }
+        tracing::info!(domain = %domain, "DNS-01 record resolvable; settling 20s before validation");
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
 
         challenge.validate().await.map_err(acme_error_to_cert)?;
         // Poll longer than the HTTP-01 path: DNS-01 propagation is slower.
