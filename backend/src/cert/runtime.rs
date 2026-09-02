@@ -143,13 +143,21 @@ impl TlsRuntime {
                         "letsencrypt domains required".into(),
                     ));
                 }
-                tracing::info!(domains = ?le.domains, "Live ACME issuance starting");
-                match crate::cert::acme::obtain_http01_certificate(
-                    &le.domains,
+                tracing::info!(
+                    domains = ?le.domains,
+                    challenge = ?le.challenge_type,
+                    "Live ACME issuance starting"
+                );
+                // Dispatch by challenge type (http-01 vs dns-01) — never hardcode.
+                let client = crate::cert::acme::AcmeClient::new(
                     &le.email,
-                    &self.acme_store,
+                    le.dns_provider.clone(),
+                    le.challenge_type.clone(),
                 )
-                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+                match client
+                    .obtain_certificate(&le.domains, Some(&self.acme_store))
+                    .await
                 {
                     Ok((c, k)) => (
                         c,

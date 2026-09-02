@@ -130,12 +130,24 @@ pub async fn obtain_http01_certificate(
         tracing::info!(domain = %auth.identifier.value, "Authorization valid");
     }
 
-    // Wait for order to be ready
+    // Finalize order, generate key+CSR, download the issued certificate.
+    let result = finalize_order_and_download(order, domains).await;
+    acme_store.clear();
+    tracing::info!("ACME challenge tokens cleared");
+    result
+}
+
+/// Finalize an ACME order (CSR + wait) and download the issued cert chain +
+/// private key as PEM. Shared by HTTP-01 and DNS-01.
+async fn finalize_order_and_download(
+    order: acme2::Order,
+    domains: &[String],
+) -> Result<(String, String), CertError> {
+    tracing::info!("Order ready; finalizing");
     let order = order
         .wait_ready(std::time::Duration::from_secs(5), 12)
         .await
         .map_err(acme_error_to_cert)?;
-    tracing::info!("Order is ready for finalization");
 
     // Generate EC P-256 key pair with rcgen (serializable)
     let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
@@ -163,14 +175,12 @@ pub async fn obtain_http01_certificate(
     let x509req = openssl::x509::X509Req::from_der(csr_der)
         .map_err(|e| CertError::Acme(format!("Failed to parse CSR into X509Req: {}", e)))?;
 
-    // Finalize order with CSR
     let order = order
         .finalize(Csr::Custom(x509req))
         .await
         .map_err(acme_error_to_cert)?;
     tracing::info!("Order finalized, waiting for certificate");
 
-    // Wait for order completion
     let order = order
         .wait_done(std::time::Duration::from_secs(5), 12)
         .await
@@ -196,31 +206,125 @@ pub async fn obtain_http01_certificate(
         .collect::<Result<Vec<_>, CertError>>()?
         .join("");
 
-    // Serialize our private key to PEM
     let key_pem = key_pair.serialize_pem();
 
-    acme_store.clear();
-    tracing::info!("ACME challenge tokens cleared");
-
     tracing::info!("Let's Encrypt certificate obtained successfully");
-
     Ok((cert_pem, key_pem))
+}
+
+/// Obtain a Let's Encrypt certificate using a DNS-01 challenge, publishing the
+/// required `_acme-challenge.<domain>` TXT records via `provider`. TXT records
+/// are removed after the order is finalized (best-effort).
+pub async fn obtain_dns01_certificate(
+    domains: &[String],
+    email: &str,
+    provider: &dyn crate::cert::dns::DnsProvider,
+) -> Result<(String, String), CertError> {
+    use sha2::{Digest, Sha256};
+    if domains.is_empty() {
+        return Err(CertError::Config("No domains specified for certificate".to_string()));
+    }
+    tracing::info!(domains = ?domains, email, "Starting ACME DNS-01 certificate issuance");
+
+    // Connect to ACME directory + account (same as HTTP-01).
+    let dir = DirectoryBuilder::new(LETS_ENCRYPT_URL.to_string())
+        .build()
+        .await
+        .map_err(acme_error_to_cert)?;
+    let mut account_builder = AccountBuilder::new(dir.clone());
+    account_builder.contact(vec![format!("mailto:{}", email)]);
+    account_builder.terms_of_service_agreed(true);
+    let account = account_builder.build().await.map_err(acme_error_to_cert)?;
+    tracing::info!(account_id = %account.id, "ACME account created/retrieved");
+
+    // Create order.
+    let mut order_builder = OrderBuilder::new(account.clone());
+    for domain in domains {
+        order_builder.add_dns_identifier(domain.clone());
+    }
+    let order = order_builder.build().await.map_err(acme_error_to_cert)?;
+
+    // For each auth, publish the DNS-01 TXT record, then validate.
+    let authorizations = order.authorizations().await.map_err(acme_error_to_cert)?;
+    let mut published: Vec<(String, String)> = Vec::new(); // (domain, txt_fqdn) for cleanup
+
+    for auth in authorizations {
+        let domain = auth.identifier.value.clone();
+        let challenge = auth
+            .get_challenge("dns-01")
+            .ok_or_else(|| CertError::Acme("No dns-01 challenge available".to_string()))?;
+
+        let token = challenge
+            .token
+            .clone()
+            .ok_or_else(|| CertError::Acme("Challenge missing token".to_string()))?;
+        let key_auth = challenge
+            .key_authorization()
+            .map_err(acme_error_to_cert)?
+            .ok_or_else(|| CertError::Acme("Failed to compute key authorization".to_string()))?;
+
+        // TXT value = base64url(SHA256(key_auth)), no padding.
+        let digest = Sha256::digest(key_auth.as_bytes());
+        let value = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+        let txt_fqdn = format!("_acme-challenge.{}", domain.trim_end_matches('.'));
+
+        tracing::info!(domain = %domain, txt = %txt_fqdn, "Publishing DNS-01 TXT record");
+        provider
+            .add_txt_record(&domain, &txt_fqdn, &value)
+            .await
+            .map_err(|e| {
+                CertError::Acme(format!(
+                    "Failed to publish DNS-01 TXT record for {domain}: {e}"
+                ))
+            })?;
+        published.push((domain.clone(), txt_fqdn));
+
+        // Give DNS a moment to propagate, then validate.
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        challenge.validate().await.map_err(acme_error_to_cert)?;
+        let challenge = challenge
+            .wait_done(std::time::Duration::from_secs(5), 12)
+            .await
+            .map_err(acme_error_to_cert)?;
+        if challenge.status != ChallengeStatus::Valid {
+            return Err(CertError::Acme(format!(
+                "DNS-01 challenge failed for {}: {:?}",
+                domain, challenge.error
+            )));
+        }
+        tracing::info!(domain = %domain, "DNS-01 challenge validated");
+
+        auth.wait_done(std::time::Duration::from_secs(5), 12)
+            .await
+            .map_err(acme_error_to_cert)?;
+    }
+
+    // Finalize + download, then clean up the TXT records.
+    let result = finalize_order_and_download(order, domains).await;
+    for (domain, txt_fqdn) in &published {
+        if let Err(e) = provider.remove_txt_record(domain, txt_fqdn).await {
+            tracing::warn!(domain, txt = %txt_fqdn, error = %e, "Failed to remove DNS-01 TXT record (will expire via TTL)");
+        }
+    }
+    result
 }
 
 pub struct AcmeClient {
     email: String,
     challenge_type: ChallengeType,
+    dns_config: Option<crate::config::tls::DnsProviderConfig>,
 }
 
 impl AcmeClient {
     pub fn new(
         email: &str,
-        _dns_config: Option<crate::config::tls::DnsProviderConfig>,
+        dns_config: Option<crate::config::tls::DnsProviderConfig>,
         challenge_type: ChallengeType,
     ) -> Result<Self, CertError> {
         Ok(Self {
             email: email.to_string(),
             challenge_type,
+            dns_config,
         })
     }
 
@@ -241,7 +345,14 @@ impl AcmeClient {
                 obtain_http01_certificate(domains, &self.email, store).await
             }
             ChallengeType::Dns01 => {
-                crate::cert::self_signed::generate_self_signed(domains).await
+                let cfg = self.dns_config.as_ref().ok_or_else(|| {
+                    CertError::Config(
+                        "DNS-01 challenge requires a dns_provider (e.g. GoDaddy/Cloudflare) configuration"
+                            .to_string(),
+                    )
+                })?;
+                let provider = crate::cert::dns::build_dns_provider(cfg)?;
+                obtain_dns01_certificate(domains, &self.email, provider.as_ref()).await
             }
         }
     }

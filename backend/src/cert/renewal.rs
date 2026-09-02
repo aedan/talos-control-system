@@ -72,6 +72,7 @@ pub async fn start_cert_renewal_task(
                                 api_secret: d.api_secret.clone(),
                                 api_token: d.api_token.clone(),
                                 zone_id: d.zone_id.clone(),
+                                dns_zone: d.dns_zone.clone(),
                             }),
                         le.challenge_type.clone(),
                     );

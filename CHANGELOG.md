@@ -2,7 +2,16 @@
 
 ## [Unreleased]
 
-## [0.5.17] — 2026-08-31
+## [0.5.18] — 2026-08-31
+
+### Fixed
+- **DNS-01 Let's Encrypt actually works now.** The live "Apply" path (`TlsRuntime::apply_mode`) and the boot path **hardcoded HTTP-01**, ignoring the `challenge_type` you selected — so a `dns-01` config failed with an HTTP-01 "no valid A records" error. Both now route through `AcmeClient`, which dispatches by challenge type. The `AcmeClient` DNS-01 arm was also a **stub that silently produced a self-signed cert** instead of doing a real DNS-01 challenge — replaced with a real implementation.
+
+### Added
+- **Real DNS-01 ACME issuance** (`obtain_dns01_certificate`): for each domain it computes the `base64url(sha256(keyAuth))` digest, publishes the `_acme-challenge.<domain>` TXT record via the configured provider, validates the challenge, finalizes the order, downloads the Let's Encrypt cert, then removes the TXT record.
+- **GoDaddy provider** now does real TXT create/delete (it previously existed but was never invoked by the ACME flow). It derives the GoDaddy-registered zone from the challenge domain (last 2–3 labels) and accepts an optional explicit **DNS Zone / registered domain** override for delegated subzones (e.g. `kronos.cloudmunchers.net`).
+- `DnsProviderConfig` gains `dns_zone`; the Certificates UI adds a GoDaddy **DNS Zone** field; Cloudflare (token+zone) and Route53 (needs AWS creds — returns a clear error) are wired to the same flow. `build_dns_provider` validates credentials so misconfiguration fails loudly instead of silently self-signing.
+- 5 new backend tests (GoDaddy zone-split heuristics, provider credential validation).
 
 ### Fixed
 - **Certificates UI now reflects the real cert.** The Certificates page showed "mode: disabled / issuer: None" even though TCS was actually serving a self-signed cert on :443 (the v0.5.15 auto-fallback). The status endpoint now reports the **effective** mode: when the config says `disabled` (or Let's Encrypt falls back), the live runtime is set to `self-signed` with the actual domain(s), so the UI shows `self-signed` / `Self-Signed` / the real host + the cert's true expiry.

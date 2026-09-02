@@ -78,6 +78,12 @@ pub struct DnsProviderConfig {
 
     #[serde(default)]
     pub zone_id: String,
+
+    /// The registered DNS zone (e.g. `cloudmunchers.net`) that the TXT record
+    /// lives under. Required by some providers (GoDaddy). When empty, TCS
+    /// derives it from the challenge domain.
+    #[serde(default)]
+    pub dns_zone: String,
 }
 
 fn default_provider() -> String {

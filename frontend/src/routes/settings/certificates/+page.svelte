@@ -23,6 +23,7 @@
     dnsApiSecret?: string;
     dnsApiToken?: string;
     dnsZoneId?: string;
+    dnsZone?: string;
     certPath?: string;
     keyPath?: string;
   }
@@ -44,6 +45,7 @@
     dnsApiSecret: '',
     dnsApiToken: '',
     dnsZoneId: '',
+    dnsZone: '',
     certPath: '',
     keyPath: ''
   });
@@ -98,6 +100,7 @@
                   api_secret: config.dnsApiSecret || '',
                   api_token: config.dnsApiToken || '',
                   zone_id: config.dnsZoneId || '',
+                  dns_zone: config.dnsZone || '',
                 }
               : null,
         };
@@ -326,6 +329,21 @@
                     bind:value={config.dnsApiSecret}
                     placeholder="GoDaddy API Secret"
                   />
+                </div>
+                <div class="form-group">
+                  <label for="dnsZone">DNS Zone / Registered Domain (optional)</label>
+                  <input
+                    id="dnsZone"
+                    type="text"
+                    title="The registered domain that owns the TXT record, e.g. cloudmunchers.net. Leave blank to auto-derive from the challenge domain."
+                    bind:value={config.dnsZone}
+                    placeholder="e.g. cloudmunchers.net (auto-derived if blank)"
+                  />
+                  <span class="hint">
+                    The GoDaddy-registered domain for the record. TCS auto-derives it from the
+                    challenge domain (last 2–3 labels); set this if your zone is delegated
+                    (e.g. <code>kronos.cloudmunchers.net</code>) to be safe.
+                  </span>
                 </div>
               {:else if config.dnsProvider === 'route53'}
                 <div class="form-group">

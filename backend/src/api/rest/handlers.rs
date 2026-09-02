@@ -1961,6 +1961,8 @@ pub struct DnsProviderConfigRequest {
     pub api_token: String,
     #[serde(default)]
     pub zone_id: String,
+    #[serde(default)]
+    pub dns_zone: String,
 }
 
 #[derive(Deserialize)]
@@ -2006,6 +2008,7 @@ fn build_tls_config_from_request(req: &CertConfigRequest) -> TlsConfig {
                     api_secret: dns.api_secret.clone(),
                     api_token: dns.api_token.clone(),
                     zone_id: dns.zone_id.clone(),
+                    dns_zone: dns.dns_zone.clone(),
                 }
             }),
         }
@@ -2127,6 +2130,12 @@ pub async fn update_cert_config(
                         "zone_id".to_string(),
                         toml::Value::String(dns.zone_id.clone()),
                     );
+                    if !dns.dns_zone.trim().is_empty() {
+                        dns_table.insert(
+                            "dns_zone".to_string(),
+                            toml::Value::String(dns.dns_zone.clone()),
+                        );
+                    }
                     le_table.insert("dns_provider".to_string(), toml::Value::Table(dns_table));
                 }
             }
@@ -2317,6 +2326,7 @@ pub async fn renew_certificate(
                         api_secret: d.api_secret.clone(),
                         api_token: d.api_token.clone(),
                         zone_id: d.zone_id.clone(),
+                        dns_zone: d.dns_zone.clone(),
                     }),
                     le.challenge_type.clone(),
                 )

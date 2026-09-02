@@ -549,12 +549,15 @@ async fn resolve_initial_certificate(
         TlsMode::LetsEncrypt => {
             if let Some(le) = &config.tls.letsencrypt {
                 if !le.domains.is_empty() {
-                    match talos_control_system::cert::acme::obtain_http01_certificate(
-                        &le.domains,
+                    let client = talos_control_system::cert::acme::AcmeClient::new(
                         &le.email,
-                        acme_store,
+                        le.dns_provider.clone(),
+                        le.challenge_type.clone(),
                     )
-                    .await
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+                    match client
+                        .obtain_certificate(&le.domains, Some(acme_store))
+                        .await
                     {
                         Ok((c, k)) => {
                             return Ok((c, k, TlsMode::LetsEncrypt, le.domains.clone(), "Let's Encrypt issued".to_string()))
