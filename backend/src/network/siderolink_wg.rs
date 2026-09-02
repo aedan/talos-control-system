@@ -78,16 +78,14 @@ impl SiderolinkWg {
         crate::siderolink::address::server_address(&self.installation_id)
     }
 
-    /// The full /64 overlay network prefix (as a string).
+    /// The /64 overlay network address the nodes join (`fd…::/64`): the first 8
+    /// bytes of the installation-derived ULA prefix, tail zeroed.
     pub fn network_prefix(&self) -> String {
-        let pb = crate::siderolink::address::network_prefix(&self.installation_id);
-        let groups: Vec<u16> = (0..8)
-            .map(|i| u16::from_be_bytes([pb[i * 2], pb[i * 2 + 1]]))
-            .collect();
-        format!(
-            "{}/64",
-            groups.iter().map(|g| format!("{g:x}")).collect::<Vec<_>>().join(":")
-        )
+        let net = crate::siderolink::address::addr_from_prefix_bytes(
+            crate::siderolink::address::network_prefix(&self.installation_id),
+            [0; 8],
+        );
+        format!("{net}/64")
     }
 
     pub fn endpoint_hint(&self) -> String {
@@ -104,12 +102,12 @@ impl SiderolinkWg {
     fn ensure_interface(&mut self) -> Result<(), AppError> {
         // ip link add tcs-sl0 type wireguard (ignore exists)
         let _ = run_cmd(&["ip", "link", "add", "dev", &self.iface, "type", "wireguard"]);
-        // Assign the SideroLink IPv6 ULA overlay prefix (the network the nodes
-        // join). The server's own address is the first usable in the /64.
-        let net_prefix = self.network_prefix();
-        let _ = run_cmd(&["ip", "address", "add", &net_prefix, "dev", &self.iface]);
+        // Assign the server's own overlay address (first usable in the /64) so
+        // nodes can reach TCS at server_address over the tunnel.
+        let server_addr = format!("{}/64", self.server_address());
+        let _ = run_cmd(&["ip", "address", "add", &server_addr, "dev", &self.iface]);
         // Keep the legacy IPv4 CGNAT address too so pre-existing tooling/peers
-        // that expect 100.64.0.1 keep a route; harmless alongside the IPv6 net.
+        // that expect 100.64.0.1 keep a route; harmless alongside the IPv6.
         let _ = run_cmd(&["ip", "address", "add", "100.64.0.1/10", "dev", &self.iface]);
         // WireGuard data port (not the gRPC API port).
         run_cmd(&[

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.26] — 2026-09-02
+
+### Fixed
+- **Siderolink overlay network address was wrong — nodes could not reach TCS over the tunnel.** `SiderolinkWg::network_prefix()` (and the gRPC server's twin) formatted all 16 bytes of the installation-derived ULA prefix instead of the /64 **network** address, so `tcs-sl0` was assigned a non-network IPv6 and the host had no address matching the `server_address` nodes were told to dial. Now `tcs-sl0` is assigned the server's own first-usable address (`fd…::1/64`) and `network_prefix()` returns the correct `fd…::/64` network. Live-validated on kronos: `tcs-sl0` now carries the correct ULA and the SideroLink API accepts the Provision handshake.
+
 ## [0.5.25] — 2026-09-02
 
 ### Added

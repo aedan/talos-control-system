@@ -52,12 +52,11 @@ impl SiderolinkServer {
     }
 
     pub fn network_prefix(&self) -> String {
-        let prefix_bytes = address::network_prefix(&self.installation_id);
-        // full form: 8 groups
-        let groups: Vec<u16> = (0..8)
-            .map(|i| u16::from_be_bytes([prefix_bytes[i * 2], prefix_bytes[i * 2 + 1]]))
-            .collect();
-        format!("{}/64", groups.iter().map(|g| format!("{g:x}")).collect::<Vec<_>>().join(":"))
+        let net = address::addr_from_prefix_bytes(
+            address::network_prefix(&self.installation_id),
+            [0; 8],
+        );
+        format!("{net}/64")
     }
 
     async fn register_peer(
