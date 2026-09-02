@@ -473,9 +473,69 @@ async fn run_server_all(
     });
 
     let signals = run_signal_handlers();
+
+    type ListenerFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+    // Real Talos nodes dial this (plaintext gRPC on bind_port) to join the
+    // SideroLink overlay; TCS then adds them as WireGuard peers on tcs-sl0.
+    // The WireGuard *data* port is listen_port. Runs as a separate task; a
+    // bind failure is non-fatal (direct-LAN management still works).
+    let sl_grpc_port: u16 = std::env::var("TCS_SIDEROLINK_API_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(config.siderolink.bind_port);
+    let sl_endpoint_host = std::env::var("TCS_SIDEROLINK_ENDPOINT_HOST")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            // Derive the advertised host (same logic used to bake configs).
+            let host = config
+                .server
+                .advertised_url
+                .trim()
+                .split("//")
+                .nth(1)
+                .and_then(|h| h.split('/').next())
+                .and_then(|h| h.split(':').next())
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty())
+                .or_else(|| std::env::var("TCS_PUBLIC_HOST").ok().filter(|s| !s.is_empty()))
+                .unwrap_or_else(|| config.server.bind_addr.clone());
+            Some(host)
+        });
+    let sl_installation_id =
+        std::env::var("TCS_SIDEROLINK_INSTALLATION_ID").unwrap_or_else(|_| "tcs".into());
+    let sl_router = talos_control_system::siderolink::server::build_router(
+        Arc::new(talos_control_system::siderolink::server::SiderolinkServer {
+            cfg: config.siderolink.clone(),
+            wg: state.siderolink_wg.clone(),
+            pool: state.db_pool.clone(),
+            installation_id: sl_installation_id.clone(),
+            wg_endpoint_host: sl_endpoint_host.clone().unwrap_or_else(|| config.server.bind_addr.clone()),
+            enabled: Arc::new(tokio::sync::RwLock::new(true)),
+        }),
+        talos_control_system::siderolink::server::WgGrpcNotSupported::default(),
+    );
+    let sl_grpc_addr: std::net::SocketAddr =
+        format!("{bind}:{sl_grpc_port}").parse().unwrap_or_else(|_| "0.0.0.0:8082".parse().unwrap());
+    let sl_endpoint_host_log = sl_endpoint_host.clone().unwrap_or_default();
+    let sl_installation_id_log = sl_installation_id.clone();
+    let sl_grpc_handle = tokio::spawn(async move {
+        info!(
+            addr = %sl_grpc_addr,
+            endpoint = %sl_endpoint_host_log,
+            installation_id = %sl_installation_id_log,
+            "Starting SideroLink gRPC API (plaintext); WG data port = listen_port"
+        );
+        if let Err(e) = sl_router.serve(sl_grpc_addr).await {
+            error!(error = %e, "SideroLink gRPC server error");
+        }
+    });
+    let mut sl_grpc_done: ListenerFut = Box::pin(async move {
+        let _ = sl_grpc_handle.await;
+    });
+
     // A skipped (None) listener must not trip the select! — make it a future
     // that only resolves on shutdown, not instantly.
-    type ListenerFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
     let mut https_done: ListenerFut = if let Some(h) = https_handle {
         Box::pin(async move { let _ = h.await; })
     } else {
@@ -495,6 +555,9 @@ async fn run_server_all(
         }
         _ = &mut http_done => {
             info!("HTTP server exited");
+        }
+        _ = &mut sl_grpc_done => {
+            info!("SideroLink gRPC server exited");
         }
         _ = renewal_handle => {
             info!("Certificate renewal task exited");

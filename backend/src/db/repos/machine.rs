@@ -82,6 +82,27 @@ pub async fn get_by_mac(pool: &DbPool, mac: &str) -> Result<Option<Machine>, App
     .await
 }
 
+/// Set the siderolink_connected flag for the machine whose system_uuid matches.
+/// Returns true if a row was updated.
+pub async fn set_siderolink_connected(
+    pool: &DbPool,
+    system_uuid: &str,
+    connected: bool,
+) -> Result<bool, AppError> {
+    let n = pool
+        .execute(
+            "UPDATE machines SET siderolink_connected = ?, updated_at = ? WHERE system_uuid = ?",
+            &[
+                SqlVal::Bool(connected),
+                SqlVal::DateTime(chrono::Utc::now()),
+                SqlVal::text(system_uuid),
+            ],
+        )
+        .await?;
+    Ok(n > 0)
+}
+
+
 pub async fn list(pool: &DbPool) -> Result<Vec<Machine>, AppError> {
     pool.fetch_all_as(
         &format!("SELECT {COLS} FROM machines ORDER BY created_at DESC"),

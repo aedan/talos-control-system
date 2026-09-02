@@ -31,6 +31,49 @@
   let factoryError = $state('');
   let clusterModules = $state<Set<string>>(new Set());
   let modulesDirty = $state(false);
+
+  // ── Siderolink tunnel (encrypted management path) ──────────────────
+  type SlPeer = {
+    systemUuid: string;
+    publicKey: string;
+    assignedIp: string;
+    lastSeen: string;
+  };
+  let slEnabled = $state<boolean | null>(null); // null = loading
+  let slPeers = $state<SlPeer[]>([]);
+  let slBusy = $state(false);
+  let slError = $state('');
+  async function loadSiderolink() {
+    if (!cluster) return;
+    slError = '';
+    try {
+      const res = (await client.get(`/clusters/${cid}/siderolink`)) as {
+        enabled: boolean;
+        peers: SlPeer[];
+      };
+      slEnabled = res.enabled;
+      slPeers = res.peers || [];
+    } catch (e: unknown) {
+      slError = e instanceof Error ? e.message : 'Failed to load Siderolink status';
+    }
+  }
+  async function toggleSiderolink(enable: boolean) {
+    if (!cluster) return;
+    slBusy = true;
+    slError = '';
+    try {
+      const res = (await client.post(`/clusters/${cid}/siderolink/${enable ? 'enable' : 'disable'}`, {})) as {
+        message: string;
+      };
+      success(res.message);
+      await loadSiderolink();
+      await loadMachines();
+    } catch (e: unknown) {
+      slError = e instanceof Error ? e.message : 'Siderolink toggle failed';
+    } finally {
+      slBusy = false;
+    }
+  }
   function shortModuleName(full: string): string {
     const i = full.indexOf('/');
     return i >= 0 ? full.slice(i + 1) : full;
@@ -270,6 +313,7 @@
       // Load the Image Factory module catalog once; the poll below must NOT
       // re-fetch it (doing so reset the selection + <details> state every 15s).
       void loadClusterModules();
+      void loadSiderolink();
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Failed to load cluster';
     } finally {
@@ -281,6 +325,7 @@
     pollTimer = setInterval(() => {
       loadMachines();
       loadUpgradeJobs();
+      loadSiderolink();
     }, 15000);
   });
 
@@ -787,6 +832,54 @@
     </details>
 
     <details class="panel">
+      <summary>Siderolink tunnel</summary>
+      <div class="action-block">
+        <div class="sl-head">
+          <div>
+            <h3>Encrypted management path</h3>
+            <p class="hint">
+              When enabled, nodes join TCS over a per-node WireGuard tunnel (SideroLink)
+              and TCS manages them through the tunnel first, falling back to direct LAN.
+              Enable/disable applies live to every node — no reboot. Direct management
+              always remains available, so this can never isolate the cluster.
+            </p>
+          </div>
+          {#if slEnabled === null}
+            <Spinner size="sm" />
+          {:else if slEnabled}
+            <Button variant="danger" size="sm" disabled={slBusy} title="Remove the SideroLink tunnel from all nodes" onclick={() => toggleSiderolink(false)}>Disable</Button>
+          {:else}
+            <Button variant="primary" size="sm" disabled={slBusy} title="Add the SideroLink tunnel to all nodes" onclick={() => toggleSiderolink(true)}>Enable</Button>
+          {/if}
+        </div>
+        {#if slBusy}
+          <p class="hint">Applying to nodes… this touches every running node (live, no reboot).</p>
+        {/if}
+        {#if slError}
+          <p class="err">{slError}</p>
+        {/if}
+        {#if slPeers.length}
+          <table class="sl-peers">
+            <thead>
+              <tr><th>Node</th><th>Tunnel IP</th><th>Last seen</th></tr>
+            </thead>
+            <tbody>
+              {#each slPeers as p (p.systemUuid)}
+                <tr>
+                  <td class="mono">{p.systemUuid.slice(0, 8)}</td>
+                  <td class="mono">{p.assignedIp}</td>
+                  <td>{new Date(p.lastSeen).toLocaleString()}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {:else if slEnabled}
+          <p class="hint">No nodes connected over the tunnel yet — nodes re-provision on next config apply.</p>
+        {/if}
+      </div>
+    </details>
+
+    <details class="panel">
       <summary>Cluster actions</summary>
       <div class="actions-stack">
         <div class="action-block">
@@ -1056,6 +1149,16 @@
 {/if}
 
 <style>
+  .sl-head {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 0.5rem;
+  }
+  .sl-peers {
+    width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.85rem;
+  }
+  .sl-peers th, .sl-peers td {
+    text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid var(--tcs-border);
+  }
+  .sl-peers th { color: var(--tcs-muted); font-weight: 600; }
   .confirm-overlay {
     position: fixed; inset: 0;
     background: rgba(0,0,0,0.6);

@@ -117,6 +117,9 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
             put(handlers::set_cluster_kubeconfig).get(handlers::get_cluster_kubeconfig),
         )
         .route("/clusters/:id/refresh", post(handlers::refresh_cluster))
+        .route("/clusters/:id/siderolink", get(handlers::get_cluster_siderolink))
+        .route("/clusters/:id/siderolink/enable", post(handlers::enable_cluster_siderolink))
+        .route("/clusters/:id/siderolink/disable", post(handlers::disable_cluster_siderolink))
         .route(
             "/clusters/:id/modules",
             put(handlers::set_cluster_modules),

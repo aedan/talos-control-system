@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.5.25] — 2026-09-02
+
+### Added
+- **Siderolink is now a real, working WireGuard management path (not a stub).** TCS now speaks the genuine SideroLink protocol: a `ProvisionService` gRPC API server (`backend/src/siderolink/`) that Talos nodes actually dial during join. When a node presents a valid join token, TCS assigns it a WireGuard IP from an RFC 4193 IPv6 ULA overlay, registers a kernel WireGuard peer on `tcs-sl0`, records the peer in the DB, and flips the machine to `siderolink_connected` — after which TCS manages that node over the tunnel first, falling back to direct LAN. This replaces the old no-op "siderolink inventory stub" that never encrypted or routed anything.
+- **Cluster-page Siderolink enable/disable toggle.** Each cluster detail page now has a "Siderolink tunnel" panel with a live Enable/Disable button and a per-node peer table (tunnel IP + last seen). **Enable** bakes the `SideroLinkConfig` into every running node live (no reboot); **Disable** strips it from every node live (no reboot) and revokes the cluster token. Direct-LAN management always remains available, so the cluster can never be isolated. New endpoints: `GET /clusters/:id/siderolink`, `POST /clusters/:id/siderolink/enable`, `POST /clusters/:id/siderolink/disable`.
+- **Siderolink baked into greenfield provisioning by default.** The wizard's generate-config path and the metal/PXE scheduler path now emit a standalone `SideroLinkConfig` machine-config doc for every cluster that has (or gets) a cluster token, so new nodes join over the tunnel out of the box.
+
+### Fixed
+- **Siderolink config schema was invalid — Talos rejected it.** The old code emitted a nested `machine: siderolink: {…}` key that Talos v1.10–v1.13 rejects with `unknown keys found during decoding: machine.siderolink`. Generated configs now append a top-level `SideroLinkConfig` document (`apiVersion: v1alpha1`, `kind: SideroLinkConfig`, `apiUrl: grpc://<host>:<bind_port>/?jointoken=<token>`) — the exact form Talos reconciles live. Verified on kronos: the standalone doc applies with `--mode=no-reboot` and Talos accepts it; the nested form was rejected.
+
+### Changed
+- **Removed the Settings → Siderolink menu item and settings card.** Siderolink is now configured per-cluster (the cluster-page toggle) and baked in automatically — there is no manual token/peer "menu" to manage. The `/settings/siderolink` route still exists for direct-URL access to the peer/token inventory, and the per-machine "via Siderolink tunnel" badge on the machine detail page now reflects real tunnel state.
+- **WireGuard overlay moved to RFC 4193 IPv6 ULA** (`fd…::/64`, derived deterministically from a SHA-256 of the installation ID), with `tcs-sl0` carrying both the ULA address and a legacy `100.64.0.1/10`. Peer `AllowedIPs` use the correct `/128` host form. The SideroLink gRPC API listens plaintext on `bind_port` (default 8082); the WG data plane listens on `listen_port` (default 443/udp) and is the encrypted part.
+
 ## [0.5.24] — 2026-09-02
 
 ### Fixed

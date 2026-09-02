@@ -63,7 +63,7 @@ impl ProvisionController {
         cert_sans: &[String],
         cp_addresses: &[String],
         cluster_domain: &str,
-        siderolink_block: &str,
+        siderolink_doc: &str,
     ) -> Result<ProvisionArtifact, AppError> {
         if name.trim().is_empty() || endpoint.trim().is_empty() {
             return Err(AppError::InvalidInput(
@@ -82,7 +82,7 @@ impl ProvisionController {
             cert_sans,
             cp_addresses,
             cluster_domain,
-            siderolink_block,
+            siderolink_doc,
         )?;
 
         let secrets_enc = secrets::encrypt(&self.jwt_secret, &secrets.talosconfig_yaml)?;
@@ -170,7 +170,7 @@ fn generate_talos_secrets(
     cert_sans: &[String],
     cp_addresses: &[String],
     cluster_domain: &str,
-    siderolink_block: &str,
+    siderolink_doc: &str,
 ) -> Result<GeneratedSecrets, AppError> {
     let ep = endpoint
         .trim_start_matches("https://")
@@ -254,7 +254,7 @@ fn generate_talos_secrets(
         &cert_san_list,
         cp_addresses,
         cluster_domain,
-        siderolink_block,
+        siderolink_doc,
     );
 
     let worker_yaml = build_worker_yaml(
@@ -272,7 +272,7 @@ fn generate_talos_secrets(
         wipe,
         &cert_san_list,
         cluster_domain,
-        siderolink_block,
+        siderolink_doc,
     );
 
     let talosconfig_yaml = build_talosconfig_yaml(
@@ -545,7 +545,7 @@ fn build_controlplane_yaml(
     cert_sans: &[String],
     cp_addresses: &[String],
     cluster_domain: &str,
-    siderolink_block: &str,
+    siderolink_doc: &str,
 ) -> String {
     let k8s_ver = k8s_version.strip_prefix('v').unwrap_or(k8s_version);
     let sa_key_b64 = base64::engine::general_purpose::STANDARD.encode(sa_key.as_bytes());
@@ -589,7 +589,7 @@ version: v1alpha1
 debug: false
 persist: true
 machine:
-{siderolink_block}  type: controlplane
+  type: controlplane
   token: {machine_token}
   ca:
     crt: {mc_crt}
@@ -678,6 +678,7 @@ cluster:
       key: {etcd_key}
   extraManifests: []
   inlineManifests: []
+{siderolink_doc}
 "#,
         machine_token = machine_token,
         mc_crt = b64_le(machine_ca_crt),
@@ -702,7 +703,7 @@ cluster:
         api_sans_yaml = api_sans_yaml,
         cluster_domain = cluster_domain,
         network_yaml = network_yaml,
-        siderolink_block = siderolink_block,
+        siderolink_doc = siderolink_doc,
     )
 }
 
@@ -721,7 +722,7 @@ fn build_worker_yaml(
     wipe: bool,
     cert_sans: &[String],
     cluster_domain: &str,
-    siderolink_block: &str,
+    siderolink_doc: &str,
 ) -> String {
     let cert_sans_yaml = if cert_sans.is_empty() {
         "  certSANs: []".to_string()
@@ -745,7 +746,7 @@ version: v1alpha1
 debug: false
 persist: true
 machine:
-{siderolink_block}  type: worker
+  type: worker
   token: {machine_token}
   ca:
     crt: {mc_crt}
@@ -793,6 +794,7 @@ cluster:
       kubernetes:
         disabled: true
       service: {{}}
+{siderolink_doc}
 "#,
         machine_token = machine_token,
         mc_crt = b64_le(machine_ca_crt),
@@ -808,7 +810,7 @@ cluster:
         cert_sans = cert_sans_yaml,
         cluster_domain = cluster_domain,
         network_yaml = network_yaml,
-        siderolink_block = siderolink_block,
+        siderolink_doc = siderolink_doc,
     )
 }
 
@@ -841,47 +843,57 @@ fn b64_le(pem: &str) -> String {
 mod tests {
     use super::*;
 
-    fn sample_block() -> String {
-        "  siderolink:\n    enabled: true\n    endpoint: tcs.example.com:8082\n    token: slc_abc123\n".to_string()
+    fn sample_doc() -> String {
+        // Standalone SideroLinkConfig doc, as appended to generated configs.
+        "---\napiVersion: v1alpha1\nkind: SideroLinkConfig\napiUrl: grpc://tcs.example.com:8082/?jointoken=slc_abc123\n".to_string()
     }
 
     #[test]
-    fn siderolink_block_splices_into_machine_valid_yaml() {
-        let block = sample_block();
+    fn siderolink_doc_appends_standalone_config() {
+        let doc = sample_doc();
         let cp = build_controlplane_yaml(
             "demo",
             "crt", "key", "crt", "key", "crt", "key", "crt", "key",
             "sa", "cid", "csec", "enc", "mtok", "ktok",
             "https://10.0.0.1:6443", "v1.36.3", "installer",
             None, "/dev/sda", true, &[], &[], "cluster.local",
-            &block,
+            &doc,
         );
-        // Must sit directly under `machine:`, before `type: controlplane`.
-        assert!(cp.contains("machine:\n  siderolink:\n    enabled: true\n    endpoint: tcs.example.com:8082\n    token: slc_abc123\n  type: controlplane"), "controlplane:\n{cp}");
-        // Whole doc must parse as a single YAML mapping.
-        let v: serde_yaml::Value = serde_yaml::from_str(&cp).unwrap();
-        let sl = v["machine"]["siderolink"].clone();
-        assert_eq!(sl["enabled"], serde_yaml::Value::Bool(true));
-        assert_eq!(sl["token"], serde_yaml::Value::String("slc_abc123".into()));
+        // The standalone doc is appended (not nested under machine:).
+        assert!(cp.contains("kind: SideroLinkConfig"), "no SideroLinkConfig doc:\n{cp}");
+        assert!(cp.contains("apiUrl: grpc://tcs.example.com:8082/?jointoken=slc_abc123"));
+        // Parse the multi-doc config (split on doc separators); the machine doc
+        // must have no siderolink key and a SideroLinkConfig doc must be present.
+        let parse_docs = |s: &str| -> Vec<serde_yaml::Value> {
+            s.split("\n---\n")
+                .map(|d| serde_yaml::from_str::<serde_yaml::Value>(d).unwrap())
+                .collect()
+        };
+        let docs = parse_docs(&cp);
+        let machine_doc = docs.iter().find(|d| d.get("machine").is_some()).unwrap();
+        assert!(machine_doc["machine"].get("siderolink").is_none(),
+            "machine doc should not nest siderolink:\n{}", serde_yaml::to_string(machine_doc).unwrap());
+        let sl_doc = docs.iter().find(|d| d.get("kind").and_then(|k| k.as_str()) == Some("SideroLinkConfig")).unwrap();
+        assert!(sl_doc["apiUrl"].as_str().unwrap().contains("jointoken=slc_abc123"));
 
         let worker = build_worker_yaml(
             "demo", "crt", "crt", "cid", "csec", "mtok", "ktok",
             "https://10.0.0.1:6443", "installer", None, "/dev/sda", true,
-            &[], "cluster.local", &block,
+            &[], "cluster.local", &doc,
         );
-        let wv: serde_yaml::Value = serde_yaml::from_str(&worker).unwrap();
-        assert_eq!(wv["machine"]["siderolink"]["token"], serde_yaml::Value::String("slc_abc123".into()));
+        let wdocs = parse_docs(&worker);
+        assert!(wdocs.iter().any(|d| d.get("kind").and_then(|k| k.as_str()) == Some("SideroLinkConfig")));
     }
 
     #[test]
-    fn empty_siderolink_block_yields_no_siderolink_key() {
+    fn empty_siderolink_doc_yields_no_siderolink() {
         let cp = build_controlplane_yaml(
             "demo", "crt","key","crt","key","crt","key","crt","key",
             "sa","cid","csec","enc","mtok","ktok",
             "https://10.0.0.1:6443","v1.36.3","installer",
             None,"/dev/sda",true,&[],&[],"cluster.local","",
         );
-        assert!(!cp.contains("siderolink"), "unexpected siderolink:\n{cp}");
+        assert!(!cp.contains("SideroLinkConfig"), "unexpected SideroLinkConfig:\n{cp}");
         let v: serde_yaml::Value = serde_yaml::from_str(&cp).unwrap();
         assert!(v["machine"]["siderolink"].is_null());
         assert_eq!(v["machine"]["type"], serde_yaml::Value::String("controlplane".into()));

@@ -3924,48 +3924,17 @@ pub async fn get_provision_artifact(
 /// in and form the WireGuard tunnel automatically. Returns an empty string when
 /// there's no cluster to tie a token to. The block is omitted (empty) if we
 /// cannot determine an endpoint, so config generation never breaks.
+/// Build the standalone `SideroLinkConfig` machine-config document for a
+/// cluster (the form Talos v1.10+ actually reconciles live). Appended to
+/// generated machine configs so nodes dial into TCS's SideroLink API and bring
+/// up a WireGuard tunnel. Delegates to the shared siderolink helper.
 async fn siderolink_block_for_cluster(
     pool: &crate::db::pool::DbPool,
     cluster_id: Option<uuid::Uuid>,
     sl: &crate::config::SideroLinkConfig,
     server: &crate::config::ServerConfig,
 ) -> String {
-    let Some(cid) = cluster_id else {
-        return String::new();
-    };
-    // Persistent per-cluster token (created on first use).
-    let token = match crate::controllers::ClusterController::new(pool.clone())
-        .ensure_cluster_siderolink_token(cid)
-        .await
-    {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!(error = %e, "could not ensure cluster siderolink token; omitting block");
-            return String::new();
-        }
-    };
-    // Advertised endpoint nodes dial: env override, else advertised_url host +
-    // bind_port, else bind_addr + bind_port.
-    let endpoint = std::env::var("TCS_SIDEROLINK_ENDPOINT").ok().filter(|s| !s.is_empty());
-    let endpoint = match endpoint {
-        Some(e) => e,
-        None => {
-            let host = server
-                .advertised_url
-                .trim()
-                .split("//")
-                .nth(1)
-                .and_then(|h| h.split('/').next())
-                .and_then(|h| h.split(':').next())
-                .map(|s| s.to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| server.bind_addr.clone());
-            format!("{host}:{}", sl.bind_port)
-        }
-    };
-    format!(
-        "  siderolink:\n    enabled: true\n    endpoint: {endpoint}\n    token: {token}\n"
-    )
+    crate::siderolink::siderolink_doc_for_cluster(pool, cluster_id, sl, server).await
 }
 
 #[derive(Deserialize)]
@@ -4044,6 +4013,55 @@ pub async fn siderolink_register(
             },
         })),
     ))
+}
+
+/// GET /clusters/:id/siderolink → { enabled, peers }
+pub async fn get_cluster_siderolink(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (enabled, peers) = crate::controllers::ClusterController::new(state.db_pool.clone())
+        .siderolink_status(id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "enabled": enabled, "peers": peers })))
+}
+
+/// POST /clusters/:id/siderolink/enable — bake SideroLinkConfig into all nodes.
+pub async fn enable_cluster_siderolink(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    let doc = siderolink_block_for_cluster(&state.db_pool, Some(id), &state.config.siderolink, &state.config.server).await;
+    let patched = crate::controllers::ClusterController::new(state.db_pool.clone())
+        .siderolink_enable(id, &doc)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let _ = crate::utils::audit::log_action(&state.db_pool, &claims.sub, "cluster_siderolink_enable", &format!("cluster {id}"), &format!("patched={patched}")).await;
+    Ok(Json(serde_json::json!({
+        "message": format!("Siderolink enabled — {patched} node(s) updated live (no reboot)"),
+        "patched": patched,
+    })))
+}
+
+/// POST /clusters/:id/siderolink/disable — strip SideroLinkConfig from all nodes.
+pub async fn disable_cluster_siderolink(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    let patched = crate::controllers::ClusterController::new(state.db_pool.clone())
+        .siderolink_disable(id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let _ = crate::utils::audit::log_action(&state.db_pool, &claims.sub, "cluster_siderolink_disable", &format!("cluster {id}"), &format!("patched={patched}")).await;
+    Ok(Json(serde_json::json!({
+        "message": format!("Siderolink disabled — {patched} node(s) updated live (no reboot)"),
+        "patched": patched,
+    })))
 }
 
 pub async fn siderolink_peers(

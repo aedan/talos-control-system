@@ -505,6 +505,22 @@ async fn load_config_yaml(
                     &machine.install_disk
                 };
                 let prov_ctrl = ProvisionController::new(pool.clone(), jwt_secret.to_string());
+                // Bake Siderolink into greenfield metal configs (default ON).
+                let sl_doc = match crate::config::Config::load() {
+                    Ok(cfg) => {
+                        crate::siderolink::siderolink_doc_for_cluster(
+                            &pool,
+                            Some(cluster_id),
+                            &cfg.siderolink,
+                            &cfg.server,
+                        )
+                        .await
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not load config for siderolink doc; omitting");
+                        String::new()
+                    }
+                };
                 let art = prov_ctrl
                     .generate_config(
                         &cluster.name,
@@ -518,7 +534,7 @@ async fn load_config_yaml(
                         &all_addresses,
                         &cp_addresses,
                         "cluster.local",
-                        "", // Siderolink block baked in the wizard path; metal path omits for now
+                        &sl_doc,
                     )
                     .await?;
 

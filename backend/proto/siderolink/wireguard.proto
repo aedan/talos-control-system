@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package sidero.link;
+
+// WireGuardOverGRPCService provides a service for sending and receiving WireGuard packets over gRPC.
+service WireGuardOverGRPCService {
+  rpc CreateStream(stream PeerPacket) returns (stream PeerPacket);
+}
+
+message PeerPacket {
+  bytes Data = 2;
+}

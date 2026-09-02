@@ -22,11 +22,14 @@ pub struct SiderolinkWg {
     public_key: String,
     iface: String,
     enabled: bool,
+    installation_id: String,
 }
 
 impl SiderolinkWg {
     pub fn init(cfg: &SideroLinkConfig, data_dir: &str) -> Arc<Self> {
         let iface = std::env::var("TCS_SIDEROLINK_IFACE").unwrap_or_else(|_| "tcs-sl0".into());
+        let installation_id =
+            std::env::var("TCS_SIDEROLINK_INSTALLATION_ID").unwrap_or_else(|_| "tcs".into());
         let key_path = PathBuf::from(data_dir).join("siderolink_wg_private.key");
         let (private_key, public_key) = load_or_create_keys(&key_path);
         let mut mgr = Self {
@@ -35,13 +38,14 @@ impl SiderolinkWg {
             public_key,
             iface,
             enabled: false,
+            installation_id,
         };
         match mgr.ensure_interface() {
             Ok(()) => {
                 mgr.enabled = true;
                 info!(
                     iface = %mgr.iface,
-                    port = mgr.cfg.bind_port,
+                    wg_port = mgr.cfg.listen_port,
                     "Siderolink WireGuard interface ready"
                 );
             }
@@ -64,7 +68,26 @@ impl SiderolinkWg {
     }
 
     pub fn listen_port(&self) -> u16 {
-        self.cfg.bind_port
+        // The WireGuard *data* port nodes dial (separate from the SideroLink
+        // gRPC API port, which is bind_port).
+        self.cfg.listen_port
+    }
+
+    /// The server's own address on the SideroLink IPv6 ULA overlay.
+    pub fn server_address(&self) -> String {
+        crate::siderolink::address::server_address(&self.installation_id)
+    }
+
+    /// The full /64 overlay network prefix (as a string).
+    pub fn network_prefix(&self) -> String {
+        let pb = crate::siderolink::address::network_prefix(&self.installation_id);
+        let groups: Vec<u16> = (0..8)
+            .map(|i| u16::from_be_bytes([pb[i * 2], pb[i * 2 + 1]]))
+            .collect();
+        format!(
+            "{}/64",
+            groups.iter().map(|g| format!("{g:x}")).collect::<Vec<_>>().join(":")
+        )
     }
 
     pub fn endpoint_hint(&self) -> String {
@@ -73,7 +96,7 @@ impl SiderolinkWg {
             format!(
                 "{}:{}",
                 std::env::var("TCS_PUBLIC_HOST").unwrap_or_else(|_| "tcs.local".into()),
-                self.cfg.bind_port
+                self.cfg.listen_port
             )
         })
     }
@@ -81,15 +104,20 @@ impl SiderolinkWg {
     fn ensure_interface(&mut self) -> Result<(), AppError> {
         // ip link add tcs-sl0 type wireguard (ignore exists)
         let _ = run_cmd(&["ip", "link", "add", "dev", &self.iface, "type", "wireguard"]);
-        // Assign server IP .1 on the CGNAT-ish subnet
-        let server_ip = "100.64.0.1/10";
-        let _ = run_cmd(&["ip", "address", "add", server_ip, "dev", &self.iface]);
+        // Assign the SideroLink IPv6 ULA overlay prefix (the network the nodes
+        // join). The server's own address is the first usable in the /64.
+        let net_prefix = self.network_prefix();
+        let _ = run_cmd(&["ip", "address", "add", &net_prefix, "dev", &self.iface]);
+        // Keep the legacy IPv4 CGNAT address too so pre-existing tooling/peers
+        // that expect 100.64.0.1 keep a route; harmless alongside the IPv6 net.
+        let _ = run_cmd(&["ip", "address", "add", "100.64.0.1/10", "dev", &self.iface]);
+        // WireGuard data port (not the gRPC API port).
         run_cmd(&[
             "wg",
             "set",
             &self.iface,
             "listen-port",
-            &self.cfg.bind_port.to_string(),
+            &self.cfg.listen_port.to_string(),
             "private-key",
             "/dev/stdin",
         ])
@@ -102,23 +130,26 @@ impl SiderolinkWg {
                 "set",
                 &self.iface,
                 "listen-port",
-                &self.cfg.bind_port.to_string(),
+                &self.cfg.listen_port.to_string(),
                 "private-key",
                 tmp.to_str().unwrap_or(""),
             ]);
             let _ = fs::remove_file(&tmp);
             r
         })?;
-        run_cmd(&["ip", "link", "set", "mtu", &self.cfg.mtu.to_string(), "dev", &self.iface])?;
+        // WireGuard link MTU (nodes use 1280; the host interface can be higher).
+        run_cmd(&["ip", "link", "set", "mtu", "1420", "dev", &self.iface])?;
         run_cmd(&["ip", "link", "set", "up", "dev", &self.iface])?;
         Ok(())
     }
 
-    /// Add or update a peer on the WG interface.
+    /// Add or update a peer on the WG interface. `allowed_ip` is the node's
+    /// overlay address (IPv6). IPv6 peers use /128, IPv4 /32.
     pub fn set_peer(&self, public_key: &str, allowed_ip: &str) -> Result<(), AppError> {
         if !self.enabled {
             return Ok(());
         }
+        let bits = if allowed_ip.contains(':') { 128 } else { 32 };
         run_cmd(&[
             "wg",
             "set",
@@ -126,7 +157,7 @@ impl SiderolinkWg {
             "peer",
             public_key,
             "allowed-ips",
-            &format!("{}/32", allowed_ip.trim_end_matches("/32")),
+            &format!("{allowed_ip}/{bits}"),
             "persistent-keepalive",
             "25",
         ])?;

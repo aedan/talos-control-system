@@ -150,7 +150,7 @@
           class="settings-toggle"
           class:open={settingsOpen}
           onclick={() => (settingsOpen = !settingsOpen)}
-          title="Open settings: certificates, auth, branding, siderolink, metal/PXE, users, audit logs, system"
+          title="Open settings: certificates, auth, branding, metal/PXE, users, audit logs, system"
         >
           Settings
           <span class="caret">▾</span>
@@ -160,7 +160,6 @@
             <li><a href="/settings/certificates" title="Manage the TCS HTTPS certificate (self-signed, provided, or Let's Encrypt)">Certificates</a></li>
             <li><a href="/settings/auth" title="Configure local, LDAP, OIDC, and SAML authentication">Auth</a></li>
             <li><a href="/settings/branding" title="Set the product name, logo, and theme colors">Branding</a></li>
-            <li><a href="/settings/siderolink" title="Manage the SideroLink WireGuard mesh for out-of-band node access">Siderolink</a></li>
             <li><a href="/settings/metal" title="Configure the metal provisioning server (DHCP/PXE) for bare-metal installs">Metal / PXE</a></li>
             <li><a href="/settings/users" title="Create, edit, and disable TCS users and roles">Users</a></li>
             <li><a href="/settings/audit-logs" title="Review the immutable audit trail of TCS actions">Audit Logs</a></li>

@@ -9,6 +9,7 @@ pub mod branding;
 pub mod integration;
 pub mod utils;
 pub mod cert;
+pub mod siderolink;
 pub mod static_server;
 pub mod cli;
 

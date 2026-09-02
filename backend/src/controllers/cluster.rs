@@ -94,6 +94,105 @@ impl ClusterController {
         crate::db::repos::siderolink::revoke_cluster_token(&self.pool, cluster_id).await
     }
 
+    /// Whether the cluster has an active Siderolink token (i.e. the tunnel is
+    /// enabled) and the list of currently-connected peers.
+    pub async fn siderolink_status(
+        &self,
+        cluster_id: Uuid,
+    ) -> Result<(bool, Vec<serde_json::Value>), AppError> {
+        let enabled = crate::db::repos::siderolink::get_cluster_token(&self.pool, cluster_id)
+            .await?
+            .is_some();
+        let machines = crate::db::repos::machine::list_by_cluster(&self.pool, cluster_id).await?;
+        let uuids: std::collections::HashSet<String> = machines
+            .iter()
+            .map(|m| m.system_uuid.clone())
+            .collect();
+        let peers = crate::db::repos::siderolink::list_peers(&self.pool)
+            .await?
+            .into_iter()
+            .filter(|p| uuids.contains(&p.system_uuid))
+            .filter_map(|p| serde_json::to_value(p).ok())
+            .collect();
+        Ok((enabled, peers))
+    }
+
+    /// Enable Siderolink for the cluster: ensure a token exists and apply the
+    /// standalone `SideroLinkConfig` doc to every running machine (live, no
+    /// reboot). Returns the number of machines patched.
+    pub async fn siderolink_enable(
+        &self,
+        cluster_id: Uuid,
+        sl_doc: &str,
+    ) -> Result<usize, AppError> {
+        if sl_doc.trim().is_empty() {
+            return Err(AppError::InvalidInput(
+                "no Siderolink doc to apply (token missing?)".into(),
+            ));
+        }
+        let _token = self.ensure_cluster_siderolink_token(cluster_id).await?;
+        let machines = crate::db::repos::machine::list_by_cluster(&self.pool, cluster_id).await?;
+        let mut patched = 0usize;
+        let mut last_err = String::new();
+        for m in machines.iter().filter(|m| m.status == "running") {
+            match self
+                .apply_machine_config_ex(m.id, Some(sl_doc), false, false, true)
+                .await
+            {
+                Ok(_) => patched += 1,
+                Err(e) => last_err = e.to_string(),
+            }
+        }
+        if patched == 0 && !last_err.is_empty() {
+            return Err(AppError::Internal(format!(
+                "no machines patched: {last_err}"
+            )));
+        }
+        Ok(patched)
+    }
+
+    /// Disable Siderolink for the cluster: strip the `SideroLinkConfig` doc
+    /// from every running machine's live config (no reboot), then revoke the
+    /// cluster token. Returns the number of machines patched.
+    pub async fn siderolink_disable(&self, cluster_id: Uuid) -> Result<usize, AppError> {
+        let machines = crate::db::repos::machine::list_by_cluster(&self.pool, cluster_id).await?;
+        let mut patched = 0usize;
+        let mut last_err = String::new();
+        for m in machines.iter().filter(|m| m.status == "running") {
+            match self.strip_siderolink_from_machine(m.id).await {
+                Ok(true) => patched += 1,
+                Ok(false) => {} // doc not present; nothing to do
+                Err(e) => last_err = e.to_string(),
+            }
+        }
+        // Revoke the token so stale configs can no longer join.
+        let _ = self.revoke_cluster_siderolink_token(cluster_id).await;
+        if patched == 0 && !last_err.is_empty() {
+            return Err(AppError::Internal(format!("no machines patched: {last_err}")));
+        }
+        Ok(patched)
+    }
+
+    /// Fetch a machine's live config, remove the standalone `SideroLinkConfig`
+    /// doc, and apply the result (no reboot). Returns true if a doc was found
+    /// and removed.
+    async fn strip_siderolink_from_machine(&self, machine_id: Uuid) -> Result<bool, AppError> {
+        let (cluster, m) = self.cluster_and_machine(machine_id).await?;
+        let tc = self.talosconfig_yaml(&cluster)?;
+        let endpoint = self.effective_endpoint(&m).await?;
+        let live = TalosctlClient::get_machine_config(&endpoint, tc.as_deref()).await?;
+        let stripped = remove_siderolink_doc(&live);
+        let changed = stripped != live;
+        if changed {
+            TalosctlClient::apply_config(&endpoint, &stripped, false, false, tc.as_deref()).await?;
+            let mut mm = m;
+            mm.desired_config = Some(stripped);
+            mm.updated_at = chrono::Utc::now();
+            let _ = crate::db::repos::machine::update(&self.pool, &mm).await;
+        }
+        Ok(changed)
+    }
+
 
     pub async fn import_cluster(
         &self,
@@ -1635,6 +1734,19 @@ fn wrap_network_helper_yaml(net: &str) -> String {
 }
 
 /// Rewrite `machine.install.disk` in Talos machine config YAML.
+/// Remove any standalone `SideroLinkConfig` document from a (possibly
+/// multi-doc) machine-config string. Returns the config unchanged when no such
+/// doc is present.
+pub fn remove_siderolink_doc(config_yaml: &str) -> String {
+    config_yaml
+        .split("\n---\n")
+        .filter(|doc| !doc.lines().any(|l| l.trim() == "kind: SideroLinkConfig"))
+        .collect::<Vec<_>>()
+        .join("\n---\n")
+        .trim_end_matches('\n')
+        .to_string()
+}
+
 pub fn inject_install_disk(config_yaml: &str, disk: &str) -> String {
     let disk = disk.trim();
     if disk.is_empty() {
