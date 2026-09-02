@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.38] — 2026-09-02
+
+### Fixed
+- **Siderolink interface never created at boot (regression introduced in v0.5.37).** While refactoring `SiderolinkWg::init` to spawn the background socket-prime thread, the `ensure_interface()` call was accidentally dropped, so on TCS startup the `tcs-sl0` WireGuard device was never created, `wg_enabled` stayed `false`, the prime thread never spawned, and the tunnel could not come up (`tcs` reported "Siderolink WireGuard not active" was not even logged because the match block was gone). Restored the `ensure_interface()` call (and its ready/not-active logging) before the manager is wrapped in `Arc`, so the device is created, the key set, the socket settled, and the background prime thread is spawned when the interface is enabled.
+
 ## [0.5.37] — 2026-09-02
 
 ### Fixed

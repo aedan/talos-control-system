@@ -45,6 +45,22 @@ impl SiderolinkWg {
             enabled: false,
             installation_id,
         };
+        match mgr.ensure_interface() {
+            Ok(()) => {
+                mgr.enabled = true;
+                info!(
+                    iface = %mgr.iface,
+                    wg_port = mgr.cfg.listen_port,
+                    "Siderolink WireGuard interface ready"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Siderolink WireGuard not active (install wireguard-tools or run as root). Inventory registration still works."
+                );
+            }
+        }
         let arc = Arc::new(mgr.clone());
         if arc.enabled() {
             // Prime the socket in the background. A freshly netlink-created WG
