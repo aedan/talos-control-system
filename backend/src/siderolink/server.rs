@@ -125,8 +125,20 @@ impl ProvisionService for SiderolinkServer {
             return Err(tonic::Status::invalid_argument("node_uuid and node_public_key required"));
         }
 
-        // Assign the node a random overlay address in the /64.
-        let (node_addr, _tail) = address::random_node_prefix(&self.installation_id);
+        // Reuse the node's stable overlay address if it already provisioned (the
+        // Talos SideroLink Manager re-dials Provision periodically — e.g. every
+        // 30s to check peer health — and a changing address would prevent the
+        // WireGuard tunnel from ever establishing).
+        let existing = crate::db::repos::siderolink::find_by_uuid(&self.pool, &req.node_uuid)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+        let node_addr = match existing {
+            Some(peer) if !peer.assigned_ip.is_empty() => peer.assigned_ip,
+            _ => {
+                let (addr, _tail) = address::random_node_prefix(&self.installation_id);
+                addr
+            }
+        };
         let node_prefix = format!("{node_addr}/64");
 
         if let Err(e) = self

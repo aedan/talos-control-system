@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.28] — 2026-09-02
+
+### Fixed
+- **Siderolink node address changed on every re-provision, so the WireGuard tunnel never established.** Talos's SideroLink `ManagerController` re-dials `Provision` periodically (≈30s) to check peer health, and TCS was assigning a fresh random overlay IP each time — the node kept changing address, the TCS WireGuard peer kept being re-registered with a new IP, and the tunnel never came up (`connected: false` forever, peer flapping). `Provision` now reuses the node's existing assigned IP (looked up by `node_uuid`) when the node has already joined, so the overlay address is stable and the WireGuard handshake can complete. Live-validated on kronos: a worker provisioned, got a stable `fd…` tunnel IP, and TCS registered a persistent WireGuard peer.
+
 ## [0.5.27] — 2026-09-02
 
 ### Fixed
