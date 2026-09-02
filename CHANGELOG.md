@@ -2,7 +2,10 @@
 
 ## [Unreleased]
 
-## [0.5.18] — 2026-08-31
+## [0.5.19] — 2026-08-31
+
+### Fixed
+- **GoDaddy DNS-01 TXT record schema.** GoDaddy's v1 API rejected the record body with `422 INVALID_BODY`: TXT `data` must be a plain **string** (not an array) and `ttl` must be **≥ 600**. Fixed the GoDaddy provider to send `{"data": "<value>", "ttl": 600}`. (Auth + zone derivation were already correct — this was the last blocker to a real Let's Encrypt DNS-01 cert via GoDaddy.)
 
 ### Fixed
 - **DNS-01 Let's Encrypt actually works now.** The live "Apply" path (`TlsRuntime::apply_mode`) and the boot path **hardcoded HTTP-01**, ignoring the `challenge_type` you selected — so a `dns-01` config failed with an HTTP-01 "no valid A records" error. Both now route through `AcmeClient`, which dispatches by challenge type. The `AcmeClient` DNS-01 arm was also a **stub that silently produced a self-signed cert** instead of doing a real DNS-01 challenge — replaced with a real implementation.

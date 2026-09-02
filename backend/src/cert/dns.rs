@@ -89,8 +89,8 @@ impl DnsProvider for GoDaddyProvider {
         );
 
         let record_body = serde_json::json!([{
-            "data": [value],
-            "ttl": 300,
+            "data": value,
+            "ttl": 600,
         }]);
 
         let resp = self.client
