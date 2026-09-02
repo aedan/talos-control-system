@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.39] — 2026-09-02
+
+### Fixed
+- **Siderolink background socket prime fired too early to take effect.** A freshly netlink-created `tcs-sl0` device does not reliably receive until it has been alive for well over 6 seconds — on kronos a prime bounce (down/up + key re-set) at +6s left the peer at 0 rx, while the identical prime run on an already-aged device worked immediately. The single +6s prime therefore missed the window. The background prime thread now re-primes at **6s, 26s, and 71s** after boot (cumulative), so once the device has aged enough one prime lands on a functional socket; each prime is idempotent and safe on an already-working tunnel (a WG link down/up preserves peer state and only clears the addresses, which are restored). This makes a clean TCS boot — including the true first-boot with no surviving device — come up with a working Siderolink tunnel with no manual intervention.
+
 ## [0.5.38] — 2026-09-02
 
 ### Fixed

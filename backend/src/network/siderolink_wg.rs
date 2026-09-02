@@ -65,18 +65,22 @@ impl SiderolinkWg {
         if arc.enabled() {
             // Prime the socket in the background. A freshly netlink-created WG
             // device's kernel UDP socket is not reliably receiving for the first
-            // seconds after it is created/`up`-ed — `ensure_interface()` does the
-            // initial best-effort setup, but a down/up + key re-set a few seconds
-            // later (once the device has settled) is what reliably gets the socket
-            // demultiplexing incoming datagrams (validated live on kronos: the
-            // boot-time sequence alone left the peer at 0 rx; the delayed prime
-            // bounce fixed it). Runs on a detached thread so it never blocks boot;
-            // it re-applies the key + re-bounces, and main.rs re-applies DB peers
-            // right after init returns.
+            // several SECONDS-TO-MINUTES after it is created/`up`-ed — a prime
+            // bounce (down/up + key re-set) a few seconds in is not enough; on
+            // kronos a from-scratch device only started receiving once the
+            // prime ran on an already-aged device. `ensure_interface()` does the
+            // initial best-effort setup; this thread re-primes a few times at
+            // increasing delays (6s, 20s, 45s) so that once the device has aged
+            // enough, one prime lands on a functional socket. Each prime is
+            // idempotent and harmless on an already-working tunnel (a WG link
+            // down/up preserves peer state, only clears addresses, which are
+            // restored). Runs on a detached thread so it never blocks boot.
             let prime = arc.clone();
             std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(6));
-                prime.prime_socket();
+                for delay in [6u64, 20u64, 45u64] {
+                    std::thread::sleep(std::time::Duration::from_secs(delay));
+                    prime.prime_socket();
+                }
             });
         }
         arc
