@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.40] — 2026-09-02
+
+### Fixed
+- **Siderolink background socket prime used fixed delays that could all land before the device was ready.** A freshly-created `tcs-sl0` device does not reliably receive until it has aged an indeterminate amount (on kronos, primes at +6s and +71s left the peer at 0 rx, while the identical prime at ~3 min worked immediately) — so fixed-delay primes could all miss. The background prime thread now **primes, waits ~8s, and checks whether any peer completed a handshake** (via `wg show` "latest handshake"), retrying every ~15s until a handshake is observed or ~5 minutes elapse, then stops. It exits early the moment the tunnel is functional (so a fast-aging device isn't over-primed) and is silent when no node is joining (the give-up path logs once). This makes a clean first-boot come up with a working Siderolink tunnel regardless of how long the device takes to become functional.
+
 ## [0.5.39] — 2026-09-02
 
 ### Fixed

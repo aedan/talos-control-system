@@ -9,7 +9,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use base64::Engine;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::config::SideroLinkConfig;
@@ -65,33 +65,53 @@ impl SiderolinkWg {
         if arc.enabled() {
             // Prime the socket in the background. A freshly netlink-created WG
             // device's kernel UDP socket is not reliably receiving for the first
-            // several SECONDS-TO-MINUTES after it is created/`up`-ed — a prime
-            // bounce (down/up + key re-set) a few seconds in is not enough; on
-            // kronos a from-scratch device only started receiving once the
-            // prime ran on an already-aged device. `ensure_interface()` does the
-            // initial best-effort setup; this thread re-primes a few times at
-            // increasing delays (6s, 20s, 45s) so that once the device has aged
-            // enough, one prime lands on a functional socket. Each prime is
+            // several SECONDS-TO-MINUTES after it is created/`up`-ed — on kronos a
+            // from-scratch device only started receiving once the prime ran on an
+            // already-aged device (a prime at +6s or even +71s left the peer at
+            // 0 rx; the identical prime at ~3 min worked immediately). We can't
+            // know exactly when the device ages in, so instead of fixed delays we
+            // prime, then check whether any peer has completed a handshake; if
+            // not, wait 15s and prime again, for up to ~5 minutes. Each prime is
             // idempotent and harmless on an already-working tunnel (a WG link
             // down/up preserves peer state, only clears addresses, which are
-            // restored). Runs on a detached thread so it never blocks boot.
+            // restored), and we stop as soon as a handshake is seen. Runs on a
+            // detached thread so it never blocks boot.
             let prime = arc.clone();
             std::thread::spawn(move || {
-                for delay in [6u64, 20u64, 45u64] {
-                    std::thread::sleep(std::time::Duration::from_secs(delay));
-                    prime.prime_socket();
+                std::thread::sleep(std::time::Duration::from_secs(6));
+                for attempt in 0..20 {
+                    if prime.prime_socket() {
+                        info!(
+                            attempt,
+                            iface = %prime.iface,
+                            "Siderolink WireGuard socket functional (handshake observed)"
+                        );
+                        return;
+                    }
+                    tracing::debug!(
+                        attempt,
+                        iface = %prime.iface,
+                        "Siderolink socket prime: no handshake yet, retrying in 15s"
+                    );
+                    std::thread::sleep(std::time::Duration::from_secs(15));
                 }
+                warn!(
+                    iface = %prime.iface,
+                    "Siderolink socket prime: no handshake after ~5 min; giving up (node may not be joining)"
+                );
             });
         }
         arc
     }
 
     /// Delayed prime: re-bounce the link and re-set the key on the now-settled
-    /// device so the kernel WG UDP socket is functional. Called once a few
-    /// seconds after boot by a background thread.
-    pub fn prime_socket(&self) {
+    /// device so the kernel WG UDP socket is functional. Returns true once a
+    /// peer handshake is observed (the socket is receiving); the caller retries
+    /// on false. A fresh device needs to age before the prime takes effect, so
+    /// this waits a few seconds after each prime for a handshake to land.
+    pub fn prime_socket(&self) -> bool {
         if !self.enabled {
-            return;
+            return false;
         }
         let _ = run_cmd(&["ip", "link", "set", "down", "dev", &self.iface]);
         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -126,9 +146,25 @@ impl SiderolinkWg {
         let _ = run_cmd(&["ip", "address", "add", &server_addr, "dev", &self.iface]);
         let _ = run_cmd(&["ip", "address", "add", "100.64.0.1/10", "dev", &self.iface]);
         match ok {
-            Ok(()) => info!(iface = %self.iface, "Siderolink WireGuard socket primed"),
+            Ok(()) => debug!(iface = %self.iface, "Siderolink WireGuard socket primed"),
             Err(e) => warn!(error = %e, iface = %self.iface, "Siderolink socket prime: key re-set failed"),
         }
+        // Give the node time to complete a handshake against the primed socket,
+        // then check. `wg show` prints a "latest handshake:" line only for peers
+        // that have actually handshook — its presence means the socket is
+        // receiving and the tunnel is functional.
+        std::thread::sleep(std::time::Duration::from_secs(8));
+        self.has_handshake()
+    }
+
+    /// True if any peer on the WG interface has completed a handshake (the
+    /// kernel `wg show` output includes a "latest handshake:" line for such
+    /// peers). Used by the background prime to know when the socket is working.
+    fn has_handshake(&self) -> bool {
+        let out = run_cmd_stdout(&["wg", "show", &self.iface]);
+        out.as_deref()
+            .map(|s| s.lines().any(|l| l.contains("latest handshake")))
+            .unwrap_or(false)
     }
 
     pub fn server_public_key(&self) -> &str {
@@ -339,6 +375,25 @@ fn load_or_create_keys(path: &Path) -> (String, String) {
         let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
     }
     (priv_b64, pub_b64)
+}
+
+fn run_cmd_stdout(args: &[&str]) -> Result<String, AppError> {
+    let (bin, rest) = args
+        .split_first()
+        .ok_or_else(|| AppError::Internal("empty command".into()))?;
+    let out = Command::new(bin)
+        .args(rest)
+        .output()
+        .map_err(|e| AppError::Internal(format!("spawn {}: {}", bin, e)))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    if !out.status.success() {
+        return Err(AppError::Internal(format!(
+            "{} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(stdout)
 }
 
 fn run_cmd(args: &[&str]) -> Result<(), AppError> {
