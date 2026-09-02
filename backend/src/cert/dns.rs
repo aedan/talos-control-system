@@ -49,14 +49,18 @@ impl GoDaddyProvider {
     /// Split a TXT record FQDN into (base_domain, record_name) for GoDaddy's
     /// /v1/domains/{base}/records/TXT/{name} API. GoDaddy accepts the full FQDN
     /// as `record_name`, so we only need the correct base (registered) domain.
-    fn split_zone(&self, fqdn: &str) -> (String, String) {
-        let record = format!("_acme-challenge.{}", fqdn.trim_end_matches('.'));
+    /// Split a TXT-record FQDN into (base_domain, relative_record_name) for
+    /// GoDaddy's /v1/domains/{base}/records/TXT/{name} API. GoDaddy *publishes*
+    /// a record only when `name` is the **relative** name under the base
+    /// (e.g. `_acme-challenge.tcs.kronos` under `cloudmunchers.net`); passing the
+    /// full FQDN as `name` stores it but never serves it. An explicit zone
+    /// override always wins for the base.
+    fn split_zone(&self, txt_fqdn: &str) -> (String, String) {
+        let fqdn = txt_fqdn.trim_end_matches('.').to_string();
         let base = if !self.zone.is_empty() {
-            self.zone.clone()
+            self.zone.trim_end_matches('.').to_string()
         } else {
-            // Derive: use the last two labels, or three if it looks like a
-            // two-part TLD (co.uk, com.au, ...). Good enough for the common
-            // case; an explicit zone override always wins.
+            // Derive: last two labels, or three for two-part TLDs.
             let labels: Vec<&str> = fqdn.split('.').collect();
             let take = if labels.len() >= 3 {
                 let maybe_tld = format!("{}.{}", labels[labels.len() - 2], labels[labels.len() - 1]);
@@ -73,19 +77,32 @@ impl GoDaddyProvider {
             };
             labels[labels.len().saturating_sub(take)..].join(".")
         };
-        (base, record)
+        // Relative name = fqdn with the base suffix stripped (or "@" for apex).
+        let relative = if fqdn.eq_ignore_ascii_case(&base) {
+            "@".to_string()
+        } else if let Some(stripped) = fqdn
+            .strip_suffix(&format!(".{base}"))
+        {
+            stripped.to_string()
+        } else {
+            // base not a suffix (e.g. explicit zone on a different tree) — fall
+            // back to the full FQDN; GoDaddy may still accept it.
+            fqdn.clone()
+        };
+        (base, relative)
     }
 }
 
 #[async_trait]
 impl DnsProvider for GoDaddyProvider {
     async fn add_txt_record(&self, challenge_domain: &str, record: &str, value: &str) -> Result<(), CertError> {
-        let (base, name) = self.split_zone(challenge_domain);
         // `record` is the full TXT FQDN (e.g. _acme-challenge.tcs.kronos.…).
-        // GoDaddy accepts the full FQDN as the record name under its base domain.
+        // GoDaddy publishes only when the URL uses the *relative* name under the
+        // base domain, so derive both from the FQDN.
+        let (base, name) = self.split_zone(record);
         let url = format!(
             "https://api.godaddy.com/v1/domains/{}/records/TXT/{}",
-            base, record
+            base, name
         );
 
         let record_body = serde_json::json!([{
@@ -112,10 +129,10 @@ impl DnsProvider for GoDaddyProvider {
     }
 
     async fn remove_txt_record(&self, challenge_domain: &str, record: &str) -> Result<(), CertError> {
-        let (base, name) = self.split_zone(challenge_domain);
+        let (base, name) = self.split_zone(record);
         let url = format!(
             "https://api.godaddy.com/v1/domains/{}/records/TXT/{}",
-            base, record
+            base, name
         );
 
         let resp = self.client
@@ -325,26 +342,29 @@ mod tests {
 
     #[test]
     fn godaddy_zone_split_two_label_tld() {
+        // Input is the TXT FQDN; expected base + *relative* record name.
         let p = GoDaddyProvider::new("k", "s");
-        let (base, rec) = p.split_zone("tcs.kronos.cloudmunchers.net");
+        let (base, rec) = p.split_zone("_acme-challenge.tcs.kronos.cloudmunchers.net");
         assert_eq!(base, "cloudmunchers.net");
-        assert_eq!(rec, "_acme-challenge.tcs.kronos.cloudmunchers.net");
+        assert_eq!(rec, "_acme-challenge.tcs.kronos");
     }
 
     #[test]
     fn godaddy_zone_split_explicit_override_wins() {
+        // Explicit zone override: base is the delegated subzone, name relative to it.
         let p = GoDaddyProvider::new("k", "s").with_zone("kronos.cloudmunchers.net");
-        let (base, rec) = p.split_zone("tcs.kronos.cloudmunchers.net");
+        let (base, rec) = p.split_zone("_acme-challenge.tcs.kronos.cloudmunchers.net");
         assert_eq!(base, "kronos.cloudmunchers.net");
-        assert_eq!(rec, "_acme-challenge.tcs.kronos.cloudmunchers.net");
+        assert_eq!(rec, "_acme-challenge.tcs");
     }
 
     #[test]
     fn godaddy_zone_split_apex_domain() {
+        // TXT record at the zone apex -> relative name "@".
         let p = GoDaddyProvider::new("k", "s");
-        let (base, rec) = p.split_zone("cloudmunchers.net");
+        let (base, rec) = p.split_zone("_acme-challenge.cloudmunchers.net");
         assert_eq!(base, "cloudmunchers.net");
-        assert_eq!(rec, "_acme-challenge.cloudmunchers.net");
+        assert_eq!(rec, "_acme-challenge");
     }
 
     #[test]

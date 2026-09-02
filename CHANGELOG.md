@@ -2,7 +2,10 @@
 
 ## [Unreleased]
 
-## [0.5.20] — 2026-08-31
+## [0.5.21] — 2026-08-31
+
+### Fixed
+- **GoDaddy DNS-01 record name (the actual blocker).** GoDaddy's API *stores* a TXT record given the full FQDN as the name but **never publishes it** to its nameservers, so Let's Encrypt sees NXDOMAIN. The fix: GoDaddy's record name must be the **relative** name under the zone (e.g. `_acme-challenge.tcs.kronos` under `cloudmunchers.net`, not the full `_acme-challenge.tcs.kronos.cloudmunchers.net`). Verified empirically against a live GoDaddy zone: the relative-name form resolves publicly in <45s; the full-FQDN form did not. `split_zone` now derives the base domain + relative name; an explicit `dns_zone` override still wins. This completes a working Let's Encrypt DNS-01 flow via GoDaddy.
 
 ### Fixed
 - **DNS-01 propagation wait.** GoDaddy's API returns `200` for a new TXT record before its authoritative nameservers actually serve it, so Let's Encrypt's single check saw `NXDOMAIN` and failed the challenge. TCS now **polls a public resolver (`dig @8.8.8.8`, falling back to `getent`) until the `_acme-challenge.<domain>` TXT record is publicly resolvable** (up to 150s) before asking Let's Encrypt to validate, and extended the ACME challenge wait window to ~150s. If the record never propagates it fails with a clear "provider propagation delay" message instead of a confusing NXDOMAIN.
