@@ -105,19 +105,22 @@ impl SiderolinkWg {
     }
 
     fn ensure_interface(&mut self) -> Result<(), AppError> {
-        // ip link add tcs-sl0 type wireguard (ignore exists). When a pre-existing
-        // device is left over from a prior boot, remove it first so we always
-        // start from a clean device — a reused device can carry a stale UDP
-        // socket that is bound but never demultiplexes datagrams to the WG
-        // device (handshakes arrive at the host yet the peer shows 0 rx).
-        let _ = run_cmd(&["ip", "link", "set", "down", "dev", &self.iface]);
-        let _ = run_cmd(&["ip", "link", "del", "dev", &self.iface]);
-        let _ = run_cmd(&["ip", "link", "add", "dev", &self.iface, "type", "wireguard"]);
-        // Bring the link UP before setting the key. Setting `private-key` on a
-        // down/freshly-created device allocates the kernel WG UDP socket up front
-        // on the default port; setting it on an UP device is what reliably binds
-        // the socket to the listen-port and gets it receiving (this is the
-        // ordering the proven-working manual bounce used: down->up, then wg set).
+        // Create the device only if it is absent. A FRESHLY netlink-created
+        // WireGuard device (`ip link add type wireguard`) ends up with a kernel
+        // UDP socket that is bound but does NOT receive: incoming handshake-inits
+        // arrive at the host (tcpdump) yet the peer shows 0 rx and no handshake,
+        // and UDP RcvbufErrors climb. Reusing an already-existing device (a plain
+        // down->up) works reliably. So we never delete+recreate here — if a
+        // device survives a TCS restart we bounce it; only when truly absent do
+        // we add it (and the trailing down->up below re-attaches its socket).
+        let exists = run_cmd(&["ip", "link", "show", "dev", &self.iface]).is_ok();
+        if !exists {
+            let _ = run_cmd(&["ip", "link", "add", "dev", &self.iface, "type", "wireguard"]);
+        }
+        // Bring the link UP before setting the key. Setting `private-key` on an
+        // UP device is what reliably binds the socket to the listen-port and gets
+        // it receiving (this is the ordering the proven-working manual bounce
+        // used: down->up, then wg set).
         run_cmd(&["ip", "link", "set", "up", "dev", &self.iface])?;
         // WireGuard data port (not the gRPC API port) + identity key.
         run_cmd(&[
@@ -145,6 +148,17 @@ impl SiderolinkWg {
             let _ = fs::remove_file(&tmp);
             r
         })?;
+        // Bounce the link to re-attach the kernel WireGuard UDP socket. A
+        // freshly netlink-created WG device (or a leftover one from a prior boot)
+        // can be left with a socket that is bound to the listen port but never
+        // demultiplexes incoming datagrams to the device — handshake-inits arrive
+        // at the host (tcpdump) yet the peer shows 0 rx / no handshake and UDP
+        // RcvbufErrors climb. A down->up after the key is set reliably re-binds
+        // the socket (what `wg-quick` does implicitly). This step MUST come
+        // before the address assignment: bringing a WG link down clears its
+        // addresses, so adding them afterwards guarantees they survive.
+        let _ = run_cmd(&["ip", "link", "set", "down", "dev", &self.iface]);
+        run_cmd(&["ip", "link", "set", "up", "dev", &self.iface])?;
         // Assign the server's own overlay address (first usable in the /64) so
         // nodes can reach TCS at server_address over the tunnel.
         let server_addr = format!("{}/64", self.server_address());

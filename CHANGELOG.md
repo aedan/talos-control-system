@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.34] — 2026-09-02
+
+### Fixed
+- **Siderolink tunnel still intermittently down after TCS restart — stale kernel WG socket + dropped overlay address.** Two compounding issues in how `tcs-sl0` is built at boot: (1) a WireGuard device that is freshly created via netlink (`ip link add type wireguard`) — or a leftover one from a prior boot — can be left with a kernel UDP socket that is bound to the listen port but never demultiplexes incoming datagrams to the device, so node handshake-inits arrive at the host (visible in tcpdump) yet the peer shows 0 rx / no handshake and UDP `RcvbufErrors` climb; and (2) a down→up bounce of the link **clears its IPv6/IPv4 addresses**, so the server's `fd…::1/64` overlay address was lost and TCS had no route to the node (`Network is unreachable` even after the handshake). `ensure_interface()` now: creates the device only if absent (never delete+recreate), sets the key on the UP device, performs the down→up socket-rebind bounce, and then assigns the overlay addresses **after** the bounce so they survive. Live-validated on kronos from a clean first-boot state: node `connected: true`, WG peer shows a completed handshake, and `ping6` to the node's `fd…` overlay IP over `tcs-sl0` succeeds (0% loss). Together with v0.5.32 (boot peer re-apply) and v0.5.33 (clean start), a TCS restart now comes up with a fully functional SideroLink tunnel.
+
 ## [0.5.33] — 2026-09-02
 
 ### Fixed
