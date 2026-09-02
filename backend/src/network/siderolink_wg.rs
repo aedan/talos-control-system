@@ -105,16 +105,21 @@ impl SiderolinkWg {
     }
 
     fn ensure_interface(&mut self) -> Result<(), AppError> {
-        // ip link add tcs-sl0 type wireguard (ignore exists)
+        // ip link add tcs-sl0 type wireguard (ignore exists). When a pre-existing
+        // device is left over from a prior boot, remove it first so we always
+        // start from a clean device — a reused device can carry a stale UDP
+        // socket that is bound but never demultiplexes datagrams to the WG
+        // device (handshakes arrive at the host yet the peer shows 0 rx).
+        let _ = run_cmd(&["ip", "link", "set", "down", "dev", &self.iface]);
+        let _ = run_cmd(&["ip", "link", "del", "dev", &self.iface]);
         let _ = run_cmd(&["ip", "link", "add", "dev", &self.iface, "type", "wireguard"]);
-        // Assign the server's own overlay address (first usable in the /64) so
-        // nodes can reach TCS at server_address over the tunnel.
-        let server_addr = format!("{}/64", self.server_address());
-        let _ = run_cmd(&["ip", "address", "add", &server_addr, "dev", &self.iface]);
-        // Keep the legacy IPv4 CGNAT address too so pre-existing tooling/peers
-        // that expect 100.64.0.1 keep a route; harmless alongside the IPv6.
-        let _ = run_cmd(&["ip", "address", "add", "100.64.0.1/10", "dev", &self.iface]);
-        // WireGuard data port (not the gRPC API port).
+        // Bring the link UP before setting the key. Setting `private-key` on a
+        // down/freshly-created device allocates the kernel WG UDP socket up front
+        // on the default port; setting it on an UP device is what reliably binds
+        // the socket to the listen-port and gets it receiving (this is the
+        // ordering the proven-working manual bounce used: down->up, then wg set).
+        run_cmd(&["ip", "link", "set", "up", "dev", &self.iface])?;
+        // WireGuard data port (not the gRPC API port) + identity key.
         run_cmd(&[
             "wg",
             "set",
@@ -140,17 +145,15 @@ impl SiderolinkWg {
             let _ = fs::remove_file(&tmp);
             r
         })?;
+        // Assign the server's own overlay address (first usable in the /64) so
+        // nodes can reach TCS at server_address over the tunnel.
+        let server_addr = format!("{}/64", self.server_address());
+        let _ = run_cmd(&["ip", "address", "add", &server_addr, "dev", &self.iface]);
+        // Keep the legacy IPv4 CGNAT address too so pre-existing tooling/peers
+        // that expect 100.64.0.1 keep a route; harmless alongside the IPv6.
+        let _ = run_cmd(&["ip", "address", "add", "100.64.0.1/10", "dev", &self.iface]);
         // WireGuard link MTU (nodes use 1280; the host interface can be higher).
         let _ = run_cmd(&["ip", "link", "set", "mtu", "1420", "dev", &self.iface]);
-        // Bounce the link so the kernel re-creates the WireGuard UDP socket bound
-        // to the final listen-port. When the device is (re)created via netlink the
-        // kernel allocates its UDP socket up front; configuring listen-port/privkey
-        // without a down/up can leave a stale socket that is bound but never
-        // demultiplexes incoming datagrams to the WG device (handshakes arrive at
-        // the host but the peer shows 0 rx / no handshake). A down->up rebind is
-        // what `wg-quick` does implicitly and is the reliable fix.
-        let _ = run_cmd(&["ip", "link", "set", "down", "dev", &self.iface]);
-        run_cmd(&["ip", "link", "set", "up", "dev", &self.iface])?;
         Ok(())
     }
 

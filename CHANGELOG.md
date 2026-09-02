@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.33] — 2026-09-02
+
+### Fixed
+- **Siderolink tunnel still down after restart — stale kernel WG UDP socket.** v0.5.31's down→up bounce did not reliably re-bind the kernel WireGuard socket: the private-key/listen-port were set while the device was still down, which allocates the UDP socket on the default port and leaves it non-receiving after the up. `ensure_interface()` now (1) removes any leftover `tcs-sl0` device for a clean start, (2) brings the link UP **before** setting `listen-port`/`private-key` (setting the key on a live device is what reliably binds the socket to port 443 and gets it receiving), and (3) assigns the overlay addresses after. Combined with v0.5.32's boot peer re-apply, a TCS restart now comes up with a functioning `tcs-sl0` and the node's cached-handshake retries complete without waiting on a node-side re-provision.
+
 ## [0.5.32] — 2026-09-02
 
 ### Fixed
