@@ -13,6 +13,26 @@
     mode: 'letsencrypt' | 'self-signed' | 'provided' | 'disabled';
   }
 
+  // Shape returned by GET /settings/certificates/config (the backend TlsConfig).
+  interface TlsConfigResponse {
+    mode: 'letsencrypt' | 'self-signed' | 'provided' | 'disabled';
+    letsencrypt?: {
+      domains: string[];
+      email: string;
+      challenge_type: 'http-01' | 'dns-01';
+      dns_provider?: {
+        provider: 'godaddy' | 'cloudflare' | 'route53';
+        api_key?: string;
+        api_secret?: string;
+        api_token?: string;
+        zone_id?: string;
+        dns_zone?: string;
+      } | null;
+    } | null;
+    self_signed?: { domains: string[] } | null;
+    provided?: { cert_path: string; key_path: string } | null;
+  }
+
   interface CertConfig {
     mode: 'letsencrypt' | 'self-signed' | 'provided' | 'disabled';
     domains: string[];
@@ -56,10 +76,45 @@
     try {
       const data = await client.get('/settings/certificates/status') as CertStatus;
       status = data;
-      // "disabled" is no longer a real mode — TCS always serves :443. A legacy
-      // "disabled" config is effectively self-signed, so normalize it.
-      config.mode = data.mode === 'disabled' ? 'self-signed' : data.mode;
-      domainsInput = data.domains.join(', ');
+
+      // Load the persisted certificate CONFIG so the form reflects reality
+      // (email, challenge type, DNS provider + zone + credentials), not defaults.
+      let cfg: TlsConfigResponse | null = null;
+      try {
+        cfg = (await client.get('/settings/certificates/config')) as TlsConfigResponse;
+      } catch {
+        cfg = null;
+      }
+
+      // Prefer the config's own mode (what's actually set); fall back to status.
+      const mode: CertConfig['mode'] =
+        (cfg && cfg.mode && cfg.mode !== 'disabled' ? cfg.mode : null) ||
+        (data.mode === 'disabled' ? 'self-signed' : data.mode);
+      config.mode = mode;
+
+      if (mode === 'letsencrypt') {
+        const le = cfg?.letsencrypt;
+        config.domains = le?.domains?.length ? le.domains : data.domains;
+        config.adminEmail = le?.email || '';
+        config.challengeType = le?.challenge_type || 'http-01';
+        if (le?.challenge_type === 'dns-01') {
+          config.dnsProvider = le.dns_provider?.provider || 'cloudflare';
+          config.dnsApiKey = le.dns_provider?.api_key || '';
+          config.dnsApiSecret = le.dns_provider?.api_secret || '';
+          config.dnsApiToken = le.dns_provider?.api_token || '';
+          config.dnsZoneId = le.dns_provider?.zone_id || '';
+          config.dnsZone = le.dns_provider?.dns_zone || '';
+        }
+      } else if (mode === 'self-signed') {
+        const ss = cfg?.self_signed;
+        config.domains = ss?.domains?.length ? ss.domains : data.domains;
+      } else if (mode === 'provided') {
+        const pr = cfg?.provided;
+        config.certPath = pr?.cert_path || '';
+        config.keyPath = pr?.key_path || '';
+      }
+
+      domainsInput = config.domains.join(', ');
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Failed to load certificate status';
     } finally {

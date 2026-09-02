@@ -2,7 +2,10 @@
 
 ## [Unreleased]
 
-## [0.5.23] — 2026-09-02
+## [0.5.24] — 2026-09-02
+
+### Fixed
+- **Certificates page didn't reflect the saved Let's Encrypt config.** There was no `GET /settings/certificates/config` route (only `PUT`), so the config form always loaded with defaults (http-01, blank email, no DNS provider) even when a real DNS-01/GoDaddy setup was persisted. Added `GET /settings/certificates/config` (admin-only) that reads the `[tls]` overlay written by Apply and returns it, and the UI now pre-fills mode, domains, email, challenge type, DNS provider, zone, and (masked) credentials from it. **Renew/Apply now round-trips the real saved config** instead of silently losing it — the root cause of "how would renew succeed if the form shows the wrong config?" is resolved.
 
 ### Fixed
 - **Certificate status panel expiry display.** The `/settings/certificates/status` endpoint returns `expires_at` and `days_remaining` (snake_case), but the Certificates UI read `expiryDate`/`daysRemaining` (camelCase), so a healthy Let's Encrypt cert rendered as "N/A / Expired". Fixed the field mapping so the panel shows the real expiry date and days remaining. (The live cert on :443 was always correct — this was display-only.)

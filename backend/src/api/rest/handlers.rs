@@ -1933,6 +1933,42 @@ pub async fn get_cert_status(
     }))
 }
 
+/// Return the persisted certificate configuration (admin-only) so the
+/// Certificates page can pre-fill its form with what's actually configured —
+/// mode, domains, LE email, challenge type, DNS provider + zone + credentials —
+/// instead of showing defaults. Source of truth is the `[tls]` overlay written
+/// by PUT (same trust boundary where credentials were set); falls back to the
+/// boot config if no overlay exists. The UI masks the credential inputs.
+pub async fn get_cert_config(
+    State(state): State<AppState>,
+) -> Result<Json<crate::config::TlsConfig>, (StatusCode, String)> {
+    // Mirror update_cert_config's overlay location: <data_dir>/tls.toml.
+    let data_dir = std::path::Path::new(&state.config.database.sqlite_path)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/tcs"));
+    let overlay_path = data_dir.join("tls.toml");
+
+    let tls = if overlay_path.exists() {
+        let raw = std::fs::read_to_string(&overlay_path)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("cannot read {}: {}", overlay_path.display(), e)))?;
+        let table: toml::value::Table = raw
+            .parse()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("invalid tls overlay: {e}")))?;
+        table
+            .get("tls")
+            .cloned()
+            .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "tls overlay missing [tls] section".to_string()))?
+            .try_into::<crate::config::TlsConfig>()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to parse [tls]: {e}")))?
+    } else {
+        state.config.tls.clone()
+    };
+
+    Ok(Json(tls))
+}
+
 #[derive(Deserialize)]
 pub struct CertConfigRequest {
     pub mode: String,

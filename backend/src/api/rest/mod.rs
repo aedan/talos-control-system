@@ -60,6 +60,7 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
             post(handlers::admin_reset_password),
         )
         .route("/settings/certificates/status", get(handlers::get_cert_status))
+        .route("/settings/certificates/config", get(handlers::get_cert_config))
         .route("/settings/certificates/config", put(handlers::update_cert_config))
         .route("/settings/certificates/renew", post(handlers::renew_certificate))
         .route("/settings/auth/config", get(handlers::get_auth_config))
