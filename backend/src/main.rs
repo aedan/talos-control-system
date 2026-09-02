@@ -363,15 +363,30 @@ async fn run_server_all(
     // :80 reachable from the internet); on failure fall back to self-signed so
     // the HTTPS listener is always up. "disabled" also falls back to
     // self-signed.
-    let (cert_pem, key_pem, initial_note) = resolve_initial_certificate(&config, &acme_store).await?;
+    let (cert_pem, key_pem, effective_mode, effective_domains, initial_note) =
+        resolve_initial_certificate(&config, &acme_store).await?;
     info!(%initial_note, "Initial TLS certificate ready");
+
+    // Reflect the EFFECTIVE cert in the live runtime so the Certificates UI
+    // shows what's actually serving :443 (e.g. "self-signed" even when the
+    // config says "disabled").
+    let mut effective_tls = config.tls.clone();
+    effective_tls.mode = effective_mode.clone();
+    if matches!(effective_tls.mode, talos_control_system::config::TlsMode::SelfSigned) {
+        let domains = if effective_domains.is_empty() {
+            vec!["localhost".to_string()]
+        } else {
+            effective_domains.clone()
+        };
+        effective_tls.self_signed = Some(talos_control_system::config::SelfSignedConfig { domains });
+    }
 
     let tls_runtime = Arc::new(
         talos_control_system::cert::TlsRuntime::new(
             cert_pem.clone(),
             key_pem.clone(),
             acme_store.clone(),
-            config.tls.clone(),
+            effective_tls,
             data_dir.clone(),
         )
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?,
@@ -491,10 +506,17 @@ async fn run_server_all(
 }
 
 /// Resolve the initial cert to load into the always-on HTTPS listener.
+/// Returns (cert_pem, key_pem, effective_mode, effective_domains, note).
+/// `effective_mode` is what we actually serve — when the config is "disabled"
+/// or LE falls back, it is `SelfSigned`, so the live cert status reflects the
+/// real cert instead of the stale config.
 async fn resolve_initial_certificate(
     config: &Config,
     acme_store: &AcmeChallengeStore,
-) -> Result<(String, String, String), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<
+    (String, String, talos_control_system::config::TlsMode, Vec<String>, String),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     use talos_control_system::config::TlsMode;
     let fallback_domain = || {
         // Prefer a configured domain; else the advertised host; else localhost.
@@ -511,10 +533,16 @@ async fn resolve_initial_certificate(
     let tls_enabled = config.tls.enabled && config.tls.mode != TlsMode::Disabled;
     if !tls_enabled {
         let domain = fallback_domain();
-        info!(%domain, "TLS disabled — generating self-signed so :443 is reachable");
+        info!(%domain, "TLS disabled in config — generating self-signed so :443 is reachable");
         let (c, k) =
             talos_control_system::cert::self_signed::generate_self_signed(std::slice::from_ref(&domain)).await?;
-        return Ok((c, k, format!("self-signed ({domain}) — TLS disabled in config")));
+        return Ok((
+            c,
+            k,
+            TlsMode::SelfSigned,
+            vec![domain.clone()],
+            format!("self-signed ({domain}) — TLS disabled in config, auto-enabled"),
+        ));
     }
 
     match config.tls.mode {
@@ -529,7 +557,7 @@ async fn resolve_initial_certificate(
                     .await
                     {
                         Ok((c, k)) => {
-                            return Ok((c, k, "Let's Encrypt issued".to_string()))
+                            return Ok((c, k, TlsMode::LetsEncrypt, le.domains.clone(), "Let's Encrypt issued".to_string()))
                         }
                         Err(e) => {
                             warn!(error = %e, "Let's Encrypt issuance failed at boot; using self-signed fallback");
@@ -542,13 +570,15 @@ async fn resolve_initial_certificate(
                 return Ok((
                     c,
                     k,
+                    TlsMode::SelfSigned,
+                    vec![domain.clone()],
                     format!("self-signed ({domain}) — LE not ready (no domains or :80 unreachable)"),
                 ));
             }
             let domain = fallback_domain();
             let (c, k) =
                 talos_control_system::cert::self_signed::generate_self_signed(std::slice::from_ref(&domain)).await?;
-            Ok((c, k, format!("self-signed ({domain}) — LE mode not fully configured")))
+            Ok((c, k, TlsMode::SelfSigned, vec![domain.clone()], format!("self-signed ({domain}) — LE mode not fully configured")))
         }
         TlsMode::SelfSigned => {
             let domains = config
@@ -559,7 +589,7 @@ async fn resolve_initial_certificate(
                 .filter(|d| !d.is_empty())
                 .unwrap_or_else(|| vec![fallback_domain()]);
             let (c, k) = talos_control_system::cert::self_signed::generate_self_signed(&domains).await?;
-            Ok((c, k, "self-signed (configured)".to_string()))
+            Ok((c, k, TlsMode::SelfSigned, domains.clone(), "self-signed (configured)".to_string()))
         }
         TlsMode::Provided => {
             let provided = config
@@ -573,13 +603,13 @@ async fn resolve_initial_certificate(
                     &provided.key_path,
                 )
                 .await?;
-            Ok((c, k, "provided (uploaded)".to_string()))
+            Ok((c, k, TlsMode::Provided, vec![], "provided (uploaded)".to_string()))
         }
         TlsMode::Disabled => {
             let domain = fallback_domain();
             let (c, k) =
                 talos_control_system::cert::self_signed::generate_self_signed(std::slice::from_ref(&domain)).await?;
-            Ok((c, k, format!("self-signed ({domain}) — mode disabled")))
+            Ok((c, k, TlsMode::SelfSigned, vec![domain.clone()], format!("self-signed ({domain}) — mode disabled, auto-enabled")))
         }
     }
 }

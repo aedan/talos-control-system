@@ -35,7 +35,7 @@
   let successMsg = $state('');
 
   let config = $state<CertConfig>({
-    mode: 'disabled',
+    mode: 'self-signed',
     domains: [],
     adminEmail: '',
     challengeType: 'http-01',
@@ -54,7 +54,9 @@
     try {
       const data = await client.get('/settings/certificates/status') as CertStatus;
       status = data;
-      config.mode = data.mode;
+      // "disabled" is no longer a real mode — TCS always serves :443. A legacy
+      // "disabled" config is effectively self-signed, so normalize it.
+      config.mode = data.mode === 'disabled' ? 'self-signed' : data.mode;
       domainsInput = data.domains.join(', ');
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Failed to load certificate status';
@@ -174,10 +176,10 @@
   <div class="page-header">
     <h1>SSL/TLS Certificates</h1>
     <p class="description">
-      Manage TLS for the HTTPS listener. Switching modes (including Let's Encrypt) applies
-      <strong>live</strong> when TCS already serves HTTPS — no restart. Let's Encrypt HTTP-01 needs
-      port 80 reachable from the public internet for the configured domain(s). Enabling TLS for the
-      first time from a pure HTTP process still needs a restart to open :443.
+      TCS always serves <strong>HTTPS on :443</strong> (and :80 redirects to it). Pick how the
+      certificate is sourced — Self-Signed (default), Let's Encrypt, or your own upload — and
+      changes apply <strong>live</strong> without a restart. Let's Encrypt HTTP-01 needs port 80
+      reachable from the public internet for the configured domain(s).
     </p>
   </div>
 
@@ -209,7 +211,7 @@
             </div>
             <div class="status-row">
               <span class="label">Mode</span>
-              <span class="value mode-badge">{status.mode}</span>
+              <span class="value mode-badge">{status.mode === 'disabled' ? 'self-signed' : status.mode}</span>
             </div>
           </div>
         </div>
@@ -228,11 +230,10 @@
 
         <div class="form-group">
           <label for="mode">Certificate Mode</label>
-          <select id="mode" title="How the TLS certificate is sourced: Let's Encrypt, self-signed, uploaded, or disabled" bind:value={config.mode}>
-            <option value="letsencrypt">Let's Encrypt (Automated)</option>
+          <select id="mode" title="How the TLS certificate is sourced: Let's Encrypt, self-signed, or uploaded" bind:value={config.mode}>
             <option value="self-signed">Self-Signed</option>
+            <option value="letsencrypt">Let's Encrypt (Automated)</option>
             <option value="provided">Provided (Upload)</option>
-            <option value="disabled">Disabled</option>
           </select>
         </div>
 

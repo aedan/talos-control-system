@@ -2,7 +2,12 @@
 
 ## [Unreleased]
 
-## [0.5.16] — 2026-08-31
+## [0.5.17] — 2026-08-31
+
+### Fixed
+- **Certificates UI now reflects the real cert.** The Certificates page showed "mode: disabled / issuer: None" even though TCS was actually serving a self-signed cert on :443 (the v0.5.15 auto-fallback). The status endpoint now reports the **effective** mode: when the config says `disabled` (or Let's Encrypt falls back), the live runtime is set to `self-signed` with the actual domain(s), so the UI shows `self-signed` / `Self-Signed` / the real host + the cert's true expiry.
+- **Removed the "Disabled" option from the Certificates mode dropdown** — TCS always serves :443, so there's no longer an off switch. The dropdown defaults to **Self-Signed** (the effective default), and a legacy `disabled` config is normalized to `self-signed` on load.
+- Corrected the Certificates page description: it no longer claims enabling TLS "needs a restart to open :443" (always-on since v0.5.15/0.5.16).
 
 ### Changed
 - **Removed the legacy `http_port` (8081) listener.** TCS is alpha with a single live deployment, so the backward-compat 8081 listener added in v0.5.15 is gone. Shipped binaries now bind **only :80 (HTTP → redirect/ACME) and :443 (HTTPS)** — no more `http_port`. `server.http_port` in config is ignored; `advertised_url` defaults to `https://localhost:443` when unset; the CLI's local server discovery now targets `https://<bind>:443`.

@@ -13,7 +13,7 @@ pub use branding::BrandingConfig;
 pub use siderolink::SideroLinkConfig;
 pub use auth::LdapConfig;
 pub use auth::OidcConfig;
-pub use tls::{TlsConfig, TlsMode};
+pub use tls::{SelfSignedConfig, TlsConfig, TlsMode};
 pub use metal::{MetalBmcConfig, MetalConfig, MetalDhcpConfig, MetalPxeConfig};
 pub use factory::FactoryConfig;
 
