@@ -2,7 +2,10 @@
 
 ## [Unreleased]
 
-## [0.5.19] — 2026-08-31
+## [0.5.20] — 2026-08-31
+
+### Fixed
+- **DNS-01 propagation wait.** GoDaddy's API returns `200` for a new TXT record before its authoritative nameservers actually serve it, so Let's Encrypt's single check saw `NXDOMAIN` and failed the challenge. TCS now **polls a public resolver (`dig @8.8.8.8`, falling back to `getent`) until the `_acme-challenge.<domain>` TXT record is publicly resolvable** (up to 150s) before asking Let's Encrypt to validate, and extended the ACME challenge wait window to ~150s. If the record never propagates it fails with a clear "provider propagation delay" message instead of a confusing NXDOMAIN.
 
 ### Fixed
 - **GoDaddy DNS-01 TXT record schema.** GoDaddy's v1 API rejected the record body with `422 INVALID_BODY`: TXT `data` must be a plain **string** (not an array) and `ttl` must be **≥ 600**. Fixed the GoDaddy provider to send `{"data": "<value>", "ttl": 600}`. (Auth + zone derivation were already correct — this was the last blocker to a real Let's Encrypt DNS-01 cert via GoDaddy.)

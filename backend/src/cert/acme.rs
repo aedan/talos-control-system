@@ -212,6 +212,110 @@ async fn finalize_order_and_download(
     Ok((cert_pem, key_pem))
 }
 
+/// Poll a public resolver until the DNS-01 TXT record is publicly resolvable.
+/// GoDaddy's API returns 200 before the record is actually served by its
+/// authoritative nameservers, so we wait here (up to ~150s) to avoid handing
+/// Let's Encrypt an NXDOMAIN. Uses `dig @8.8.8.8` when available, falling back
+/// to a system TXT lookup; treats "no dig" as success after the first sleep so
+/// we never block forever in minimal images.
+async fn wait_for_dns_txt(txt_fqdn: &str, expected_value: &str) -> Result<(), CertError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(150);
+    let mut first = true;
+    loop {
+        if first {
+            first = false;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        match lookup_txt_public(txt_fqdn, expected_value).await {
+            Some(true) => {
+                tracing::info!(txt = %txt_fqdn, "DNS-01 TXT record is publicly resolvable");
+                return Ok(());
+            }
+            Some(false) => {
+                tracing::info!(
+                    txt = %txt_fqdn,
+                    "DNS-01 TXT record not yet resolvable; retrying…",
+                );
+            }
+            None => {
+                // No usable resolver tool on host — can't verify; assume the
+                // provider published it (best-effort) and let LE decide.
+                tracing::warn!(
+                    txt = %txt_fqdn,
+                    "No DNS lookup tool available to verify propagation; proceeding to validate",
+                );
+                return Ok(());
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(CertError::Dns(format!(
+                "timed out waiting up to 150s for TXT {txt_fqdn} to become publicly resolvable (provider propagation delay)"
+            )));
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    }
+}
+
+/// Query a public resolver for the TXT record. Returns None if no lookup tool
+/// is available, Some(true) if the expected value is present, Some(false)
+/// otherwise.
+async fn lookup_txt_public(txt_fqdn: &str, expected_value: &str) -> Option<bool> {
+    let fqdn = txt_fqdn.to_string();
+    let want = expected_value.to_string();
+    // Prefer `dig @8.8.8.8` (works even when the host's local resolver is broken).
+    if which_cmd("dig").await {
+        let fqdn2 = fqdn.clone();
+        let want2 = want.clone();
+        let out = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("dig")
+                .args(["+short", "+time=4", "+tries=2", "@8.8.8.8", "TXT", &fqdn2])
+                .output()
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+        if let Some(out) = out {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            return Some(stdout.contains(&want2));
+        }
+    }
+    // Fallback: system getent TXT (uses the host resolver).
+    if which_cmd("getent").await {
+        let fqdn3 = fqdn.clone();
+        let want3 = want.clone();
+        let out = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("getent")
+                .args(["txt", &fqdn3])
+                .output()
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+        if let Some(out) = out {
+            if out.status.success() {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                return Some(stdout.contains(&want3));
+            }
+            return Some(false);
+        }
+    }
+    None
+}
+
+async fn which_cmd(cmd: &str) -> bool {
+    let c = cmd.to_string();
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new("sh")
+            .args(["-c", &format!("command -v {c}")])
+            .output()
+    })
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .map(|o| o.status.success())
+    .unwrap_or(false)
+}
+
 /// Obtain a Let's Encrypt certificate using a DNS-01 challenge, publishing the
 /// required `_acme-challenge.<domain>` TXT records via `provider`. TXT records
 /// are removed after the order is finalized (best-effort).
@@ -277,13 +381,22 @@ pub async fn obtain_dns01_certificate(
                     "Failed to publish DNS-01 TXT record for {domain}: {e}"
                 ))
             })?;
-        published.push((domain.clone(), txt_fqdn));
+        published.push((domain.clone(), txt_fqdn.clone()));
 
-        // Give DNS a moment to propagate, then validate.
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        // GoDaddy (and other providers) can take a while to actually *publish*
+        // a new TXT record to their authoritative nameservers after the API
+        // returns 200. Let's Encrypt does a single authoritative check, so we
+        // wait here until the record is publicly resolvable before validating.
+        if let Err(e) = wait_for_dns_txt(&txt_fqdn, &value).await {
+            return Err(CertError::Acme(format!(
+                "TXT record for {domain} did not become publicly resolvable: {e}"
+            )));
+        }
+
         challenge.validate().await.map_err(acme_error_to_cert)?;
+        // Poll longer than the HTTP-01 path: DNS-01 propagation is slower.
         let challenge = challenge
-            .wait_done(std::time::Duration::from_secs(5), 12)
+            .wait_done(std::time::Duration::from_secs(5), 30)
             .await
             .map_err(acme_error_to_cert)?;
         if challenge.status != ChallengeStatus::Valid {
@@ -294,7 +407,7 @@ pub async fn obtain_dns01_certificate(
         }
         tracing::info!(domain = %domain, "DNS-01 challenge validated");
 
-        auth.wait_done(std::time::Duration::from_secs(5), 12)
+        auth.wait_done(std::time::Duration::from_secs(5), 30)
             .await
             .map_err(acme_error_to_cert)?;
     }
