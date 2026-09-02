@@ -45,23 +45,70 @@ impl SiderolinkWg {
             enabled: false,
             installation_id,
         };
-        match mgr.ensure_interface() {
-            Ok(()) => {
-                mgr.enabled = true;
-                info!(
-                    iface = %mgr.iface,
-                    wg_port = mgr.cfg.listen_port,
-                    "Siderolink WireGuard interface ready"
-                );
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "Siderolink WireGuard not active (install wireguard-tools or run as root). Inventory registration still works."
-                );
-            }
+        let arc = Arc::new(mgr.clone());
+        if arc.enabled() {
+            // Prime the socket in the background. A freshly netlink-created WG
+            // device's kernel UDP socket is not reliably receiving for the first
+            // seconds after it is created/`up`-ed — `ensure_interface()` does the
+            // initial best-effort setup, but a down/up + key re-set a few seconds
+            // later (once the device has settled) is what reliably gets the socket
+            // demultiplexing incoming datagrams (validated live on kronos: the
+            // boot-time sequence alone left the peer at 0 rx; the delayed prime
+            // bounce fixed it). Runs on a detached thread so it never blocks boot;
+            // it re-applies the key + re-bounces, and main.rs re-applies DB peers
+            // right after init returns.
+            let prime = arc.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(6));
+                prime.prime_socket();
+            });
         }
-        Arc::new(mgr)
+        arc
+    }
+
+    /// Delayed prime: re-bounce the link and re-set the key on the now-settled
+    /// device so the kernel WG UDP socket is functional. Called once a few
+    /// seconds after boot by a background thread.
+    pub fn prime_socket(&self) {
+        if !self.enabled {
+            return;
+        }
+        let _ = run_cmd(&["ip", "link", "set", "down", "dev", &self.iface]);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let _ = run_cmd(&["ip", "link", "set", "up", "dev", &self.iface]);
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        let ok = run_cmd(&[
+            "wg",
+            "set",
+            &self.iface,
+            "listen-port",
+            &self.cfg.listen_port.to_string(),
+            "private-key",
+            "/dev/stdin",
+        ])
+        .or_else(|_| {
+            let tmp = std::env::temp_dir().join("tcs-wg-key");
+            fs::write(&tmp, format!("{}\n", self.private_key))?;
+            let r = run_cmd(&[
+                "wg",
+                "set",
+                &self.iface,
+                "listen-port",
+                &self.cfg.listen_port.to_string(),
+                "private-key",
+                tmp.to_str().unwrap_or(""),
+            ]);
+            let _ = fs::remove_file(&tmp);
+            r
+        });
+        // The down/up clears addresses; restore them.
+        let server_addr = format!("{}/64", self.server_address());
+        let _ = run_cmd(&["ip", "address", "add", &server_addr, "dev", &self.iface]);
+        let _ = run_cmd(&["ip", "address", "add", "100.64.0.1/10", "dev", &self.iface]);
+        match ok {
+            Ok(()) => info!(iface = %self.iface, "Siderolink WireGuard socket primed"),
+            Err(e) => warn!(error = %e, iface = %self.iface, "Siderolink socket prime: key re-set failed"),
+        }
     }
 
     pub fn server_public_key(&self) -> &str {

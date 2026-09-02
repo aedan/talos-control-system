@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.37] — 2026-09-02
+
+### Fixed
+- **Siderolink tunnel reliably down on a fresh TCS boot — the just-created kernel WG device needs a delayed socket prime.** Even with v0.5.36's 1.5s settle, a WireGuard device created from scratch at boot does not reliably receive for the first several seconds: node handshake-inits arrived at the host yet the peer stayed at 0 rx and TCS sent no replies, so the tunnel only came up after the device had been alive a while and was manually bounced. A 1.5s inline settle is not enough on a true first-boot (no prior device); the socket needs the device to have actually settled in the kernel. `SiderolinkWg::init` now spawns a detached background thread that, ~6s after boot, re-bounces `tcs-sl0` (down/up) and re-sets the listen-port/private-key and restores the overlay addresses — the sequence proven to make a freshly-created device functional. This prime does not disturb already-configured WireGuard peers (a WG link down/up clears addresses but preserves peer state, re-validated live) and never blocks boot. Combined with v0.5.32 (boot peer re-apply) and v0.5.36 (settle delay), a TCS restart — including the true first-boot case with no surviving device — now comes up with a functioning SideroLink tunnel.
+
 ## [0.5.36] — 2026-09-02
 
 ### Fixed
