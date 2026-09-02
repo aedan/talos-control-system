@@ -32,6 +32,11 @@ impl SiderolinkWg {
             std::env::var("TCS_SIDEROLINK_INSTALLATION_ID").unwrap_or_else(|_| "tcs".into());
         let key_path = PathBuf::from(data_dir).join("siderolink_wg_private.key");
         let (private_key, public_key) = load_or_create_keys(&key_path);
+        tracing::info!(
+            key_path = %key_path.display(),
+            public_key = %public_key,
+            "Siderolink WG keypair loaded/created"
+        );
         let mut mgr = Self {
             cfg: cfg.clone(),
             private_key,
@@ -181,9 +186,17 @@ fn load_or_create_keys(path: &Path) -> (String, String) {
                 let secret = StaticSecret::from(arr);
                 let public = PublicKey::from(&secret);
                 let pub_b64 = base64::engine::general_purpose::STANDARD.encode(public.as_bytes());
+                tracing::info!(key_path = %path.display(), "Siderolink WG key loaded from file");
                 return (priv_b64.to_string(), pub_b64);
             }
         }
+        tracing::warn!(
+            key_path = %path.display(),
+            b64_len = priv_b64.len(),
+            "Siderolink WG key file present but invalid; generating new"
+        );
+    } else {
+        tracing::info!(key_path = %path.display(), "Siderolink WG key file absent; generating new");
     }
     let secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
     let public = PublicKey::from(&secret);
