@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.5.31] — 2026-09-02
+
+### Fixed
+- **Siderolink WireGuard tunnel never established — the kernel WG UDP socket went stale at TCS boot.** The SideroLink API, address assignment, peer registration, and node-side configuration were all correct (verified: node's `siderolink` LinkSpec had the right peer key `KR/+…`, the right `192.168.1.2:443` endpoint, and the node's own WG public key matched exactly what TCS registered as the peer). But the host `tcs-sl0` interface's kernel WireGuard UDP socket was bound to port 443 yet never demultiplexed incoming datagrams — node handshake-inits arrived at the host (tcpdump) but the peer showed `0 rx bytes` / no latest-handshake, so no handshake ever completed and the tunnel stayed `connected: false`. Root cause: creating the WG device via netlink and then setting `listen-port`/`private-key`/`up` in that order leaves the socket in a state that doesn't receive; the reliable fix is a **down → up bounce after configuration** (what `wg-quick` does implicitly). `ensure_interface()` now bounces the link at the end so the kernel re-creates a fresh, working UDP socket on every TCS start. **Live-validated end-to-end on kronos:** after the bounce, the node reports `CONNECTED: true`, the TCS WG peer shows a completed latest-handshake with rx/tx bytes climbing, and `ping6` to the node's `fd…` overlay IP over `tcs-sl0` succeeds (0% loss, ~0.5ms). The SideroLink WireGuard management path is now fully functional.
+- Quieted per-re-provision Siderolink `info!` logging to `debug!` (Talos re-dials `Provision` ~every 30s per node; the key-load and provision logs now require `RUST_LOG=debug` to appear).
+
 ## [0.5.28] — 2026-09-02
 
 ### Fixed

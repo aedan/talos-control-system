@@ -141,7 +141,15 @@ impl SiderolinkWg {
             r
         })?;
         // WireGuard link MTU (nodes use 1280; the host interface can be higher).
-        run_cmd(&["ip", "link", "set", "mtu", "1420", "dev", &self.iface])?;
+        let _ = run_cmd(&["ip", "link", "set", "mtu", "1420", "dev", &self.iface]);
+        // Bounce the link so the kernel re-creates the WireGuard UDP socket bound
+        // to the final listen-port. When the device is (re)created via netlink the
+        // kernel allocates its UDP socket up front; configuring listen-port/privkey
+        // without a down/up can leave a stale socket that is bound but never
+        // demultiplexes incoming datagrams to the WG device (handshakes arrive at
+        // the host but the peer shows 0 rx / no handshake). A down->up rebind is
+        // what `wg-quick` does implicitly and is the reliable fix.
+        let _ = run_cmd(&["ip", "link", "set", "down", "dev", &self.iface]);
         run_cmd(&["ip", "link", "set", "up", "dev", &self.iface])?;
         Ok(())
     }
@@ -186,7 +194,7 @@ fn load_or_create_keys(path: &Path) -> (String, String) {
                 let secret = StaticSecret::from(arr);
                 let public = PublicKey::from(&secret);
                 let pub_b64 = base64::engine::general_purpose::STANDARD.encode(public.as_bytes());
-                tracing::info!(key_path = %path.display(), "Siderolink WG key loaded from file");
+                tracing::debug!(key_path = %path.display(), "Siderolink WG key loaded from file");
                 return (priv_b64.to_string(), pub_b64);
             }
         }
@@ -196,7 +204,7 @@ fn load_or_create_keys(path: &Path) -> (String, String) {
             "Siderolink WG key file present but invalid; generating new"
         );
     } else {
-        tracing::info!(key_path = %path.display(), "Siderolink WG key file absent; generating new");
+        tracing::debug!(key_path = %path.display(), "Siderolink WG key file absent; generating new");
     }
     let secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
     let public = PublicKey::from(&secret);

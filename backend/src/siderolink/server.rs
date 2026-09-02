@@ -152,14 +152,15 @@ impl ProvisionService for SiderolinkServer {
         // not implemented; the node requested native by default, and if it asks
         // for grpc_tunnel we still return a native endpoint so it works.)
         let endpoint = self.wg_endpoint();
-        let server_pub = self.server_public_key();
-        tracing::info!(
+        // This fires on every node re-provision (~30s) plus transient key churn,
+        // so it's debug-level; enable RUST_LOG=debug to inspect it live.
+        tracing::debug!(
             node_uuid = %req.node_uuid,
             talos = ?req.talos_version,
             wireguard_over_grpc = ?req.wireguard_over_grpc,
             node_addr = %node_addr,
             endpoint = %endpoint,
-            server_public_key = %server_pub,
+            server_public_key = %self.server_public_key(),
             "Siderolink node provisioned"
         );
 
