@@ -8,8 +8,8 @@
   interface CertStatus {
     issuer: string;
     domains: string[];
-    expiryDate: string;
-    daysRemaining: number;
+    expires_at: string;
+    days_remaining: number;
     mode: 'letsencrypt' | 'self-signed' | 'provided' | 'disabled';
   }
 
@@ -204,12 +204,12 @@
             </div>
             <div class="status-row">
               <span class="label">Expiry</span>
-              <span class="value">{status.expiryDate ? new Date(status.expiryDate).toLocaleDateString() : 'N/A'}</span>
+              <span class="value">{status.expires_at ? new Date(status.expires_at).toLocaleDateString() : 'N/A'}</span>
             </div>
             <div class="status-row">
               <span class="label">Days Remaining</span>
-              <span class="value" style="color: {getDaysRemainingColor(status.daysRemaining)}">
-                {status.daysRemaining >= 0 ? `${status.daysRemaining} days` : 'Expired'}
+              <span class="value" style="color: {getDaysRemainingColor(status.days_remaining)}">
+                {status.days_remaining >= 0 ? `${status.days_remaining} days` : 'Expired'}
               </span>
             </div>
             <div class="status-row">

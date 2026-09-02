@@ -2,7 +2,10 @@
 
 ## [Unreleased]
 
-## [0.5.22] — 2026-08-31
+## [0.5.23] — 2026-09-02
+
+### Fixed
+- **Certificate status panel expiry display.** The `/settings/certificates/status` endpoint returns `expires_at` and `days_remaining` (snake_case), but the Certificates UI read `expiryDate`/`daysRemaining` (camelCase), so a healthy Let's Encrypt cert rendered as "N/A / Expired". Fixed the field mapping so the panel shows the real expiry date and days remaining. (The live cert on :443 was always correct — this was display-only.)
 
 ### Fixed
 - **Let's Encrypt DNS-01 secondary validation race.** Primary validation passed but LE's *secondary* validator (different vantage point, can lag by 10-60s) saw NXDOMAIN because GoDaddy's authoritative NSes had not all refreshed yet. TCS now (a) waits until the TXT record resolves at **two independent public resolvers** (8.8.8.8 + 1.1.1.1), not just one, and (b) settles a **20s buffer** before asking LE to validate. The record remains published through finalization + download (cleanup only happens after the cert is in hand), so both validators observe it. Combined with v0.5.21's relative record-name fix, this completes a reliable Let's Encrypt DNS-01 flow via GoDaddy.
