@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.35] — 2026-09-02
+
+### Fixed
+- **Siderolink tunnel still down after TCS restart — `private-key` was set before the socket-rebind bounce.** v0.5.34 set `wg listen-port`/`private-key` and *then* bounced the link down→up, which left the freshly-created device's kernel WireGuard UDP socket stale (bound but not receiving): node handshake-inits arrived at the host yet the peer stayed at 0 rx / no handshake. The proven-working order (validated live on kronos against a running v0.5.34) is to bounce the link **first** (down→up on the existing device) and *then* set `listen-port`/`private-key` on the now-live device — that re-binds the socket and gets it receiving. `ensure_interface()` now does: create-if-absent → up → down/up bounce → `wg set listen-port + private-key` → overlay address → MTU. With this, a TCS restart comes up with a functioning `tcs-sl0` and an already-joined node's cached WireGuard retries complete without needing the node to re-provision.
+
 ## [0.5.34] — 2026-09-02
 
 ### Fixed

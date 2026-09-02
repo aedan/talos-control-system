@@ -117,12 +117,22 @@ impl SiderolinkWg {
         if !exists {
             let _ = run_cmd(&["ip", "link", "add", "dev", &self.iface, "type", "wireguard"]);
         }
-        // Bring the link UP before setting the key. Setting `private-key` on an
-        // UP device is what reliably binds the socket to the listen-port and gets
-        // it receiving (this is the ordering the proven-working manual bounce
-        // used: down->up, then wg set).
+        // Bounce the link to re-attach the kernel WireGuard UDP socket. A
+        // freshly netlink-created WG device (or a leftover one from a prior boot)
+        // can be left with a socket that is bound to the listen port but never
+        // demultiplexes incoming datagrams to the device — handshake-inits arrive
+        // at the host (tcpdump) yet the peer shows 0 rx / no handshake and UDP
+        // RcvbufErrors climb. The proven-working order (validated live on kronos)
+        // is: down -> up, THEN `wg set private-key` on the now-live device.
+        // Setting the key BEFORE the bounce leaves the socket stale. This step
+        // MUST also come before the address assignment: bringing a WG link down
+        // clears its addresses, so adding them afterwards guarantees they survive.
         run_cmd(&["ip", "link", "set", "up", "dev", &self.iface])?;
-        // WireGuard data port (not the gRPC API port) + identity key.
+        let _ = run_cmd(&["ip", "link", "set", "down", "dev", &self.iface]);
+        run_cmd(&["ip", "link", "set", "up", "dev", &self.iface])?;
+        // WireGuard data port (not the gRPC API port) + identity key, applied on
+        // the live (post-bounce) device so the kernel re-binds its UDP socket to
+        // the listen port and starts receiving.
         run_cmd(&[
             "wg",
             "set",
@@ -148,17 +158,6 @@ impl SiderolinkWg {
             let _ = fs::remove_file(&tmp);
             r
         })?;
-        // Bounce the link to re-attach the kernel WireGuard UDP socket. A
-        // freshly netlink-created WG device (or a leftover one from a prior boot)
-        // can be left with a socket that is bound to the listen port but never
-        // demultiplexes incoming datagrams to the device — handshake-inits arrive
-        // at the host (tcpdump) yet the peer shows 0 rx / no handshake and UDP
-        // RcvbufErrors climb. A down->up after the key is set reliably re-binds
-        // the socket (what `wg-quick` does implicitly). This step MUST come
-        // before the address assignment: bringing a WG link down clears its
-        // addresses, so adding them afterwards guarantees they survive.
-        let _ = run_cmd(&["ip", "link", "set", "down", "dev", &self.iface]);
-        run_cmd(&["ip", "link", "set", "up", "dev", &self.iface])?;
         // Assign the server's own overlay address (first usable in the /64) so
         // nodes can reach TCS at server_address over the tunnel.
         let server_addr = format!("{}/64", self.server_address());
