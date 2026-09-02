@@ -285,6 +285,26 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "HA instance identity"
     );
 
+    // Re-register known Siderolink peers to the freshly-created tcs-sl0. The
+    // kernel WG device is wiped on restart, so peers live only until a node
+    // re-provisions; nodes that keep their cached provisionData and just retry
+    // the existing handshake would otherwise find no peer. (Best-effort: peers
+    // table may be empty on first boot.)
+    {
+        use talos_control_system::db::repos::siderolink as sl_repos;
+        match sl_repos::list_peers(&db_pool).await {
+            Ok(peers) if !peers.is_empty() => {
+                let mapped: Vec<(String, String)> = peers
+                    .iter()
+                    .map(|p| (p.public_key.clone(), p.assigned_ip.clone()))
+                    .collect();
+                siderolink_wg.reapply_peers(&mapped);
+            }
+            Ok(_) => {}
+            Err(e) => warn!(error = %e, "Siderolink: could not list peers for boot re-apply"),
+        }
+    }
+
     let event_bus = Arc::new(EventBus::new());
     let app_cache = AppCache::new();
 

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.32] — 2026-09-02
+
+### Fixed
+- **Siderolink tunnel dropped on TCS restart until each node happened to re-provision.** Kernel WireGuard peers exist only in the per-device state, which is wiped when `tcs-sl0` is recreated on TCS startup. TCS stored peers in the DB but only re-applied them when a node dialed `Provision` again. Talos's SideroLink `ManagerController` keeps its own cached `provisionData` after a successful provision and — on a TCS restart — only retries the existing WireGuard handshake (it does not re-provision unless its data is empty), so already-joined nodes found no matching peer on the fresh device and stayed disconnected until they coincidentally re-dialed the API. TCS now re-registers all known DB peers to `tcs-sl0` at boot (`SiderolinkWg::reapply_peers`), so the tunnel survives a TCS restart without waiting on node-side re-provisioning.
+
 ## [0.5.31] — 2026-09-02
 
 ### Fixed

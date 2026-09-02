@@ -182,6 +182,35 @@ impl SiderolinkWg {
         let _ = run_cmd(&["wg", "set", &self.iface, "peer", public_key, "remove"]);
         Ok(())
     }
+
+    /// Re-register known peers to the kernel WG interface. Peers are persisted
+    /// in the DB but live only in the kernel's per-device state, which is wiped
+    /// when `tcs-sl0` is (re)created — i.e. on every TCS restart. Without this,
+    /// nodes that do NOT re-provision after a TCS restart (Talos keeps its own
+    /// cached provisionData and only retries the existing WG handshake) find no
+    /// matching peer on the fresh device and the tunnel stays down until they
+    /// happen to re-dial Provision. Re-applying all DB peers at boot closes that
+    /// gap. Returns the number of peers successfully applied.
+    pub fn reapply_peers(&self, peers: &[(String, String)]) -> usize {
+        if !self.enabled {
+            return 0;
+        }
+        let mut ok = 0;
+        for (public_key, allowed_ip) in peers {
+            if self.set_peer(public_key, allowed_ip).is_ok() {
+                ok += 1;
+            } else {
+                warn!(
+                    peer = %public_key,
+                    "Siderolink: failed to re-apply peer at boot"
+                );
+            }
+        }
+        if ok > 0 {
+            info!(count = ok, "Siderolink: re-applied known WireGuard peers at boot");
+        }
+        ok
+    }
 }
 
 fn load_or_create_keys(path: &Path) -> (String, String) {
