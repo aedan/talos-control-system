@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.27] — 2026-09-02
+
+### Fixed
+- **Siderolink API was unreachable from nodes on a different VLAN.** The SideroLink gRPC API bound only to the HTTP `bind_addr` (e.g. the cluster's `bond0.202` IP), but nodes dial it from the management VLAN — so nodes on `192.168.1.x` got `connection refused` reaching `172.24.48.x:8082`. The gRPC API now binds `0.0.0.0` (all host interfaces) and the advertised `apiUrl` host is controlled by `TCS_SIDEROLINK_ENDPOINT_HOST` (falls back to `TCS_PUBLIC_HOST`, then `advertised_url` host, then `bind_addr`), so nodes always dial the TCS host IP they can actually reach. Live-validated on kronos: nodes on VLAN 1 now reach the SideroLink API on the host's VLAN-1 IP and complete the Provision handshake.
+
 ## [0.5.26] — 2026-09-02
 
 ### Fixed

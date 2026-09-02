@@ -486,9 +486,10 @@ async fn run_server_all(
     let sl_endpoint_host = std::env::var("TCS_SIDEROLINK_ENDPOINT_HOST")
         .ok()
         .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("TCS_PUBLIC_HOST").ok().filter(|s| !s.is_empty()))
         .or_else(|| {
             // Derive the advertised host (same logic used to bake configs).
-            let host = config
+            config
                 .server
                 .advertised_url
                 .trim()
@@ -498,10 +499,8 @@ async fn run_server_all(
                 .and_then(|h| h.split(':').next())
                 .map(|s| s.to_string())
                 .filter(|s| !s.is_empty())
-                .or_else(|| std::env::var("TCS_PUBLIC_HOST").ok().filter(|s| !s.is_empty()))
-                .unwrap_or_else(|| config.server.bind_addr.clone());
-            Some(host)
-        });
+        })
+        .unwrap_or_else(|| config.server.bind_addr.clone());
     let sl_installation_id =
         std::env::var("TCS_SIDEROLINK_INSTALLATION_ID").unwrap_or_else(|_| "tcs".into());
     let sl_router = talos_control_system::siderolink::server::build_router(
@@ -510,14 +509,19 @@ async fn run_server_all(
             wg: state.siderolink_wg.clone(),
             pool: state.db_pool.clone(),
             installation_id: sl_installation_id.clone(),
-            wg_endpoint_host: sl_endpoint_host.clone().unwrap_or_else(|| config.server.bind_addr.clone()),
+            wg_endpoint_host: sl_endpoint_host.clone(),
             enabled: Arc::new(tokio::sync::RwLock::new(true)),
         }),
         talos_control_system::siderolink::server::WgGrpcNotSupported::default(),
     );
+    // Bind the SideroLink gRPC API on ALL interfaces (0.0.0.0) so nodes reach
+    // it via whichever host IP is routable to them (the management VLAN), not
+    // only the configured HTTP bind_addr. The advertised apiUrl host is set
+    // separately via TCS_SIDEROLINK_ENDPOINT_HOST / TCS_PUBLIC_HOST so nodes
+    // dial the IP they can actually reach.
     let sl_grpc_addr: std::net::SocketAddr =
-        format!("{bind}:{sl_grpc_port}").parse().unwrap_or_else(|_| "0.0.0.0:8082".parse().unwrap());
-    let sl_endpoint_host_log = sl_endpoint_host.clone().unwrap_or_default();
+        format!("0.0.0.0:{sl_grpc_port}").parse().unwrap_or_else(|_| "0.0.0.0:8082".parse().unwrap());
+    let sl_endpoint_host_log = sl_endpoint_host.clone();
     let sl_installation_id_log = sl_installation_id.clone();
     let sl_grpc_handle = tokio::spawn(async move {
         info!(

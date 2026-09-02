@@ -38,21 +38,28 @@ pub async fn siderolink_doc_for_cluster(
             return String::new();
         }
     };
-    // Host the node dials for the SideroLink API: env override, else advertised
-    // host, else bind_addr. Port is the SideroLink gRPC API port (bind_port).
+    // Host the node dials for the SideroLink API: full-endpoint env override
+    // (host:port), else TCS_SIDEROLINK_ENDPOINT_HOST (host only) — the IP/hostname
+    // reachable FROM the nodes (often the management-VLAN IP, not the HTTP
+    // bind_addr) — else advertised host, else bind_addr. Port is bind_port.
     let endpoint = std::env::var("TCS_SIDEROLINK_ENDPOINT").ok().filter(|s| !s.is_empty());
     let endpoint = match endpoint {
         Some(e) => e,
         None => {
-            let host = server
-                .advertised_url
-                .trim()
-                .split("//")
-                .nth(1)
-                .and_then(|h| h.split('/').next())
-                .and_then(|h| h.split(':').next())
-                .map(|s| s.to_string())
+            let host = std::env::var("TCS_SIDEROLINK_ENDPOINT_HOST")
+                .ok()
                 .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    server
+                        .advertised_url
+                        .trim()
+                        .split("//")
+                        .nth(1)
+                        .and_then(|h| h.split('/').next())
+                        .and_then(|h| h.split(':').next())
+                        .map(|s| s.to_string())
+                        .filter(|s| !s.is_empty())
+                })
                 .unwrap_or_else(|| server.bind_addr.clone());
             format!("{host}:{}", sl.bind_port)
         }
