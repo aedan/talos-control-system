@@ -130,6 +130,13 @@ impl SiderolinkWg {
         run_cmd(&["ip", "link", "set", "up", "dev", &self.iface])?;
         let _ = run_cmd(&["ip", "link", "set", "down", "dev", &self.iface]);
         run_cmd(&["ip", "link", "set", "up", "dev", &self.iface])?;
+        // Settle delay before setting the key. A freshly (re)created/`up`-ed WG
+        // device needs a moment for the kernel to finish attaching its UDP socket
+        // before `wg set private-key` binds to it; setting the key immediately
+        // after the up leaves the socket in a state that is bound but does not
+        // receive (validated live on kronos: a 1.5s settle makes the boot
+        // sequence work where the no-delay sequence leaves the peer at 0 rx).
+        std::thread::sleep(std::time::Duration::from_millis(1500));
         // WireGuard data port (not the gRPC API port) + identity key, applied on
         // the live (post-bounce) device so the kernel re-binds its UDP socket to
         // the listen port and starts receiving.

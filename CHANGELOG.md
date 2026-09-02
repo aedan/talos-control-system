@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.36] — 2026-09-02
+
+### Fixed
+- **Siderolink tunnel still intermittently down at TCS boot — kernel WG socket needs a settle delay before the key is set.** v0.5.35 set `listen-port`/`private-key` immediately after the down/up bounce, but a freshly (re)created/`up`-ed WireGuard device needs a moment for the kernel to finish attaching its UDP socket; binding the key immediately left the socket in a state that is bound but does not receive (node handshake-inits arrived at the host yet the peer stayed at 0 rx, and TCS sent no replies). `ensure_interface()` now inserts a 1.5s settle delay between the bounce and `wg set private-key`. Validated live on kronos: with the settle delay, a clean TCS boot comes up with a functioning `tcs-sl0` — an already-joined node's WireGuard handshake completes and `ping6` to its `fd…` overlay IP succeeds (0% loss) with no manual intervention.
+
 ## [0.5.35] — 2026-09-02
 
 ### Fixed
