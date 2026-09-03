@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.42] — 2026-09-03
+
+### Fixed
+- **SideroLink watchdog bounced the WireGuard socket on a fixed 30s interval and never let a freshly-created device settle — a death spiral that kept all tunnels down.** On a clean TCS boot the `tcs-sl0` device is created from scratch and its kernel UDP socket does not start receiving until the device has been up for a while (it ages in); each `ip link down/up` bounce *resets* that aging. The v0.5.41 watchdog primed every ~30s whenever it saw no fresh handshake — which is permanently true for a device that hasn't aged yet — so it bounced the socket indefinitely (observed 10+ minutes of continuous 30s bounces with every handshake stuck at a stale age and 0 data flow, even though the nodes were sending handshake-inits on the wire the whole time). The watchdog now **waits ~45s before its first bounce and uses growing backoff between primes (45→90→180→300→480s)**, so the device gets long undisturbed windows to age; the moment a fresh handshake (age < 45s) is observed it **stands down** (90s idle checks) and only resumes priming (with backoff reset) if the tunnel later degrades. This lets a clean boot reach a working tunnel on its own and stops the constant flapping that was preventing data from flowing.
+
 ## [0.5.41] — 2026-09-02
 
 ### Fixed

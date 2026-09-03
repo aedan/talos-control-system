@@ -144,6 +144,17 @@ impl SiderolinkWg {
     ///
     /// Idempotent: a process-lifetime `Once` guard ensures only one watchdog runs,
     /// so it's safe to call from both boot and the toggle handlers.
+    ///
+    /// Crucially the watchdog uses EXONENTIAL BACKOFF between primes and STOPS
+    /// priming once a fresh handshake is seen. A freshly-created `tcs-sl0` device's
+    /// kernel UDP socket does not start receiving until the device has AGED, and a
+    /// bounce (down/up) resets that aging — so bouncing on a fixed short interval
+    /// (e.g. every 20s) keeps the device perpetually "fresh" and it NEVER becomes
+    /// functional (the nodes keep sending handshake-inits, visible on the wire, but
+    /// the kernel socket drops them). Backing off lets the device settle; the next
+    /// handshake-init a node sends is then processed and the tunnel comes up. Once
+    /// healthy it goes quiet, and only resumes (with backoff again) if the tunnel
+    /// later degrades.
     pub fn re_prime_in_background(&self) {
         use std::sync::Once;
         static STARTED: Once = Once::new();
@@ -153,17 +164,42 @@ impl SiderolinkWg {
         STARTED.call_once(|| {
             let mgr = self.clone();
             std::thread::spawn(move || {
-                // Let boot settle before the first check.
-                std::thread::sleep(std::time::Duration::from_secs(6));
+                // Let the freshly-created device AGE before the first bounce. A
+                // from-scratch `tcs-sl0` does not start receiving until it has been
+                // up for well over a minute, and an early bounce resets that aging —
+                // so wait before disturbing it at all.
+                std::thread::sleep(std::time::Duration::from_secs(45));
+                // Prime intervals (seconds) between consecutive no-fresh-handshake
+                // primes. Growing gaps let the device settle between bounces so one
+                // of them lands on an aged, functional socket. Reset to the first
+                // gap the moment a fresh handshake is observed (stop disturbing it).
+                let intervals: &[u64] = &[45, 90, 180, 300, 480];
+                let mut idx = 0usize;
                 loop {
-                    if mgr.known_peers() && !mgr.has_fresh_handshake() {
-                        info!(
-                            iface = %mgr.iface,
-                            "Siderolink socket watchdog: no fresh handshake with peers present — priming"
-                        );
-                        let _ = mgr.prime_socket();
+                    // Healthy (or no peers expected) → go quiet and check occasionally;
+                    // resume priming only if it degrades.
+                    let healthy = !mgr.known_peers() || mgr.has_fresh_handshake();
+                    if healthy {
+                        if idx != 0 {
+                            info!(
+                                iface = %mgr.iface,
+                                "Siderolink socket watchdog: fresh handshake present — tunnel healthy, standing down"
+                            );
+                        }
+                        idx = 0;
+                        std::thread::sleep(std::time::Duration::from_secs(90));
+                        continue;
                     }
-                    std::thread::sleep(std::time::Duration::from_secs(20));
+                    // No fresh handshake with peers present → prime, then back off.
+                    let wait = intervals[idx];
+                    info!(
+                        next_prime_in_secs = wait,
+                        iface = %mgr.iface,
+                        "Siderolink socket watchdog: no fresh handshake with peers present — priming"
+                    );
+                    let _ = mgr.prime_socket();
+                    idx = (idx + 1).min(intervals.len() - 1);
+                    std::thread::sleep(std::time::Duration::from_secs(wait));
                 }
             });
         });
