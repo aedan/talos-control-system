@@ -23,6 +23,11 @@ pub struct SiderolinkWg {
     iface: String,
     enabled: bool,
     installation_id: String,
+    /// Cache of (peer public key -> allowed IP) currently known, maintained by
+    /// `set_peer`/`reapply_peers`. `prime_socket` recreates the WG device (which
+    /// wipes the kernel peer list) and re-applies from this cache, so a prime
+    /// never loses the configured peers. Shared via `Arc` so all clones agree.
+    peer_cache: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
 }
 
 impl SiderolinkWg {
@@ -44,6 +49,7 @@ impl SiderolinkWg {
             iface,
             enabled: false,
             installation_id,
+            peer_cache: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         };
         match mgr.ensure_interface() {
             Ok(()) => {
@@ -74,19 +80,33 @@ impl SiderolinkWg {
         arc
     }
 
-    /// Delayed prime: re-bounce the link and re-set the key on the now-settled
-    /// device so the kernel WG UDP socket is functional. Returns true once a
-    /// peer handshake is observed (the socket is receiving); the caller retries
-    /// on false. A fresh device needs to age before the prime takes effect, so
-    /// this waits a few seconds after each prime for a handshake to land.
+    /// Prime the socket by FULLY RECREATING the WG device (`ip link del` +
+    /// `ip link add`), not just a link down/up. A down/up leaves the kernel's UDP
+    /// socket object in place — and once it has gone into the bound-but-not-
+    /// receiving (stale) state, a down/up does NOT reset it, so node handshake-
+    /// inits keep arriving on the wire but the kernel drops them (no reply,
+    /// frozen transfer counters, stale handshake ages). Deleting and re-adding the
+    /// device creates a brand-new receiving socket; validated live on kronos — a
+    /// recreation brought all 15 peers to fresh handshakes and 0% ping6 loss within
+    /// ~20s, where repeated down/up bounces for 10+ minutes did not.
+    ///
+    /// Recreation wipes the kernel peer list, so the known peers are re-applied
+    /// from the cache afterwards. Returns true once a FRESH handshake is observed.
     pub fn prime_socket(&self) -> bool {
         if !self.enabled {
             return false;
         }
-        let _ = run_cmd(&["ip", "link", "set", "down", "dev", &self.iface]);
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Tear down and recreate the device. `del` can fail if it's already gone;
+        // `add` still yields a fresh device either way.
+        let _ = run_cmd(&["ip", "link", "del", "dev", &self.iface]);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let add_ok = run_cmd(&["ip", "link", "add", &self.iface, "type", "wireguard"]);
+        if add_ok.is_err() {
+            // `add` failed (device may still exist) — bring the existing one up.
+            let _ = run_cmd(&["ip", "link", "set", "up", "dev", &self.iface]);
+        }
         let _ = run_cmd(&["ip", "link", "set", "up", "dev", &self.iface]);
-        std::thread::sleep(std::time::Duration::from_millis(1000));
+        std::thread::sleep(std::time::Duration::from_millis(800));
         let ok = run_cmd(&[
             "wg",
             "set",
@@ -111,20 +131,38 @@ impl SiderolinkWg {
             let _ = fs::remove_file(&tmp);
             r
         });
-        // The down/up clears addresses; restore them.
+        // Recreation clears the overlay addresses; restore them.
         let server_addr = format!("{}/64", self.server_address());
         let _ = run_cmd(&["ip", "address", "add", &server_addr, "dev", &self.iface]);
         let _ = run_cmd(&["ip", "address", "add", "100.64.0.1/10", "dev", &self.iface]);
+        // Recreation wipes the peer list; restore it from the cache.
+        let n_peers = self.reapply_cached_peers();
         match ok {
-            Ok(()) => debug!(iface = %self.iface, "Siderolink WireGuard socket primed"),
-            Err(e) => warn!(error = %e, iface = %self.iface, "Siderolink socket prime: key re-set failed"),
+            Ok(()) => debug!(iface = %self.iface, peers = n_peers, "Siderolink WireGuard device recreated (socket primed)"),
+            Err(e) => warn!(error = %e, iface = %self.iface, "Siderolink device recreation: key set failed"),
         }
-        // Give the node time to complete a handshake against the primed socket,
-        // then check. `wg show` prints a "latest handshake:" line only for peers
-        // that have actually handshook — its presence means the socket is
-        // receiving and the tunnel is functional.
-        std::thread::sleep(std::time::Duration::from_secs(8));
-        self.has_handshake()
+        // Give the nodes time to re-handshake against the fresh socket, then
+        // check for a FRESH handshake (a stale pre-recreation one does not count).
+        std::thread::sleep(std::time::Duration::from_secs(12));
+        self.has_fresh_handshake()
+    }
+
+    /// Re-apply every peer in the cache to the (re)created device. Returns the
+    /// number successfully applied. `set_peer` re-records each into the cache.
+    fn reapply_cached_peers(&self) -> usize {
+        let snapshot = match self.peer_cache.read() {
+            Ok(c) => c.clone(),
+            Err(_) => return 0,
+        };
+        let mut ok = 0;
+        for (pk, ip) in &snapshot {
+            if self.set_peer(pk, ip).is_ok() {
+                ok += 1;
+            } else {
+                warn!(peer = %pk, "Siderolink: failed to re-apply peer after recreation");
+            }
+        }
+        ok
     }
 
     /// Start (once) a persistent, self-healing socket watchdog on a detached
@@ -214,16 +252,6 @@ impl SiderolinkWg {
             Err(_) => return false,
         };
         out.lines().any(|l| l.trim_start().starts_with("peer:"))
-    }
-
-    /// True if any peer on the WG interface has completed a handshake (the
-    /// kernel `wg show` output includes a "latest handshake:" line for such
-    /// peers). Used by `prime_socket`'s single immediate check.
-    fn has_handshake(&self) -> bool {
-        let out = run_cmd_stdout(&["wg", "show", &self.iface]);
-        out.as_deref()
-            .map(|s| s.lines().any(|l| l.contains("latest handshake")))
-            .unwrap_or(false)
     }
 
     /// True if any peer has a *fresh* handshake — one completed within the last
@@ -381,6 +409,10 @@ impl SiderolinkWg {
             "persistent-keepalive",
             "25",
         ])?;
+        // Remember the peer so a device recreation (prime) can restore it.
+        if let Ok(mut c) = self.peer_cache.write() {
+            c.insert(public_key.to_string(), allowed_ip.to_string());
+        }
         Ok(())
     }
 
