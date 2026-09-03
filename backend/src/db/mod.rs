@@ -106,6 +106,10 @@ pub async fn run_migrations(pool: &DbPool) -> Result<(), AppError> {
             "019_cluster_siderolink_token.sql",
             include_str!("migrations/019_cluster_siderolink_token.sql"),
         ),
+        (
+            "020_machine_muid.sql",
+            include_str!("migrations/020_machine_muid.sql"),
+        ),
     ];
 
     for (name, sql) in migrations {

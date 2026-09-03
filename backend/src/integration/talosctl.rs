@@ -318,6 +318,68 @@ impl TalosctlClient {
         Ok(disks)
     }
 
+    /// Fetch the node's Talos **MUID** (machine ID) — `talosctl get
+    /// systeminformation -o json -> spec.uuid`. This is the same identifier the
+    /// node sends as `node_uuid` on the SideroLink Provision API, so it is the
+    /// bridge that lets a SideroLink peer correlate back to its machine. Returns
+    /// `Ok(None)` if the node is unreachable or the field is absent (best-effort;
+    /// callers should not fail the operation on a missing MUID).
+    pub async fn get_muid(
+        endpoint: &str,
+        talosconfig: Option<&str>,
+    ) -> Result<Option<String>, AppError> {
+        Self::ensure_installed().await?;
+
+        let mut args: Vec<String> = vec![
+            "get".into(),
+            "systeminformation".into(),
+            "-e".into(),
+            endpoint.into(),
+            "-n".into(),
+            endpoint.into(),
+            "-o".into(),
+            "json".into(),
+        ];
+        args.extend(Self::talosconfig_args(talosconfig));
+
+        // Best-effort: a timeout / unreachable node yields None, not an error.
+        let out = match tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            Self::run(&args),
+        )
+        .await
+        {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => {
+                tracing::debug!(endpoint, error = %e, "talosctl get systeminformation failed (muid)");
+                return Ok(None);
+            }
+            Err(_) => {
+                tracing::debug!(endpoint, "talosctl get systeminformation timed out (muid)");
+                return Ok(None);
+            }
+        };
+
+        // stdout is one or more concatenated JSON docs (Talos duplicates them).
+        // Grab the first `"uuid"` inside a `spec` block.
+        let doc_start = out.find('{');
+        if let Some(s) = doc_start {
+            if let Some(obj) = parse_first_json_doc(&out[s..]) {
+                if let Some(uuid) = obj
+                    .get("spec")
+                    .and_then(|s| s.get("uuid"))
+                    .and_then(|v| v.as_str())
+                {
+                    if !uuid.is_empty() {
+                        info!(endpoint, muid = %uuid, "talosctl get_muid");
+                        return Ok(Some(uuid.to_string()));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Apply a machine config to a machine.
     pub async fn apply_config(
         endpoint: &str,
@@ -873,6 +935,34 @@ impl TalosctlClient {
         info!(endpoint, "talosctl probe_node successful");
         Ok("reachable".to_string())
     }
+}
+
+/// Extract the first balanced JSON object from a string that may contain one or
+/// more concatenated JSON docs (Talos `talosctl get … -o json` duplicates the
+/// doc). Returns `None` if no complete object is found.
+fn parse_first_json_doc(s: &str) -> Option<serde_json::Value> {
+    let start = s.find('{')?;
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut esc = false;
+    for i in start..bytes.len() {
+        match bytes[i] {
+            b'\\' if in_str => esc = !esc,
+            b'"' if in_str && !esc => in_str = false,
+            b'"' if !in_str => in_str = true,
+            b'{' if !in_str => depth += 1,
+            b'}' if !in_str => {
+                depth -= 1;
+                if depth == 0 {
+                    let candidate = &s[start..=i];
+                    return serde_json::from_str(candidate).ok();
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn extract_disk(obj: &serde_json::Value) -> serde_json::Value {

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.5.46] — 2026-09-03
+
+### Fixed
+- **Cluster page reported "0 nodes connected through the tunnel" even though all 15 SideroLink tunnels were up and healthy.** The SideroLink peer registry is keyed by each node's **Talos MUID** (the hardware machine ID, e.g. Dell/HP tag `091716XMQ524041H`, sent as `node_uuid` on Provision), but the machine inventory was keyed by a TCS-invented **`mac-<MAC>` alias** in `machines.system_uuid`. Every place that intersected the two — the cluster `siderolink_status` endpoint (which builds the UI's connected count), the `effective_endpoint` tunnel-IP lookup, and the `set_siderolink_connected` flag update — matched MUID against the MAC alias and found **zero** rows, so the count stayed 0 and management always fell back to the LAN address. Fixed by capturing each node's real MUID (`talosctl get systeminformation → spec.uuid`, retrieved by the status reconciler) into a new `machines.muid` column and correlating by it (with the legacy `system_uuid` as fallback) in all three places. The reconciler now also refreshes a peer's `last_seen` and sets `siderolink_connected` from a live peer every cycle, so the flag and the tunnel-IP preference stay accurate over time.
+
+### Added
+- `machines.muid` column (migration `020_machine_muid.sql`) + index, the `TalosctlClient::get_muid` helper, and `repos::machine::set_muid` / MUID-aware `set_siderolink_connected`.
+
 ## [0.5.45] — 2026-09-03
 
 ### Fixed

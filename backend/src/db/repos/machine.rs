@@ -2,7 +2,7 @@ use crate::db::models::machine::Machine;
 use crate::db::pool::{DbPool, SqlVal};
 use crate::AppError;
 
-const COLS: &str = "id, system_uuid, machine_type, cluster_id, status, talos_version, secure_boot, siderolink_connected, address, install_disk, desired_config, mac_address, hostname, bmc_address, bmc_username, bmc_password_enc, bmc_type, bmc_redfish_path, bmc_tls_insecure, pxe_profile_id, last_power_state, last_seen_at, created_at, updated_at, factory_modules, module_adds, module_removes";
+const COLS: &str = "id, system_uuid, muid, machine_type, cluster_id, status, talos_version, secure_boot, siderolink_connected, address, install_disk, desired_config, mac_address, hostname, bmc_address, bmc_username, bmc_password_enc, bmc_type, bmc_redfish_path, bmc_tls_insecure, pxe_profile_id, last_power_state, last_seen_at, created_at, updated_at, factory_modules, module_adds, module_removes";
 
 pub async fn create(pool: &DbPool, machine: &Machine) -> Result<Machine, AppError> {
     if get(pool, machine.id).await?.is_some() {
@@ -15,11 +15,12 @@ pub async fn create(pool: &DbPool, machine: &Machine) -> Result<Machine, AppErro
         .execute(
             &format!(
                 "INSERT INTO machines ({COLS})
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             ),
             &[
                 SqlVal::Uuid(machine.id),
                 SqlVal::text(&machine.system_uuid),
+                SqlVal::text(&machine.muid),
                 SqlVal::text(&machine.machine_type),
                 SqlVal::OptUuid(machine.cluster_id),
                 SqlVal::text(&machine.status),
@@ -82,20 +83,57 @@ pub async fn get_by_mac(pool: &DbPool, mac: &str) -> Result<Option<Machine>, App
     .await
 }
 
-/// Set the siderolink_connected flag for the machine whose system_uuid matches.
+/// Set the siderolink_connected flag for the machine that matches the given
+/// identifier. The SideroLink peer's `system_uuid` is the node's Talos **MUID**,
+/// so we match `machines.muid` first; the `system_uuid` match is kept as a
+/// fallback for any machine still identified by the old `mac-<MAC>` alias.
 /// Returns true if a row was updated.
 pub async fn set_siderolink_connected(
     pool: &DbPool,
-    system_uuid: &str,
+    machine_id: &str,
     connected: bool,
 ) -> Result<bool, AppError> {
-    let n = pool
+    let now = chrono::Utc::now();
+    let n_muid = pool
+        .execute(
+            "UPDATE machines SET siderolink_connected = ?, updated_at = ? WHERE muid = ? AND muid != ''",
+            &[
+                SqlVal::Bool(connected),
+                SqlVal::DateTime(now),
+                SqlVal::text(machine_id),
+            ],
+        )
+        .await?;
+    if n_muid > 0 {
+        return Ok(true);
+    }
+    let n_uuid = pool
         .execute(
             "UPDATE machines SET siderolink_connected = ?, updated_at = ? WHERE system_uuid = ?",
             &[
                 SqlVal::Bool(connected),
+                SqlVal::DateTime(now),
+                SqlVal::text(machine_id),
+            ],
+        )
+        .await?;
+    Ok(n_uuid > 0)
+}
+
+/// Set the machine's Talos MUID (from `talosctl get systeminformation`).
+/// Returns true if a row was updated.
+pub async fn set_muid(
+    pool: &DbPool,
+    machine_id: uuid::Uuid,
+    muid: &str,
+) -> Result<bool, AppError> {
+    let n = pool
+        .execute(
+            "UPDATE machines SET muid = ?, updated_at = ? WHERE id = ?",
+            &[
+                SqlVal::text(muid),
                 SqlVal::DateTime(chrono::Utc::now()),
-                SqlVal::text(system_uuid),
+                SqlVal::Uuid(machine_id),
             ],
         )
         .await?;
@@ -135,10 +173,11 @@ pub async fn list_with_mac(pool: &DbPool) -> Result<Vec<Machine>, AppError> {
 pub async fn update(pool: &DbPool, machine: &Machine) -> Result<Machine, AppError> {
     let n = pool
         .execute(
-            "UPDATE machines SET system_uuid = ?, machine_type = ?, cluster_id = ?, status = ?, talos_version = ?, secure_boot = ?, siderolink_connected = ?, address = ?, install_disk = ?, desired_config = ?, mac_address = ?, hostname = ?, bmc_address = ?, bmc_username = ?, bmc_password_enc = ?, bmc_type = ?, bmc_redfish_path = ?, bmc_tls_insecure = ?, pxe_profile_id = ?, last_power_state = ?, last_seen_at = ?, factory_modules = ?, module_adds = ?, module_removes = ?, updated_at = ?
+            "UPDATE machines SET system_uuid = ?, muid = ?, machine_type = ?, cluster_id = ?, status = ?, talos_version = ?, secure_boot = ?, siderolink_connected = ?, address = ?, install_disk = ?, desired_config = ?, mac_address = ?, hostname = ?, bmc_address = ?, bmc_username = ?, bmc_password_enc = ?, bmc_type = ?, bmc_redfish_path = ?, bmc_tls_insecure = ?, pxe_profile_id = ?, last_power_state = ?, last_seen_at = ?, factory_modules = ?, module_adds = ?, module_removes = ?, updated_at = ?
               WHERE id = ?",
             &[
                 SqlVal::text(&machine.system_uuid),
+                SqlVal::text(&machine.muid),
                 SqlVal::text(&machine.machine_type),
                 SqlVal::OptUuid(machine.cluster_id),
                 SqlVal::text(&machine.status),

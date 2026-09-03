@@ -10,6 +10,14 @@ pub struct Machine {
     pub id: Uuid,
     #[sqlx(rename = "system_uuid")]
     pub system_uuid: String,
+    /// The node's Talos MUID (machine ID) — `talosctl get
+    /// systeminformations.hardware.talos.dev -> spec.uuid`. This is the same
+    /// identifier the node sends as `node_uuid` on the SideroLink Provision API
+    /// and that `siderolink_peers.system_uuid` stores, so it is the bridge that
+    /// correlates a SideroLink peer back to its machine (and thus sets
+    /// `siderolink_connected`).
+    #[sqlx(rename = "muid")]
+    pub muid: String,
     #[sqlx(rename = "machine_type")]
     pub machine_type: String,
     #[sqlx(rename = "cluster_id")]
@@ -78,6 +86,7 @@ impl Machine {
         Self {
             id: Uuid::new_v4(),
             system_uuid,
+            muid: String::new(),
             machine_type,
             cluster_id: None,
             status: "pending".to_string(),

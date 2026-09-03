@@ -104,14 +104,22 @@ impl ClusterController {
             .await?
             .is_some();
         let machines = crate::db::repos::machine::list_by_cluster(&self.pool, cluster_id).await?;
-        let uuids: std::collections::HashSet<String> = machines
+        // SideroLink peers are keyed by the node's Talos **MUID**, while
+        // `machines.system_uuid` is a TCS-invented `mac-<MAC>` alias — so we
+        // correlate by the machine's captured `muid` (falling back to
+        // `system_uuid` for any machine still identified the old way). Without
+        // this the intersection is empty and the UI reports 0 nodes connected
+        // even with every tunnel up.
+        let machine_ids: std::collections::HashSet<String> = machines
             .iter()
-            .map(|m| m.system_uuid.clone())
+            .flat_map(|m| {
+                [m.muid.clone(), m.system_uuid.clone()].into_iter().filter(|s| !s.is_empty())
+            })
             .collect();
         let peers = crate::db::repos::siderolink::list_peers(&self.pool)
             .await?
             .into_iter()
-            .filter(|p| uuids.contains(&p.system_uuid))
+            .filter(|p| machine_ids.contains(&p.system_uuid))
             .filter_map(|p| serde_json::to_value(p).ok())
             .collect();
         Ok((enabled, peers))
@@ -1780,9 +1788,17 @@ pub async fn effective_endpoint(
     machine: &Machine,
 ) -> Result<String, AppError> {
     if machine.siderolink_connected {
-        if let Some(peer) =
+        // SideroLink peers are keyed by the node's Talos MUID; try the machine's
+        // captured `muid` first, then the legacy `system_uuid` alias.
+        let peer = if !machine.muid.is_empty() {
+            match crate::db::repos::siderolink::find_by_uuid(pool, &machine.muid).await? {
+                Some(p) => Some(p),
+                None => crate::db::repos::siderolink::find_by_uuid(pool, &machine.system_uuid).await?,
+            }
+        } else {
             crate::db::repos::siderolink::find_by_uuid(pool, &machine.system_uuid).await?
-        {
+        };
+        if let Some(peer) = peer {
             let fresh = peer.last_seen > chrono::Utc::now() - chrono::Duration::minutes(5);
             if fresh && !peer.assigned_ip.is_empty() {
                 return Ok(peer.assigned_ip.clone());

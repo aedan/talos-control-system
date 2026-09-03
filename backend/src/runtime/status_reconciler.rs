@@ -203,6 +203,7 @@ async fn probe_and_update(
     let hostname = machine.hostname.clone();
     let old_status = machine.status.clone();
     let old_version = machine.talos_version.clone();
+    let old_connected = machine.siderolink_connected;
 
     let cluster = repos::cluster::get(pool, cluster_id)
         .await?
@@ -226,6 +227,53 @@ async fn probe_and_update(
         Ok(v) => {
             updated.status = "running".to_string();
             updated.talos_version = v;
+
+            // Capture the node's Talos MUID once so the SideroLink peer (keyed by
+            // MUID) can correlate back to this machine. Only fetched while the
+            // MUID is empty and the node is reachable (LAN or tunnel).
+            if updated.muid.is_empty() {
+                let endpoint = crate::controllers::cluster::effective_endpoint(pool, &updated)
+                    .await
+                    .unwrap_or_else(|_| updated.address.clone());
+                if let Ok(Some(muid)) =
+                    TalosctlClient::get_muid(&endpoint, talosconfig.as_deref()).await
+                {
+                    if let Ok(true) = repos::machine::set_muid(pool, machine_id, &muid).await {
+                        info!(
+                            machine_id = %machine_id,
+                            hostname = %hostname,
+                            muid = %muid,
+                            "Machine MUID captured (Siderolink correlation)"
+                        );
+                    }
+                    updated.muid = muid;
+                }
+            }
+
+            // Reconcile the SideroLink connected flag from a live peer for this
+            // machine's MUID. Talos re-provisions only on (re)join, so the
+            // Provision-path flag can lag; a running node with a registered peer
+            // is connected. Refresh the peer's last_seen so the tunnel-IP
+            // preference in `effective_endpoint` stays fresh.
+            if !updated.muid.is_empty() {
+                if let Some(peer) =
+                    repos::siderolink::find_by_uuid(pool, &updated.muid).await?
+                {
+                    let _ = repos::siderolink::touch(pool, peer.id).await;
+                    if !updated.siderolink_connected {
+                        let _ =
+                            repos::machine::set_siderolink_connected(pool, &updated.muid, true)
+                                .await;
+                        updated.siderolink_connected = true;
+                        info!(
+                            machine_id = %machine_id,
+                            hostname = %hostname,
+                            muid = %updated.muid,
+                            "Siderolink connected flag set from live peer"
+                        );
+                    }
+                }
+            }
         }
         Err(_) => {
             updated.status = "offline".to_string();
@@ -233,7 +281,10 @@ async fn probe_and_update(
     }
     updated.updated_at = chrono::Utc::now();
 
-    if updated.status != old_status || updated.talos_version != old_version {
+    if updated.status != old_status
+        || updated.talos_version != old_version
+        || updated.siderolink_connected != old_connected
+    {
         repos::machine::update(pool, &updated).await?;
         info!(
             machine_id = %machine_id,
