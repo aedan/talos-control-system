@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.5.47] — 2026-09-03
+
+### Added
+- **Per-machine SideroLink tunnel status in the UI.** The cluster page's Machines table now has a **Tunnel** column, and each machine's detail page already surfaces its management path. The backend now resolves and emits, for every machine, `viaSiderolink` (whether TCS is reaching the node through the WireGuard tunnel vs its LAN address), `effectiveEndpoint` (the IP TCS actually dials), and `siderolinkIp` (the node's tunnel overlay IP). The cluster machines endpoint (`GET /clusters/:id/machines`) was switched to the endpoint-resolving serializer so the table has the data.
+  - **Tunnel column** shows: `tunnel <overlay-ip>` (green) when TCS manages the node over the Siderolink tunnel; `connected` (green, dimmed) when the tunnel is up but TCS is currently using the LAN address; `—` when the node is not connected through the tunnel.
+- `machine_to_json_with_endpoint` now looks up the SideroLink peer by the machine's **Talos MUID** (with the legacy `system_uuid` alias as fallback), so `siderolinkIp` is populated correctly (previously it queried by the `mac-<MAC>` alias and never matched).
+
 ## [0.5.46] — 2026-09-03
 
 ### Fixed

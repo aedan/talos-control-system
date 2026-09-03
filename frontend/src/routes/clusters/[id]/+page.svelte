@@ -905,6 +905,7 @@
               <tr>
                 <th>Name</th>
                 <th>Status</th>
+                <th>Tunnel</th>
                 <th>Role</th>
                 <th>MAC</th>
                 <th>Address</th>
@@ -917,6 +918,21 @@
                 <tr>
                   <td><a class="mono" href="/machines/{m.id}">{m.hostname || machineLabel(m)}</a></td>
                   <td><span class="status-badge {m.status}">{m.status}</span></td>
+                  <td>
+                    {#if m.siderolinkConnected}
+                      <span
+                        class="tunnel-badge {m.viaSiderolink ? 'via' : 'direct'}"
+                        title={m.viaSiderolink
+                          ? 'Connected via the Siderolink WireGuard tunnel; TCS manages this node over the tunnel overlay IP (NAT/firewall safe)'
+                          : 'Connected via the Siderolink WireGuard tunnel; TCS currently manages this node over its LAN address'}
+                      >
+                        {m.viaSiderolink ? 'tunnel' : 'connected'}
+                        {#if m.viaSiderolink && m.siderolinkIp}<span class="tunnel-ip mono">{m.siderolinkIp}</span>{/if}
+                      </span>
+                    {:else}
+                      <span class="tunnel-badge off" title="Not connected through the Siderolink tunnel">—</span>
+                    {/if}
+                  </td>
                   <td>{m.machineType || '—'}</td>
                   <td class="mono">{m.macAddress || '—'}</td>
                   <td class="mono">{m.address || '—'}</td>
@@ -1340,6 +1356,23 @@
   .status-badge.running, .status-badge.ready { color: var(--tcs-success); border-color: var(--tcs-success); }
   .status-badge.offline, .status-badge.failed { color: var(--tcs-error); border-color: var(--tcs-error); }
   .status-badge.pending, .status-badge.unknown { color: var(--tcs-warning); border-color: var(--tcs-warning); }
+
+  .tunnel-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.72rem;
+    text-transform: lowercase;
+    background: var(--tcs-surface);
+    border: 1px solid var(--tcs-border);
+    white-space: nowrap;
+  }
+  .tunnel-badge.via { color: var(--tcs-success); border-color: var(--tcs-success); }
+  .tunnel-badge.direct { color: var(--tcs-success); border-color: var(--tcs-success); opacity: 0.85; }
+  .tunnel-badge.off { color: var(--tcs-muted); border-color: var(--tcs-border); }
+  .tunnel-ip { font-size: 0.68rem; opacity: 0.8; }
 
   .apply-result {
     background: var(--tcs-surface);

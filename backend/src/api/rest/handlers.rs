@@ -602,9 +602,17 @@ async fn machine_to_json_with_endpoint(
             "viaSiderolink".to_string(),
             serde_json::Value::Bool(via_tunnel),
         );
-        if let Ok(Some(peer)) =
-            crate::db::repos::siderolink::find_by_uuid(pool, &machine.system_uuid).await
-        {
+        // Siderolink peers are keyed by the node's Talos MUID; try `muid` first,
+        // then the legacy `system_uuid` alias.
+        let peer = if !machine.muid.is_empty() {
+            match crate::db::repos::siderolink::find_by_uuid(pool, &machine.muid).await {
+                Ok(Some(p)) => Some(p),
+                _ => crate::db::repos::siderolink::find_by_uuid(pool, &machine.system_uuid).await.ok().flatten(),
+            }
+        } else {
+            crate::db::repos::siderolink::find_by_uuid(pool, &machine.system_uuid).await.ok().flatten()
+        };
+        if let Some(peer) = peer {
             obj.insert(
                 "siderolinkIp".to_string(),
                 serde_json::Value::String(peer.assigned_ip),
@@ -3179,7 +3187,11 @@ pub async fn get_cluster_machines(
         Ok(machines) => {
             let mut result = Vec::new();
             for machine in machines {
-                let v = machine_to_json(&machine)
+                // Resolve the effective management endpoint + Siderolink tunnel
+                // status so the cluster page can show how TCS reaches each node
+                // (via tunnel vs direct LAN) and the node's overlay IP.
+                let v = machine_to_json_with_endpoint(&state.db_pool, &machine)
+                    .await
                     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
                 result.push(v);
             }
