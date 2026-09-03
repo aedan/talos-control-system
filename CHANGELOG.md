@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.44] — 2026-09-03
+
+### Fixed
+- **SideroLink self-heal watchdog flapped against the nodes' re-provisioning, so it had to be reworked from a scheduled backoff into a reactive cooldown.** On v0.5.43 the watchdog recreated the device on a growing timer (45→90→180→300→480s). This fought the nodes: it recreated, the 15 nodes re-handshook (tunnels briefly healthy — confirmed 14/15 fresh), then the next timer tick recreated **again** and wiped them, in a loop. The watchdog now **reacts only to a real staleness signal** — peers present but no *fresh* handshake (age < 45s, i.e. a healthy node's 25s keepalive has gone stale) — and enforces a **240s cooldown** after every recreation so it gives the nodes time to re-provision and re-handshake and cannot flap. When healthy it does nothing and only re-checks every 20s; when stale-but-cooling-down it holds and re-checks every 15s. Combined with v0.5.43's full-device-recreation prime, this means a clean boot and an Enable/Disable toggle reach a working tunnel and the watchdog only recreates when it genuinely needs to, at most once per 4 minutes.
+
 ## [0.5.43] — 2026-09-03
 
 ### Fixed

@@ -165,34 +165,29 @@ impl SiderolinkWg {
         ok
     }
 
-    /// Start (once) a persistent, self-healing socket watchdog on a detached
-    /// thread. A freshly netlink-created WG device's kernel UDP socket is not
-    /// reliably receiving until the device has aged an INDETERMINATE amount — on
-    /// kronos a from-scratch device sometimes only became functional after well
-    /// over 5 minutes, so a time-capped prime loop (v0.5.40) could give up before
-    /// the socket was ready and leave the tunnels stale. The watchdog instead runs
-    /// for the whole process lifetime: every ~20s it checks whether any peer has
-    /// a *fresh* handshake (age < 45s); if there are known peers but none is
-    /// fresh, it primes the socket once (bounce + key + addrs). This heals the
-    /// boot case (primes repeatedly until the device ages and a handshake lands —
-    /// no cap), the Enable/Disable-toggle case (nodes re-provision with new keys,
-    /// handshakes go stale, watchdog re-primes them back), and any spontaneous
-    /// socket degradation. When the tunnel is healthy it is quiet (fresh
-    /// handshakes present → no bounce).
+    /// Start (once) a **reactive** socket self-heal watchdog on a detached thread.
     ///
-    /// Idempotent: a process-lifetime `Once` guard ensures only one watchdog runs,
-    /// so it's safe to call from both boot and the toggle handlers.
+    /// The confirmed failure mode on kronos: the host WG UDP socket on `tcs-sl0`
+    /// periodically enters a "bound-but-not-receiving" (stale) state in which node
+    /// handshake-inits keep arriving on the wire (visible in tcpdump) but the kernel
+    /// drops them — no reply, frozen transfer counters, handshake ages frozen. A link
+    /// `down/up` does NOT reset this; only a **full device recreation** (`ip link del`
+    /// + `ip link add`, done by `prime_socket`) builds a fresh receiving socket and
+    /// recovers all peers within ~20s.
     ///
-    /// Crucially the watchdog uses EXONENTIAL BACKOFF between primes and STOPS
-    /// priming once a fresh handshake is seen. A freshly-created `tcs-sl0` device's
-    /// kernel UDP socket does not start receiving until the device has AGED, and a
-    /// bounce (down/up) resets that aging — so bouncing on a fixed short interval
-    /// (e.g. every 20s) keeps the device perpetually "fresh" and it NEVER becomes
-    /// functional (the nodes keep sending handshake-inits, visible on the wire, but
-    /// the kernel socket drops them). Backing off lets the device settle; the next
-    /// handshake-init a node sends is then processed and the tunnel comes up. Once
-    /// healthy it goes quiet, and only resumes (with backoff again) if the tunnel
-    /// later degrades.
+    /// The earlier scheduled-backoff watchdog (v0.5.42) recreated on a timer and
+    /// **fought the nodes' re-provisioning**: it would recreate, the nodes would
+    /// re-handshake, and the next timer tick would recreate again — wiping the fresh
+    /// handshakes in a flap loop. This watchdog fixes that by:
+    ///   * reacting only to a real staleness signal (peers present but **no fresh
+    ///     handshake < 45s**, i.e. a healthy node's 25s keepalive has gone stale), and
+    ///   * enforcing a **long cooldown** (`RECREATE_COOLDOWN_SECS`) after every
+    ///     recreation, so it gives the nodes time to re-provision and re-handshake and
+    ///     cannot flap. When healthy it recreates nothing and only re-checks on a
+    ///     gentle cadence.
+    ///
+    /// Idempotent: a process-lifetime `Once` guard ensures a single watchdog, so it's
+    /// safe to call from both boot and the Enable/Disable handlers.
     pub fn re_prime_in_background(&self) {
         use std::sync::Once;
         static STARTED: Once = Once::new();
@@ -200,44 +195,47 @@ impl SiderolinkWg {
             return;
         }
         STARTED.call_once(|| {
+            const CHECK_SECS: u64 = 20; // how often to evaluate staleness while healthy
+            const STALE_CHECK_SECS: u64 = 15; // how often to re-check while in cooldown
+            const RECREATE_COOLDOWN_SECS: u64 = 240; // min gap between recreations (give nodes time)
+            const INITIAL_SETTLE_SECS: u64 = 45; // wait before the first check after boot
             let mgr = self.clone();
             std::thread::spawn(move || {
-                // Let the freshly-created device AGE before the first bounce. A
-                // from-scratch `tcs-sl0` does not start receiving until it has been
-                // up for well over a minute, and an early bounce resets that aging —
-                // so wait before disturbing it at all.
-                std::thread::sleep(std::time::Duration::from_secs(45));
-                // Prime intervals (seconds) between consecutive no-fresh-handshake
-                // primes. Growing gaps let the device settle between bounces so one
-                // of them lands on an aged, functional socket. Reset to the first
-                // gap the moment a fresh handshake is observed (stop disturbing it).
-                let intervals: &[u64] = &[45, 90, 180, 300, 480];
-                let mut idx = 0usize;
+                // Let the freshly-created boot device settle before the first check.
+                std::thread::sleep(std::time::Duration::from_secs(INITIAL_SETTLE_SECS));
+                let mut last_recreate: std::time::Instant =
+                    std::time::Instant::now() - std::time::Duration::from_secs(RECREATE_COOLDOWN_SECS);
                 loop {
-                    // Healthy (or no peers expected) → go quiet and check occasionally;
-                    // resume priming only if it degrades.
-                    let healthy = !mgr.known_peers() || mgr.has_fresh_handshake();
-                    if healthy {
-                        if idx != 0 {
-                            info!(
-                                iface = %mgr.iface,
-                                "Siderolink socket watchdog: fresh handshake present — tunnel healthy, standing down"
-                            );
-                        }
-                        idx = 0;
-                        std::thread::sleep(std::time::Duration::from_secs(90));
+                    let stale = mgr.known_peers() && !mgr.has_fresh_handshake();
+                    if !stale {
+                        // Healthy (fresh handshakes) or no peers expected → stand down.
+                        std::thread::sleep(std::time::Duration::from_secs(CHECK_SECS));
                         continue;
                     }
-                    // No fresh handshake with peers present → prime, then back off.
-                    let wait = intervals[idx];
+                    let cooling_down =
+                        last_recreate.elapsed() < std::time::Duration::from_secs(RECREATE_COOLDOWN_SECS);
+                    if cooling_down {
+                        // Just recreated (or recently): give the nodes time to
+                        // re-provision and re-handshake. Do NOT recreate again.
+                        debug!(
+                            iface = %mgr.iface,
+                            cooldown_secs = RECREATE_COOLDOWN_SECS.saturating_sub(
+                                last_recreate.elapsed().as_secs()
+                            ),
+                            "Siderolink socket watchdog: no fresh handshake but cooling down after recreate — holding"
+                        );
+                        std::thread::sleep(std::time::Duration::from_secs(STALE_CHECK_SECS));
+                        continue;
+                    }
+                    // Stale AND outside cooldown → recreate the device once, then
+                    // enforce a long cooldown so we cannot flap against re-provisioning.
                     info!(
-                        next_prime_in_secs = wait,
                         iface = %mgr.iface,
-                        "Siderolink socket watchdog: no fresh handshake with peers present — priming"
+                        "Siderolink socket watchdog: stale (peers present, no fresh handshake) and outside cooldown — recreating device"
                     );
                     let _ = mgr.prime_socket();
-                    idx = (idx + 1).min(intervals.len() - 1);
-                    std::thread::sleep(std::time::Duration::from_secs(wait));
+                    last_recreate = std::time::Instant::now();
+                    std::thread::sleep(std::time::Duration::from_secs(STALE_CHECK_SECS));
                 }
             });
         });
