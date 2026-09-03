@@ -688,35 +688,37 @@
             : 'default (none)'}
         </span>
       </div>
+      <div class="info-item info-item-toggle">
+        <label class="sl-toggle-row" title="Enable/disable the SideroLink WireGuard tunnel for this cluster (applied to nodes live, no reboot)">
+          {#if slEnabled === null}
+            <Spinner size="sm" />
+          {:else}
+            <input
+              type="checkbox"
+              checked={slEnabled}
+              disabled={slBusy}
+              onchange={() => toggleSiderolink(!(slEnabled ?? false))}
+            />
+            <span>
+              SideroLink tunnel
+              {#if slBusy}
+                <span class="hint"> — applying to nodes…</span>
+              {:else if slEnabled}
+                <span class="hint"> — on · {slPeers.length} node(s)</span>
+              {:else}
+                <span class="hint"> — off</span>
+              {/if}
+            </span>
+          {/if}
+        </label>
+        {#if slError}
+          <span class="hint error">{slError}</span>
+        {/if}
+      </div>
     </div>
 
-    <details class="panel" open>
+    <details class="panel">
       <summary>Rolling upgrade</summary>
-      <label class="sl-toggle-row">
-        {#if slEnabled === null}
-          <Spinner size="sm" />
-        {:else}
-          <input
-            type="checkbox"
-            checked={slEnabled}
-            disabled={slBusy}
-            onchange={() => toggleSiderolink(!(slEnabled ?? false))}
-          />
-          <span>
-            SideroLink tunnel
-            {#if slBusy}
-              <span class="hint"> — applying to nodes (live, no reboot)…</span>
-            {:else if slEnabled}
-              <span class="hint"> — on · {slPeers.length} node(s) connected</span>
-            {:else}
-              <span class="hint"> — off</span>
-            {/if}
-          </span>
-        {/if}
-      </label>
-      {#if slError}
-        <p class="hint error">{slError}</p>
-      {/if}
       <p class="sub">
         Choose a new Talos version and/or Kubernetes version, and adjust modules. Talos reboots
         nodes; Kubernetes applies in place (control-plane first, no reboots).
@@ -1167,6 +1169,8 @@
   .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
   .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
   .info-item { display: flex; flex-direction: column; gap: 0.25rem; }
+  .info-item-toggle { min-width: 200px; }
+  .info-item-toggle .sl-toggle-row { margin: 0; font-size: 1.05rem; }
   .info-label { color: var(--tcs-text-muted); font-size: 0.8rem; }
   .info-value { font-size: 1.05rem; font-weight: 500; }
 

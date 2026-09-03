@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.48] — 2026-09-03
+
+### Changed
+- **Cluster page: "Rolling upgrade" and "Cluster actions" panels are now minimized by default.** The Rolling upgrade panel was previously expanded on load; both collapsible panels now start closed so the page leads with the cluster info + machine inventory. The **SideroLink tunnel toggle was moved out of the Rolling upgrade panel into the always-visible info bar** at the top (next to Status/Nodes/Talosconfig), so it remains one glance away even with the panels collapsed.
+
 ## [0.5.47] — 2026-09-03
 
 ### Added
