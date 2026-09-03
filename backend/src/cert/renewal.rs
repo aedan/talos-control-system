@@ -143,9 +143,14 @@ pub async fn start_cert_renewal_task(
     }
 }
 
-fn write_cert_to_disk(cert: &str, key: &str) -> Result<(), CertError> {
+pub fn write_cert_to_disk(cert: &str, key: &str) -> Result<(), CertError> {
+    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all("/var/lib/tcs/certs/")?;
     std::fs::write("/var/lib/tcs/certs/cert.pem", cert)?;
     std::fs::write("/var/lib/tcs/certs/key.pem", key)?;
+    let _ = std::fs::set_permissions(
+        "/var/lib/tcs/certs/key.pem",
+        std::fs::Permissions::from_mode(0o600),
+    );
     Ok(())
 }

@@ -63,43 +63,13 @@ impl SiderolinkWg {
         }
         let arc = Arc::new(mgr.clone());
         if arc.enabled() {
-            // Prime the socket in the background. A freshly netlink-created WG
-            // device's kernel UDP socket is not reliably receiving for the first
-            // several SECONDS-TO-MINUTES after it is created/`up`-ed — on kronos a
-            // from-scratch device only started receiving once the prime ran on an
-            // already-aged device (a prime at +6s or even +71s left the peer at
-            // 0 rx; the identical prime at ~3 min worked immediately). We can't
-            // know exactly when the device ages in, so instead of fixed delays we
-            // prime, then check whether any peer has completed a handshake; if
-            // not, wait 15s and prime again, for up to ~5 minutes. Each prime is
-            // idempotent and harmless on an already-working tunnel (a WG link
-            // down/up preserves peer state, only clears addresses, which are
-            // restored), and we stop as soon as a handshake is seen. Runs on a
-            // detached thread so it never blocks boot.
-            let prime = arc.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(6));
-                for attempt in 0..20 {
-                    if prime.prime_socket() {
-                        info!(
-                            attempt,
-                            iface = %prime.iface,
-                            "Siderolink WireGuard socket functional (handshake observed)"
-                        );
-                        return;
-                    }
-                    tracing::debug!(
-                        attempt,
-                        iface = %prime.iface,
-                        "Siderolink socket prime: no handshake yet, retrying in 15s"
-                    );
-                    std::thread::sleep(std::time::Duration::from_secs(15));
-                }
-                warn!(
-                    iface = %prime.iface,
-                    "Siderolink socket prime: no handshake after ~5 min; giving up (node may not be joining)"
-                );
-            });
+            // Start the persistent, self-healing socket watchdog (idempotent). It
+            // primes the freshly-created device repeatedly until it has aged into
+            // a functional socket (no time cap — a from-scratch device can take
+            // well over 5 minutes), then stays quiet while healthy and re-primes
+            // if the socket ever degrades again (e.g. after a toggle re-provisions
+            // the nodes). Runs on a detached thread so it never blocks boot.
+            arc.re_prime_in_background();
         }
         arc
     }
@@ -157,14 +127,91 @@ impl SiderolinkWg {
         self.has_handshake()
     }
 
+    /// Start (once) a persistent, self-healing socket watchdog on a detached
+    /// thread. A freshly netlink-created WG device's kernel UDP socket is not
+    /// reliably receiving until the device has aged an INDETERMINATE amount — on
+    /// kronos a from-scratch device sometimes only became functional after well
+    /// over 5 minutes, so a time-capped prime loop (v0.5.40) could give up before
+    /// the socket was ready and leave the tunnels stale. The watchdog instead runs
+    /// for the whole process lifetime: every ~20s it checks whether any peer has
+    /// a *fresh* handshake (age < 45s); if there are known peers but none is
+    /// fresh, it primes the socket once (bounce + key + addrs). This heals the
+    /// boot case (primes repeatedly until the device ages and a handshake lands —
+    /// no cap), the Enable/Disable-toggle case (nodes re-provision with new keys,
+    /// handshakes go stale, watchdog re-primes them back), and any spontaneous
+    /// socket degradation. When the tunnel is healthy it is quiet (fresh
+    /// handshakes present → no bounce).
+    ///
+    /// Idempotent: a process-lifetime `Once` guard ensures only one watchdog runs,
+    /// so it's safe to call from both boot and the toggle handlers.
+    pub fn re_prime_in_background(&self) {
+        use std::sync::Once;
+        static STARTED: Once = Once::new();
+        if !self.enabled {
+            return;
+        }
+        STARTED.call_once(|| {
+            let mgr = self.clone();
+            std::thread::spawn(move || {
+                // Let boot settle before the first check.
+                std::thread::sleep(std::time::Duration::from_secs(6));
+                loop {
+                    if mgr.known_peers() && !mgr.has_fresh_handshake() {
+                        info!(
+                            iface = %mgr.iface,
+                            "Siderolink socket watchdog: no fresh handshake with peers present — priming"
+                        );
+                        let _ = mgr.prime_socket();
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(20));
+                }
+            });
+        });
+    }
+
+    /// True if the WG device currently has at least one kernel peer configured
+    /// (a `peer:` line in `wg show`). Used by the watchdog to avoid needlessly
+    /// bouncing the socket when no node is expected (e.g. SideroLink disabled).
+    fn known_peers(&self) -> bool {
+        let out = match run_cmd_stdout(&["wg", "show", &self.iface]) {
+            Ok(o) => o,
+            Err(_) => return false,
+        };
+        out.lines().any(|l| l.trim_start().starts_with("peer:"))
+    }
+
     /// True if any peer on the WG interface has completed a handshake (the
     /// kernel `wg show` output includes a "latest handshake:" line for such
-    /// peers). Used by the background prime to know when the socket is working.
+    /// peers). Used by `prime_socket`'s single immediate check.
     fn has_handshake(&self) -> bool {
         let out = run_cmd_stdout(&["wg", "show", &self.iface]);
         out.as_deref()
             .map(|s| s.lines().any(|l| l.contains("latest handshake")))
             .unwrap_or(false)
+    }
+
+    /// True if any peer has a *fresh* handshake — one completed within the last
+    /// `max_age_secs`. Parses the `wg show` "latest handshake: N seconds/minutes
+    /// ago" ages. A fresh handshake proves the socket is actively receiving from
+    /// a re-provisioned node, which is the real "tunnel is up" signal after a
+    /// toggle (stale pre-provision handshakes don't count).
+    fn has_fresh_handshake(&self) -> bool {
+        let out = match run_cmd_stdout(&["wg", "show", &self.iface]) {
+            Ok(o) => o,
+            Err(_) => return false,
+        };
+        const MAX_AGE_SECS: u64 = 20;
+        for line in out.lines() {
+            let Some(rest) = line.trim().strip_prefix("latest handshake:") else {
+                continue;
+            };
+            if let Some(secs) = parse_handshake_age_secs(rest.trim()) {
+                if secs <= MAX_AGE_SECS {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     pub fn server_public_key(&self) -> &str {
@@ -417,4 +464,67 @@ fn run_cmd(args: &[&str]) -> Result<(), AppError> {
         )));
     }
     Ok(())
+}
+
+/// Parse a `wg show` "latest handshake:" age string into total seconds.
+/// Handles the human formats WireGuard emits: "just now", "N second(s) ago",
+/// "N minute(s) ago", and "N minute(s), M second(s) ago". Returns None for
+/// anything unrecognized (the caller treats it as "not fresh").
+fn parse_handshake_age_secs(s: &str) -> Option<u64> {
+    let s = s.trim().trim_end_matches("ago").trim();
+    if s == "just now" {
+        return Some(0);
+    }
+    let mut total = 0u64;
+    let mut found = false;
+    for part in s.split(',') {
+        let part = part.trim();
+        let (num, unit) = part.split_once(' ')?;
+        let n: u64 = num.parse().ok()?;
+        match unit {
+            "second" | "seconds" => total += n,
+            "minute" | "minutes" => total += n * 60,
+            // "hour(s)" or unknown units: treat the whole thing as unrecognized.
+            _ => return None,
+        }
+        found = true;
+    }
+    if found { Some(total) } else { None }
+}
+
+#[cfg(test)]
+mod handshake_age_tests {
+    use super::parse_handshake_age_secs;
+
+    #[test]
+    fn parses_plain_seconds() {
+        assert_eq!(parse_handshake_age_secs("47 seconds ago"), Some(47));
+        assert_eq!(parse_handshake_age_secs("1 second ago"), Some(1));
+    }
+
+    #[test]
+    fn parses_minutes() {
+        assert_eq!(parse_handshake_age_secs("2 minutes ago"), Some(120));
+        assert_eq!(parse_handshake_age_secs("1 minute ago"), Some(60));
+    }
+
+    #[test]
+    fn parses_minutes_and_seconds() {
+        assert_eq!(
+            parse_handshake_age_secs("1 minute, 47 seconds ago"),
+            Some(107)
+        );
+        assert_eq!(
+            parse_handshake_age_secs("5 minutes, 4 seconds ago"),
+            Some(304)
+        );
+    }
+
+    #[test]
+    fn just_now_and_unknown() {
+        assert_eq!(parse_handshake_age_secs("just now"), Some(0));
+        assert_eq!(parse_handshake_age_secs("2 hours ago"), None);
+        assert_eq!(parse_handshake_age_secs(""), None);
+        assert_eq!(parse_handshake_age_secs("nonsense"), None);
+    }
 }

@@ -4035,11 +4035,17 @@ pub async fn enable_cluster_siderolink(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let claims = extract_claims(&headers)?;
     let doc = siderolink_block_for_cluster(&state.db_pool, Some(id), &state.config.siderolink, &state.config.server).await;
-    let patched = crate::controllers::ClusterController::new(state.db_pool.clone())
+    // Use the controller bound to the real JWT secret so the cluster's stored
+    // talosconfig decrypts; `ClusterController::new` carries an empty secret and
+    // would fail every node patch with "Decrypt failed".
+    let patched = controller_for(&state)
         .siderolink_enable(id, &doc)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let _ = crate::utils::audit::log_action(&state.db_pool, &claims.sub, "cluster_siderolink_enable", &format!("cluster {id}"), &format!("patched={patched}")).await;
+    // The push makes nodes re-provision (new WG keys); re-prime the host socket
+    // so the re-provisioned peers complete handshakes. Detached — never blocks.
+    state.siderolink_wg.re_prime_in_background();
     Ok(Json(serde_json::json!({
         "message": format!("Siderolink enabled — {patched} node(s) updated live (no reboot)"),
         "patched": patched,
@@ -4053,11 +4059,15 @@ pub async fn disable_cluster_siderolink(
     Path(id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let claims = extract_claims(&headers)?;
-    let patched = crate::controllers::ClusterController::new(state.db_pool.clone())
+    // Same secret-bound controller as enable: disable fetches each node's live
+    // config (to strip the SideroLink block) and needs the real JWT secret.
+    let patched = controller_for(&state)
         .siderolink_disable(id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let _ = crate::utils::audit::log_action(&state.db_pool, &claims.sub, "cluster_siderolink_disable", &format!("cluster {id}"), &format!("patched={patched}")).await;
+    // Reset the host socket after stripping the config from all nodes.
+    state.siderolink_wg.re_prime_in_background();
     Ok(Json(serde_json::json!({
         "message": format!("Siderolink disabled — {patched} node(s) updated live (no reboot)"),
         "patched": patched,

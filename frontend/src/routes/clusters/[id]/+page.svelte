@@ -692,6 +692,31 @@
 
     <details class="panel" open>
       <summary>Rolling upgrade</summary>
+      <label class="sl-toggle-row">
+        {#if slEnabled === null}
+          <Spinner size="sm" />
+        {:else}
+          <input
+            type="checkbox"
+            checked={slEnabled}
+            disabled={slBusy}
+            onchange={() => toggleSiderolink(!(slEnabled ?? false))}
+          />
+          <span>
+            SideroLink tunnel
+            {#if slBusy}
+              <span class="hint"> — applying to nodes (live, no reboot)…</span>
+            {:else if slEnabled}
+              <span class="hint"> — on · {slPeers.length} node(s) connected</span>
+            {:else}
+              <span class="hint"> — off</span>
+            {/if}
+          </span>
+        {/if}
+      </label>
+      {#if slError}
+        <p class="hint error">{slError}</p>
+      {/if}
       <p class="sub">
         Choose a new Talos version and/or Kubernetes version, and adjust modules. Talos reboots
         nodes; Kubernetes applies in place (control-plane first, no reboots).
@@ -829,54 +854,6 @@
           {/if}
         </div>
       {/if}
-    </details>
-
-    <details class="panel">
-      <summary>Siderolink tunnel</summary>
-      <div class="action-block">
-        <div class="sl-head">
-          <div>
-            <h3>Encrypted management path</h3>
-            <p class="hint">
-              When enabled, nodes join TCS over a per-node WireGuard tunnel (SideroLink)
-              and TCS manages them through the tunnel first, falling back to direct LAN.
-              Enable/disable applies live to every node — no reboot. Direct management
-              always remains available, so this can never isolate the cluster.
-            </p>
-          </div>
-          {#if slEnabled === null}
-            <Spinner size="sm" />
-          {:else if slEnabled}
-            <Button variant="danger" size="sm" disabled={slBusy} title="Remove the SideroLink tunnel from all nodes" onclick={() => toggleSiderolink(false)}>Disable</Button>
-          {:else}
-            <Button variant="primary" size="sm" disabled={slBusy} title="Add the SideroLink tunnel to all nodes" onclick={() => toggleSiderolink(true)}>Enable</Button>
-          {/if}
-        </div>
-        {#if slBusy}
-          <p class="hint">Applying to nodes… this touches every running node (live, no reboot).</p>
-        {/if}
-        {#if slError}
-          <p class="err">{slError}</p>
-        {/if}
-        {#if slPeers.length}
-          <table class="sl-peers">
-            <thead>
-              <tr><th>Node</th><th>Tunnel IP</th><th>Last seen</th></tr>
-            </thead>
-            <tbody>
-              {#each slPeers as p (p.systemUuid)}
-                <tr>
-                  <td class="mono">{p.systemUuid.slice(0, 8)}</td>
-                  <td class="mono">{p.assignedIp}</td>
-                  <td>{new Date(p.lastSeen).toLocaleString()}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {:else if slEnabled}
-          <p class="hint">No nodes connected over the tunnel yet — nodes re-provision on next config apply.</p>
-        {/if}
-      </div>
     </details>
 
     <details class="panel">
@@ -1149,16 +1126,6 @@
 {/if}
 
 <style>
-  .sl-head {
-    display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 0.5rem;
-  }
-  .sl-peers {
-    width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.85rem;
-  }
-  .sl-peers th, .sl-peers td {
-    text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid var(--tcs-border);
-  }
-  .sl-peers th { color: var(--tcs-muted); font-weight: 600; }
   .confirm-overlay {
     position: fixed; inset: 0;
     background: rgba(0,0,0,0.6);
@@ -1198,6 +1165,18 @@
   }
 
   .hint { color: var(--tcs-text-muted); font-size: 0.85rem; margin: 0 0 0.75rem; }
+  .sl-toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0 0 0.75rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    color: var(--tcs-text);
+  }
+  .sl-toggle-row input { width: 1.05rem; height: 1.05rem; cursor: pointer; }
+  .sl-toggle-row .hint { margin: 0; font-weight: 400; }
   .hint.error { color: var(--tcs-error, #ef4444); }
   .hint.warning { color: var(--tcs-warning, #f59e0b); }
   .mono { font-family: ui-monospace, monospace; font-size: 0.8rem; }

@@ -636,6 +636,22 @@ async fn resolve_initial_certificate(
         TlsMode::LetsEncrypt => {
             if let Some(le) = &config.tls.letsencrypt {
                 if !le.domains.is_empty() {
+                    // Reuse a valid cert persisted from a previous issuance before
+                    // hitting the ACME directory again. Re-requesting a fresh cert on
+                    // every boot/upgrade (a) burns Let's Encrypt's "5 certs per exact
+                    // identifier set per 168h" rate limit and (b) — once that limit is
+                    // hit — downgrades the server to a self-signed cert even though a
+                    // valid LE cert is sitting on disk. Loading the persisted cert first
+                    // makes the valid cert survive upgrades/restarts.
+                    if let Some((c, k)) =
+                        load_persisted_letsencrypt_cert(&le.domains)
+                    {
+                        info!(
+                            domains = ?le.domains,
+                            "Reusing persisted Let's Encrypt certificate from disk"
+                        );
+                        return Ok((c, k, TlsMode::LetsEncrypt, le.domains.clone(), "Let's Encrypt issued (reused from disk)".to_string()));
+                    }
                     let client = talos_control_system::cert::acme::AcmeClient::new(
                         &le.email,
                         le.dns_provider.clone(),
@@ -647,9 +663,30 @@ async fn resolve_initial_certificate(
                         .await
                     {
                         Ok((c, k)) => {
+                            // Persist the freshly issued cert so the next boot reuses
+                            // it instead of re-issuing (and re-hitting the rate limit).
+                            if let Err(e) =
+                                talos_control_system::cert::renewal::write_cert_to_disk(&c, &k)
+                            {
+                                warn!(error = %e, "Failed to persist issued Let's Encrypt certificate to disk");
+                            }
                             return Ok((c, k, TlsMode::LetsEncrypt, le.domains.clone(), "Let's Encrypt issued".to_string()))
                         }
                         Err(e) => {
+                            // Issuance failed (e.g. rate-limited). Before falling back
+                            // to self-signed, give the persisted cert one more chance —
+                            // it may exist but have been judged too close to expiry by
+                            // the load check; still serve it rather than an unverifiable
+                            // self-signed cert.
+                            if let Some((c, k)) =
+                                load_persisted_letsencrypt_cert_lenient(&le.domains)
+                            {
+                                warn!(
+                                    error = %e,
+                                    "ACME issuance failed; serving persisted Let's Encrypt certificate anyway"
+                                );
+                                return Ok((c, k, TlsMode::LetsEncrypt, le.domains.clone(), "Let's Encrypt issued (reused, renewal pending)".to_string()));
+                            }
                             warn!(error = %e, "Let's Encrypt issuance failed at boot; using self-signed fallback");
                         }
                     }
@@ -701,6 +738,104 @@ async fn resolve_initial_certificate(
                 talos_control_system::cert::self_signed::generate_self_signed(std::slice::from_ref(&domain)).await?;
             Ok((c, k, TlsMode::SelfSigned, vec![domain.clone()], format!("self-signed ({domain}) — mode disabled, auto-enabled")))
         }
+    }
+}
+
+/// Load and validate a Let's Encrypt cert persisted at `/var/lib/tcs/certs`
+/// from a previous issuance. Returns the (cert, key) PEM only if the file
+/// exists, parses, covers one of the expected domains, and is not expired or
+/// within the 30-day renewal window. Returns None otherwise so the caller can
+/// (re)issue. This is what makes a valid LE cert survive restarts/upgrades
+/// instead of being re-requested (and rate-limited away) on every boot.
+fn load_persisted_letsencrypt_cert(domains: &[String]) -> Option<(String, String)> {
+    let cert_path = "/var/lib/tcs/certs/cert.pem";
+    let key_path = "/var/lib/tcs/certs/key.pem";
+    let cert = std::fs::read_to_string(cert_path).ok()?;
+    let key = std::fs::read_to_string(key_path).ok()?;
+    if cert.trim().is_empty() || key.trim().is_empty() {
+        return None;
+    }
+    let expiry = talos_control_system::cert::provided::parse_expiry_from_cert_pem(&cert)?;
+    let now = chrono::Utc::now();
+    // Must still be valid and outside the renewal threshold (so we don't load a
+    // cert the renewal task would immediately replace anyway).
+    let remaining = expiry - now;
+    if remaining <= chrono::Duration::zero() {
+        return None;
+    }
+    if remaining <= chrono::Duration::days(talos_control_system::cert::renewal::RENEWAL_THRESHOLD_DAYS) {
+        return None;
+    }
+    // Domain must match what we expect to serve (avoid serving a cert for a
+    // different identity after a domain change).
+    let covers_expected = domains.iter().any(|d| cert_domain_matches(&cert, d));
+    if !covers_expected {
+        return None;
+    }
+    Some((cert, key))
+}
+
+/// Lenient variant used only when ACME issuance has just failed (e.g. rate
+/// limited): serve the persisted cert even if it is near or past expiry, since
+/// a (possibly expiring) real Let's Encrypt cert is preferable to an
+/// unverifiable self-signed one. The renewal task will keep trying to renew.
+fn load_persisted_letsencrypt_cert_lenient(domains: &[String]) -> Option<(String, String)> {
+    let cert_path = "/var/lib/tcs/certs/cert.pem";
+    let key_path = "/var/lib/tcs/certs/key.pem";
+    let cert = std::fs::read_to_string(cert_path).ok()?;
+    let key = std::fs::read_to_string(key_path).ok()?;
+    if cert.trim().is_empty() || key.trim().is_empty() {
+        return None;
+    }
+    // Must at least parse and cover an expected domain; expiry is not checked
+    // here (we'd rather serve it and keep renewing than drop to self-signed).
+    let _ = talos_control_system::cert::provided::parse_expiry_from_cert_pem(&cert);
+    let covers_expected = domains.iter().any(|d| cert_domain_matches(&cert, d));
+    if !covers_expected {
+        return None;
+    }
+    Some((cert, key))
+}
+
+/// Best-effort check that a PEM cert's CN or any SAN DNS entry equals `domain`.
+/// Used to avoid serving a persisted cert that no longer matches the configured
+/// domain (e.g. after a domain change). Returns false if the cert can't be
+/// parsed (in which case the caller treats the persisted cert as unusable).
+fn cert_domain_matches(cert_pem: &str, domain: &str) -> bool {
+    let domain = domain.trim().trim_start_matches("*.");
+    if domain.is_empty() {
+        return false;
+    }
+    // Decode the first cert from PEM to DER, then parse its subject/SANs.
+    let der = match rustls_pemfile::certs(&mut std::io::Cursor::new(cert_pem.as_bytes()))
+        .find_map(|r| r.ok())
+    {
+        Some(d) => d,
+        None => return false,
+    };
+    let (_, cert) = match x509_parser::parse_x509_certificate(&der) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    // CN match.
+    if cert
+        .subject()
+        .iter_common_name()
+        .next()
+        .and_then(|n| n.as_str().ok())
+        .map(|s| s == domain)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    // SAN DNS match.
+    match cert.subject_alternative_name() {
+        Ok(Some(san_ext)) => san_ext
+            .value
+            .general_names
+            .iter()
+            .any(|gn| matches!(gn, x509_parser::extensions::GeneralName::DNSName(d) if d.as_bytes() == domain.as_bytes())),
+        _ => false,
     }
 }
 
