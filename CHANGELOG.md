@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.45] — 2026-09-03
+
+### Fixed
+- **SideroLink device recreation never applied the WG private key — the tunnels stayed dead after every auto-prime.** The code set the identity with `wg set tcs-sl0 … private-key /dev/stdin`, but the command runner spawns with **null stdin**, so `wg` read an empty key and aborted the entire `wg set` — leaving the device with a **random listen port and no private key**, to which no node could ever complete a handshake. The `.or_else` tmp-file fallback was supposed to cover this, but the observed on-host behavior (recreated device stuck at an ephemeral port, 0/15 fresh handshakes for minutes, while an identical **manual** recreation with the key applied from the file came up 15/15 in ~20s) proved the key was not landing. `ensure_interface` (boot) and `prime_socket` (recreation) now apply the identity by pointing `wg` directly at the on-disk key file (`data_dir/siderolink_wg_private.key`), the proven-reliable path — no `/dev/stdin`, no in-memory-string fallback. With the key actually set, a code-driven recreation behaves exactly like the manual one: all 15 peers re-handshake within ~20-30s and `ping6` over the tunnel is 0% loss. Combined with v0.5.44's reactive cooldown watchdog, a clean boot and an Enable/Disable toggle now self-heal to a working tunnel with no manual intervention.
+
 ## [0.5.44] — 2026-09-03
 
 ### Fixed

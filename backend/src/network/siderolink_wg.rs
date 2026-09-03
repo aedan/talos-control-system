@@ -23,6 +23,12 @@ pub struct SiderolinkWg {
     iface: String,
     enabled: bool,
     installation_id: String,
+    /// Absolute path to the on-disk WG private-key file (`data_dir/siderolink_wg_private.key`).
+    /// `wg set … private-key <path>` reads this directly, which is the proven-reliable way to
+    /// apply the identity. Piping the in-memory key via `/dev/stdin` is NOT reliable here because
+    /// `run_cmd` spawns with null stdin (so `wg` sees an empty key and aborts the whole `wg set`,
+    /// leaving the device with a random listen port and no identity → nodes never handshake).
+    key_path: PathBuf,
     /// Cache of (peer public key -> allowed IP) currently known, maintained by
     /// `set_peer`/`reapply_peers`. `prime_socket` recreates the WG device (which
     /// wipes the kernel peer list) and re-applies from this cache, so a prime
@@ -49,6 +55,7 @@ impl SiderolinkWg {
             iface,
             enabled: false,
             installation_id,
+            key_path,
             peer_cache: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         };
         match mgr.ensure_interface() {
@@ -107,6 +114,12 @@ impl SiderolinkWg {
         }
         let _ = run_cmd(&["ip", "link", "set", "up", "dev", &self.iface]);
         std::thread::sleep(std::time::Duration::from_millis(800));
+        // Apply listen port + identity by pointing `wg` at the on-disk key file
+        // directly. (Piping the key via `/dev/stdin` is unreliable: `run_cmd`
+        // spawns with null stdin, so `wg` reads an empty key and aborts the whole
+        // `wg set`, leaving the device with a random listen port and no identity —
+        // the nodes then never complete a handshake against a key-less device.)
+        let key = self.key_path.to_str().unwrap_or("");
         let ok = run_cmd(&[
             "wg",
             "set",
@@ -114,23 +127,8 @@ impl SiderolinkWg {
             "listen-port",
             &self.cfg.listen_port.to_string(),
             "private-key",
-            "/dev/stdin",
-        ])
-        .or_else(|_| {
-            let tmp = std::env::temp_dir().join("tcs-wg-key");
-            fs::write(&tmp, format!("{}\n", self.private_key))?;
-            let r = run_cmd(&[
-                "wg",
-                "set",
-                &self.iface,
-                "listen-port",
-                &self.cfg.listen_port.to_string(),
-                "private-key",
-                tmp.to_str().unwrap_or(""),
-            ]);
-            let _ = fs::remove_file(&tmp);
-            r
-        });
+            key,
+        ]);
         // Recreation clears the overlay addresses; restore them.
         let server_addr = format!("{}/64", self.server_address());
         let _ = run_cmd(&["ip", "address", "add", &server_addr, "dev", &self.iface]);
@@ -351,7 +349,11 @@ impl SiderolinkWg {
         std::thread::sleep(std::time::Duration::from_millis(1500));
         // WireGuard data port (not the gRPC API port) + identity key, applied on
         // the live (post-bounce) device so the kernel re-binds its UDP socket to
-        // the listen port and starts receiving.
+        // the listen port and starts receiving. The key is applied by pointing
+        // `wg` at the on-disk key file directly — piping it via `/dev/stdin` is
+        // unreliable because `run_cmd` spawns with null stdin (wg would read an
+        // empty key and abort the whole `wg set`).
+        let key = self.key_path.to_str().unwrap_or("");
         run_cmd(&[
             "wg",
             "set",
@@ -359,24 +361,8 @@ impl SiderolinkWg {
             "listen-port",
             &self.cfg.listen_port.to_string(),
             "private-key",
-            "/dev/stdin",
-        ])
-        .or_else(|_| {
-            // write key to temp and set
-            let tmp = std::env::temp_dir().join("tcs-wg-key");
-            fs::write(&tmp, format!("{}\n", self.private_key))?;
-            let r = run_cmd(&[
-                "wg",
-                "set",
-                &self.iface,
-                "listen-port",
-                &self.cfg.listen_port.to_string(),
-                "private-key",
-                tmp.to_str().unwrap_or(""),
-            ]);
-            let _ = fs::remove_file(&tmp);
-            r
-        })?;
+            key,
+        ])?;
         // Assign the server's own overlay address (first usable in the /64) so
         // nodes can reach TCS at server_address over the tunnel.
         let server_addr = format!("{}/64", self.server_address());
