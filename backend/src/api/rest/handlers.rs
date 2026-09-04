@@ -3283,6 +3283,10 @@ pub async fn delete_config_patch(
 #[derive(Deserialize)]
 pub struct CreateBackupRequest {
     pub name: String,
+    /// Backup kind: `etcd` (Kubernetes etcd snapshot, the default) or `db`
+    /// (a consistent backup of TCS's own database).
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 pub async fn list_cluster_backups(
@@ -3313,7 +3317,13 @@ pub async fn create_cluster_backup(
     Json(payload): Json<CreateBackupRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
     let controller = controller_for(&state);
-    match controller.create_etcd_backup(cluster_id, payload.name).await {
+    let is_db = matches!(payload.kind.as_deref(), Some(k) if k == "db");
+    let result = if is_db {
+        controller.create_db_backup(cluster_id, payload.name).await
+    } else {
+        controller.create_etcd_backup(cluster_id, payload.name).await
+    };
+    match result {
         Ok(b) => match serde_json::to_value(b) {
             Ok(v) => Ok((StatusCode::CREATED, Json(v))),
             Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
@@ -3377,7 +3387,10 @@ pub async fn download_cluster_backup(
 
     let stream = ReaderStream::new(file);
     let body = Body::from_stream(stream);
-    let filename = format!("{}.snapshot", backup.name);
+    // File extension matches the backup kind: etcd snapshots are `.snapshot`,
+    // TCS DB backups are `.db.sql` (a SQLite file or pg_dump SQL, both restoreable).
+    let ext = if backup.kind == "db" { "db.sql" } else { "snapshot" };
+    let filename = format!("{}.{}", backup.name, ext);
 
     let mut response = body.into_response();
     let headers = response.headers_mut();

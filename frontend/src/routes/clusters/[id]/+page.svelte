@@ -536,19 +536,23 @@
   }
 
   // ── backup handlers ───────────────────────────────────────────────
-  async function createBackup() {
+  async function createBackup(kind: 'etcd' | 'db' = 'etcd') {
     creating = true;
     try {
+      const label = kind === 'db' ? 'TCS database' : 'etcd snapshot';
       const backup = (await client.post(`/clusters/${cid}/backups`, {
-        name: `etcd-${Date.now()}`,
+        name: `${kind === 'db' ? 'db' : 'etcd'}-${Date.now()}`,
+        kind,
       })) as ClusterBackup;
       backups = [backup, ...backups];
-      success(backup.status === 'ready' ? 'Etcd snapshot created' : `Backup status: ${backup.status}`);
+      success(backup.status === 'ready' ? `${label} created` : `Backup status: ${backup.status}`);
     } catch (e: unknown) {
       notifyError(
         e instanceof Error
           ? e.message
-          : 'Failed to create etcd snapshot (need talosconfig + control-plane reachability)'
+          : kind === 'db'
+            ? 'Failed to create database backup'
+            : 'Failed to create etcd snapshot (need talosconfig + control-plane reachability)'
       );
     } finally {
       creating = false;
@@ -566,7 +570,7 @@
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${backup.name}.snapshot`;
+      a.download = `${backup.name}.${backup.kind === 'db' ? 'db.sql' : 'snapshot'}`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (e: unknown) {
@@ -953,9 +957,9 @@
       <div class="tab-panel">
         <div class="panel-header">
           <p class="hint">
-            Patches are stored in TCS, merged into each node's live machine config (COSI Get), then applied
-            with Talos <code>ApplyConfiguration</code> (no-reboot, pure-Rust). Requires a talosconfig and
-            reachability to node :50000.
+            Patches are stored in TCS, merged into each node's live machine config, then applied
+            with Talos <code>ApplyConfiguration</code> (no reboot). Requires a stored talosconfig and
+            reachability to the node's API port.
           </p>
           <div class="actions">
             <Button variant="ghost" size="sm" title="Validate patches against nodes without applying them" onclick={() => applyAll(true)} disabled={applying || patches.length === 0}>Dry-run</Button>
@@ -1042,10 +1046,27 @@
     {#if tab === 'backups'}
       <div class="tab-panel">
         <div class="panel-header">
-          <h2>Etcd snapshots</h2>
-          <Button variant="primary" size="sm" title="Take a new etcd snapshot of the cluster control plane" onclick={createBackup} disabled={creating}>
-            {creating ? 'Creating…' : 'Create Backup'}
-          </Button>
+          <h2>Backups</h2>
+          <div class="inline-form" style="gap: 8px">
+            <Button
+              variant="primary"
+              size="sm"
+              title="Take a new etcd snapshot of the cluster control plane"
+              onclick={() => createBackup('etcd')}
+              disabled={creating}
+            >
+              {creating ? 'Creating…' : 'Etcd snapshot'}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              title="Create a consistent backup of TCS's own database (clusters, machines, inventory, users)"
+              onclick={() => createBackup('db')}
+              disabled={creating}
+            >
+              {creating ? 'Creating…' : 'DB backup'}
+            </Button>
+          </div>
         </div>
 
         <section class="panel">
@@ -1091,14 +1112,15 @@
           <div class="error-banner">{backupsError}</div>
         {:else if backups.length === 0}
           <div class="empty-state">
-            <p>No etcd snapshots yet</p>
-            <p class="hint">Requires talosconfig and reachability to a control-plane :50000.</p>
+            <p>No backups yet</p>
+            <p class="hint">Etcd snapshots need talosconfig and reachability to a control-plane :50000. DB backups of TCS's own database are always available.</p>
           </div>
         {:else}
           <table class="data-table">
             <thead>
               <tr>
                 <th>Name</th>
+                <th>Kind</th>
                 <th>Size</th>
                 <th>Status</th>
                 <th>Created</th>
@@ -1109,16 +1131,25 @@
               {#each backups as backup (backup.id)}
                 <tr>
                   <td>{backup.name}</td>
+                  <td>
+                    {#if backup.kind === 'db'}
+                      <span class="status-badge db">database</span>
+                    {:else}
+                      <span class="status-badge etcd">etcd</span>
+                    {/if}
+                  </td>
                   <td>{formatBytes(backup.sizeBytes)}</td>
                   <td><span class="status-badge {backup.status}">{backup.status}</span></td>
                   <td>{backup.createdAt ? new Date(backup.createdAt).toLocaleString() : '—'}</td>
                   <td>
                     <div class="row-actions">
-                      <Button variant="ghost" size="sm" title="Download this etcd snapshot file" onclick={() => downloadBackup(backup)} disabled={backup.status !== 'ready'}>Download</Button>
-                      <Button variant="secondary" size="sm" title="Restore the cluster control plane from this snapshot (disaster recovery)" onclick={() => restoreBackup(backup)} disabled={backup.status !== 'ready' || restoringId === backup.id}>
-                        {restoringId === backup.id ? 'Restoring…' : 'Restore'}
-                      </Button>
-                      <Button variant="danger" size="sm" title="Permanently delete this snapshot" onclick={() => deleteBackup(backup)}>Delete</Button>
+                      <Button variant="ghost" size="sm" title="Download this backup file" onclick={() => downloadBackup(backup)} disabled={backup.status !== 'ready'}>Download</Button>
+                      {#if backup.kind !== 'db'}
+                        <Button variant="secondary" size="sm" title="Restore the cluster control plane from this snapshot (disaster recovery)" onclick={() => restoreBackup(backup)} disabled={backup.status !== 'ready' || restoringId === backup.id}>
+                          {restoringId === backup.id ? 'Restoring…' : 'Restore'}
+                        </Button>
+                      {/if}
+                      <Button variant="danger" size="sm" title="Permanently delete this backup" onclick={() => deleteBackup(backup)}>Delete</Button>
                     </div>
                   </td>
                 </tr>
@@ -1360,6 +1391,8 @@
   .status-badge.running, .status-badge.ready { color: var(--tcs-success); border-color: var(--tcs-success); }
   .status-badge.offline, .status-badge.failed { color: var(--tcs-error); border-color: var(--tcs-error); }
   .status-badge.pending, .status-badge.unknown { color: var(--tcs-warning); border-color: var(--tcs-warning); }
+  .status-badge.etcd { color: var(--tcs-accent, #4a9eff); border-color: var(--tcs-accent, #4a9eff); }
+  .status-badge.db { color: var(--tcs-info, #8b7cf6); border-color: var(--tcs-info, #8b7cf6); }
 
   .tunnel-badge {
     display: inline-flex;

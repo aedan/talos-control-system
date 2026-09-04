@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::db::pool::DbPool;
 use uuid::Uuid;
@@ -515,6 +515,101 @@ impl ClusterController {
                 Err(e)
             }
         }
+    }
+
+    /// Create a consistent backup of **TCS's own database** (the source of truth
+    /// for clusters, machines, inventory, config patches, SideroLink peers/tokens,
+    /// users, ...). For SQLite this uses `VACUUM INTO`, which produces a
+    /// transactionally-consistent snapshot file without locking the live DB; for
+    /// Postgres it shells out to `pg_dump` (logical SQL dump). The result is
+    /// stored alongside the etcd snapshots under the same per-cluster backups
+    /// root and tagged `kind = "db"`, so it shares the list / download / delete /
+    /// retention machinery.
+    pub async fn create_db_backup(
+        &self,
+        cluster_id: Uuid,
+        name: String,
+    ) -> Result<ClusterBackup, AppError> {
+        let cluster = crate::db::repos::cluster::get(&self.pool, cluster_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Cluster {} not found", cluster_id)))?;
+
+        let mut backup = ClusterBackup::pending_db(cluster_id, name);
+        crate::db::repos::cluster_backup::create(&self.pool, &backup).await?;
+
+        let root = backup_root_from_sqlite_path(&self.sqlite_path);
+        let dest: PathBuf = root
+            .join(cluster_id.to_string())
+            .join(format!("{}.db.sql", backup.id));
+        let _ = tokio::fs::create_dir_all(&root.join(cluster_id.to_string())).await;
+
+        let size = match &self.pool {
+            crate::db::pool::DbPool::Sqlite(_) => {
+                // `VACUUM INTO` writes a transactionally-consistent snapshot of the
+                // current DB to dest. Run it as a single statement on a pooled
+                // connection (no open transaction).
+                let sql = format!(
+                    r#"VACUUM INTO '{}'"#,
+                    dest.to_string_lossy().replace('\'', "''")
+                );
+                self.pool.run_sqlite_sql(&sql).await?;
+                tokio::fs::metadata(&dest)
+                    .await
+                    .map_err(|e| AppError::Internal(format!("VACUUM INTO produced no file: {e}")))?
+                    .len()
+            }
+            crate::db::pool::DbPool::Postgres(_) => Self::pg_dump_to_file(&dest).await?,
+        };
+
+        if size == 0 {
+            let _ = tokio::fs::remove_file(&dest).await;
+            backup.status = "failed".to_string();
+            backup.updated_at = chrono::Utc::now();
+            let _ = crate::db::repos::cluster_backup::update(&self.pool, &backup).await;
+            return Err(AppError::Internal("Database backup produced an empty file".into()));
+        }
+
+        backup.status = "ready".to_string();
+        backup.file_path = Some(dest.to_string_lossy().to_string());
+        backup.size_bytes = size as i64;
+        backup.updated_at = chrono::Utc::now();
+        crate::db::repos::cluster_backup::update(&self.pool, &backup).await?;
+        self.enforce_backup_retention(cluster_id, &cluster).await?;
+        Ok(backup)
+    }
+
+    /// `pg_dump` the Postgres database to `dest` (logical SQL dump). Returns the
+    /// resulting file size in bytes. Requires `pg_dump` on PATH.
+    async fn pg_dump_to_file(dest: &Path) -> Result<u64, AppError> {
+        let url = std::env::var("DATABASE_POSTGRES_URL")
+            .or_else(|_| {
+                // Fall back to the env name used elsewhere if the primary one is unset.
+                std::env::var("TCS_DB_POSTGRES_URL")
+            })
+            .map_err(|_| {
+                AppError::Internal(
+                    "Postgres DB backup requires the database URL (DATABASE_POSTGRES_URL)".into(),
+                )
+            })?;
+        let out = tokio::process::Command::new("pg_dump")
+            .args(["--clean", "--if-exists", "--format=plain"])
+            .arg(&url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| AppError::Internal(format!("spawn pg_dump: {e}")))?
+            .wait_with_output()
+            .await
+            .map_err(|e| AppError::Internal(format!("pg_dump wait: {e}")))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let _ = tokio::fs::remove_file(dest).await;
+            return Err(AppError::Internal(format!("pg_dump failed: {}", stderr.trim())));
+        }
+        tokio::fs::write(dest, &out.stdout).await.map_err(AppError::Io)?;
+        let size = tokio::fs::metadata(dest).await.map_err(AppError::Io)?.len();
+        Ok(size)
     }
 
     async fn enforce_backup_retention(

@@ -110,6 +110,10 @@ pub async fn run_migrations(pool: &DbPool) -> Result<(), AppError> {
             "020_machine_muid.sql",
             include_str!("migrations/020_machine_muid.sql"),
         ),
+        (
+            "021_backup_kind.sql",
+            include_str!("migrations/021_backup_kind.sql"),
+        ),
     ];
 
     for (name, sql) in migrations {

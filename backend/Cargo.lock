@@ -4586,7 +4586,7 @@ checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
 name = "talos-control-system"
-version = "0.5.46"
+version = "0.5.49"
 dependencies = [
  "acme2",
  "aes-gcm",

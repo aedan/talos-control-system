@@ -76,6 +76,8 @@ export interface ClusterBackup {
   clusterId: string;
   name: string;
   status: string;
+  /** `etcd` (Kubernetes etcd snapshot) or `db` (TCS database backup). */
+  kind: string;
   filePath?: string | null;
   sizeBytes: number;
   createdAt: string;

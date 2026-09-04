@@ -11,13 +11,14 @@ pub async fn create(pool: &DbPool, backup: &ClusterBackup) -> Result<ClusterBack
     }
     let n = pool
         .execute(
-            "INSERT INTO cluster_backups (id, cluster_id, name, status, file_path, size_bytes, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO cluster_backups (id, cluster_id, name, status, kind, file_path, size_bytes, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             &[
                 SqlVal::Uuid(backup.id),
                 SqlVal::Uuid(backup.cluster_id),
                 SqlVal::text(&backup.name),
                 SqlVal::text(&backup.status),
+                SqlVal::text(&backup.kind),
                 SqlVal::OptText(backup.file_path.clone()),
                 SqlVal::I64(backup.size_bytes),
                 SqlVal::DateTime(backup.created_at),

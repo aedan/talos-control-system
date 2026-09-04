@@ -56,6 +56,21 @@ impl DbPool {
         }
     }
 
+    /// Run a single raw SQL statement on the SQLite backend (no parameters).
+    /// Used for SQLite-specific maintenance commands such as `VACUUM INTO`.
+    /// Returns an error if the pool is not SQLite.
+    pub async fn run_sqlite_sql(&self, sql: &str) -> Result<(), AppError> {
+        match self {
+            DbPool::Sqlite(p) => {
+                sqlx::query(sql).execute(p).await?;
+                Ok(())
+            }
+            DbPool::Postgres(_) => Err(AppError::Internal(
+                "run_sqlite_sql called on a Postgres pool".into(),
+            )),
+        }
+    }
+
     pub async fn fetch_optional_as<T>(&self, sql: &str, vals: &[SqlVal]) -> Result<Option<T>, AppError>
     where
         T: for<'r> FromRow<'r, sqlx::sqlite::SqliteRow>
