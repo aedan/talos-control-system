@@ -27,11 +27,11 @@ const JSON_CACHE_TTL: Duration = Duration::from_secs(3);
 // iLO's js/socket.js builds the KVM socket as:
 //     this.sockaddr = "wss://" + options.host + "/wss/ircport"
 // i.e. it points at the iLO host (self-signed cert, cross-origin). We rewrite it
-// to derive the URL from the document's `<base>` href (injected by the proxy as
-// `<prefix>/`), so it connects to TCS's session-scoped relay:
-//   <origin><prefix>/wss/ircport   (e.g. /api/machines/{id}/console/{sid}/wss/ircport)
+// to target TCS's session-scoped relay. `options.host` is already the TCS host
+// (iLO sets it to window.location.host), so we only need to swap the path for the
+// literal session prefix (baked in at proxy time — no `document` access, which
+// would be undefined if socket.js runs in a Worker).
 const SOCKADDR_OLD: &str = r#"this.sockaddr = "wss://" + options.host + "/wss/ircport""#;
-const SOCKADDR_NEW: &str = r#"this.sockaddr = (function(){var proto=self.location.protocol==="https:"?"wss://":"ws://";var b=document.querySelector("base");var dir=b&&b.getAttribute("href");if(!dir){var p=self.location.pathname;dir=p.replace(/\/js\/$/,"");}if(dir.charAt(dir.length-1)!=="/"){dir+="/";}return proto+self.location.host+dir+"wss/ircport"})()"#;
 
 // renderer.js: in an iframe, iLO sets path="../" so Worker("js/worker_decoder.js")
 // resolves outside the session prefix and 404s (black KVM canvas). Force it to "".
@@ -196,7 +196,7 @@ pub fn apply_rewrites(path: &str, body: &[u8], prefix: &str) -> Vec<u8> {
     if name.ends_with(".js") || name == "irc.html" || name.is_empty() {
         let mut text = String::from_utf8_lossy(body).into_owned();
         if name == "socket.js" || text.contains("sockaddr") {
-            text = rewrite_socket_js(&text);
+            text = rewrite_socket_js(&text, prefix);
         }
         if text.contains(IFRAME_REL_OLD) || text.contains("worker_decoder") {
             text = text.replace(IFRAME_REL_OLD, IFRAME_REL_NEW);
@@ -223,13 +223,18 @@ pub fn apply_rewrites(path: &str, body: &[u8], prefix: &str) -> Vec<u8> {
     body.to_vec()
 }
 
-fn rewrite_socket_js(text: &str) -> String {
+fn rewrite_socket_js(text: &str, prefix: &str) -> String {
+    // Bake the session prefix in as a literal path. options.host is the TCS host.
+    let pfx = prefix.trim_end_matches('/');
+    let new = format!(
+        r#"this.sockaddr = (self.location.protocol==="https:"?"wss://":"ws://") + options.host + "{pfx}/wss/ircport""#
+    );
     if text.contains(SOCKADDR_OLD) {
-        return text.replace(SOCKADDR_OLD, SOCKADDR_NEW);
+        return text.replace(SOCKADDR_OLD, &new);
     }
-    // Fallback regex-ish: match any wss:// + options.host + /wss/ircport form.
+    // Fallback: match any wss:// + options.host + /wss/ircport form.
     let re = regex::Regex::new(r#"this\.sockaddr\s*=\s*"wss://"\s*\+\s*options\.host\s*\+\s*"/wss/ircport""#).unwrap();
-    re.replace(text, SOCKADDR_NEW).into_owned()
+    re.replace(text, &new).into_owned()
 }
 
 /// Inject a `<base>` tag so iLO's relative asset refs (`css/…`, `js/…`,
