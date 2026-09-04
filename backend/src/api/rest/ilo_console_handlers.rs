@@ -175,10 +175,14 @@ pub async fn ilo_asset(
 
     // Answer the console's login session lookup locally (GET or POST) so the
     // browser never re-hits iLO for it and the BMC password stays server-side.
+    // Set the sessionKey cookie here too (defensive: the initial irc.html load
+    // sets it, but if login_session is the first call the cookie must exist for
+    // iLO.getSessionKey() to feed startHtml5Irc).
     if rel.trim_end_matches('/') == "json/login_session" {
         let (st, body, ctype) =
             asset::shared_login_response(&sess.bmc_host, &sess.username, &sess.session_key, None);
-        return asset::into_response(st, ctype, body.into_bytes(), None)
+        let cookie = format!("sessionKey={}; Path=/; SameSite=Lax", sess.session_key);
+        return asset::into_response(st, ctype, body.into_bytes(), Some(cookie))
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
     }
 

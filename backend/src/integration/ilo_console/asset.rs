@@ -43,6 +43,13 @@ const IFRAME_REL_NEW: &str = r#""""#;
 const JSON_PREFIXER_OLD: &str = r#""json/" == my_url.match("^json/") && (my_url = "/" + my_url)"#;
 const REST_PREFIXER_OLD: &str = r#""rest/" == my_url.match("^rest/") && (my_url = "/" + my_url)"#;
 
+// iLO.getCache builds an ABSOLUTE json URL: `reqUrl: "/json/" + req.name`
+// (leading slash, so the prefixer above — which matches `^json/` without a
+// leading slash — misses it, and the <base> tag can't fix an absolute URL).
+// Rewrite it to be session-scoped so login_session etc. hit the proxy.
+const GETCACHE_JSON_OLD: &str = r#"reqUrl: "/json/" + req.name"#;
+const GETCACHE_REST_OLD: &str = r#"reqUrl: "/rest/" + req.name"#;
+
 const HEARTBEAT_SCRIPT: &str = r#"<script>(function(){function p(e){try{parent.postMessage({tcsIlo:e||"alive"},"*")}catch(x){}}p("ready");setInterval(function(){p("alive")},2000);window.addEventListener("pagehide",function(){p("down")});})();</script>"#;
 
 struct CacheEntry {
@@ -210,6 +217,14 @@ pub fn apply_rewrites(path: &str, body: &[u8], prefix: &str) -> Vec<u8> {
             text = text.replace(
                 REST_PREFIXER_OLD,
                 &format!(r#""rest/" == my_url.match("^rest/") && (my_url = "{pfx}/" + my_url)"#),
+            );
+            text = text.replace(
+                GETCACHE_JSON_OLD,
+                &format!(r#"reqUrl: "{pfx}/json/" + req.name"#),
+            );
+            text = text.replace(
+                GETCACHE_REST_OLD,
+                &format!(r#"reqUrl: "{pfx}/rest/" + req.name"#),
             );
             text = text.replace("href=\"/favicon.ico", &format!("href=\"{pfx}/favicon.ico"));
             text = text.replace("href='/favicon.ico", &format!("href='{pfx}/favicon.ico"));
