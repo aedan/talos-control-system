@@ -310,27 +310,33 @@ async fn run_sol(mut socket: WebSocket, mut child: tokio::process::Child, bmc: S
         }
     });
 
-    // Drive browser messages.
-    while let Some(Ok(msg)) = socket.recv().await {
-        match msg {
-            Message::Binary(b) => {
-                if in_tx.send(b.to_vec()).await.is_err() {
-                    break;
+    // Drive the bridge: select on browser input AND pending stdout so SOL
+    // output reaches the browser immediately (the original code only flushed
+    // stdout after receiving a browser message, so the initial console screen
+    // never appeared until the user typed).
+    'outer: loop {
+        tokio::select! {
+            msg = socket.recv() => match msg {
+                Some(Ok(Message::Binary(b))) => {
+                    if in_tx.send(b.to_vec()).await.is_err() { break; }
                 }
-            }
-            Message::Text(t) => {
-                if in_tx.send(t.as_str().as_bytes().to_vec()).await.is_err() {
-                    break;
+                Some(Ok(Message::Text(t))) => {
+                    if in_tx.send(t.as_str().as_bytes().to_vec()).await.is_err() { break; }
                 }
-            }
-            Message::Close(_) => break,
-            _ => {}
-        }
-        // Forward any pending stdout.
-        while let Ok(bytes) = out_rx.try_recv() {
-            if socket.send(Message::Binary(bytes.into())).await.is_err() {
-                break;
-            }
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(_)) => {}
+                Some(Err(_)) => break,
+            },
+            bytes = out_rx.recv() => match bytes {
+                Some(b) => {
+                    if socket.send(Message::Binary(b.into())).await.is_err() { break; }
+                }
+                // out_rx closed (readers finished) -> drain stdin, end session.
+                None => {
+                    let _ = in_tx.send(Vec::new()).await;
+                    break 'outer;
+                }
+            },
         }
     }
 

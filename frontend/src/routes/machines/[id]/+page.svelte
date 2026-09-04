@@ -389,9 +389,9 @@
         return;
       }
       consoleMode = res.mode;
-      consoleSid = res.session_id || '';
-      consoleEmbed = res.embed_url || '';
-      consoleIdracUrl = res.idrac_console_url || '';
+      consoleSid = res.sessionId || '';
+      consoleEmbed = res.embedUrl || '';
+      consoleIdracUrl = res.idracConsoleUrl || '';
       consoleOpen = true;
       if (res.mode === 'sol') {
         // SOL output banner (informational, not an error). The terminal is

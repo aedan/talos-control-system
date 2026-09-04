@@ -17,9 +17,9 @@ const API_BASE = '/api';
 export interface ConsoleSession {
   ok: boolean;
   mode: 'ilo' | 'sol' | 'none';
-  session_id: string | null;
-  embed_url: string | null;
-  idrac_console_url: string | null;
+  sessionId: string | null;
+  embedUrl: string | null;
+  idracConsoleUrl: string | null;
   shared: boolean | null;
   viewers: number | null;
   error: string | null;

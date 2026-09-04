@@ -8,8 +8,8 @@
 //! `offline` when it is not. Machines that are part of an in-flight
 //! provision job are left alone so we never clobber a live install.
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use futures_util::future::join_all;
@@ -27,6 +27,30 @@ use crate::AppError;
 const TICK_SECS: u64 = 60;
 const LOCK_TTL_SECS: i64 = 60;
 const PROBE_CONCURRENCY: usize = 8;
+
+/// Number of *consecutive* failed probes required before a reachable machine is
+/// flipped to `offline`. A single transient probe failure (TLS hiccup, the
+/// SideroLink tunnel IP being momentarily unreachable, talosctl cold-start) must
+/// not flap a healthy node to offline and back every tick.
+const OFFLINE_AFTER_FAILURES: u32 = 2;
+
+/// Per-machine consecutive probe-failure streaks, in-memory. Reset to 0 on any
+/// successful probe. Process-local; a restart simply restarts the hysteresis,
+/// which is fine (a fresh process re-probes everything).
+static PROBE_FAILURES: LazyLock<Mutex<HashMap<Uuid, u32>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn record_probe_outcome(machine_id: Uuid, ok: bool) -> u32 {
+    let mut g = PROBE_FAILURES.lock().unwrap();
+    if ok {
+        g.insert(machine_id, 0);
+        0
+    } else {
+        let next = g.get(&machine_id).copied().unwrap_or(0).saturating_add(1);
+        g.insert(machine_id, next);
+        next
+    }
+}
 
 /// Statuses we actively reconcile. `destroying`/`failed` are left untouched.
 const RECONCILABLE: &[&str] = &[
@@ -225,6 +249,7 @@ async fn probe_and_update(
     let mut updated = machine;
     match version {
         Ok(v) => {
+            record_probe_outcome(machine_id, true);
             updated.status = "running".to_string();
             updated.talos_version = v;
 
@@ -276,7 +301,22 @@ async fn probe_and_update(
             }
         }
         Err(_) => {
-            updated.status = "offline".to_string();
+            let streak = record_probe_outcome(machine_id, false);
+            if streak >= OFFLINE_AFTER_FAILURES {
+                // Sustained unreachability -> mark offline.
+                updated.status = "offline".to_string();
+            } else {
+                // A single transient failure: keep the last known status so a
+                // healthy node doesn't flap offline and back every tick.
+                warn!(
+                    machine_id = %machine_id,
+                    hostname = %hostname,
+                    streak = streak,
+                    threshold = OFFLINE_AFTER_FAILURES,
+                    old_status = %old_status,
+                    "Probe failed (transient); keeping current status"
+                );
+            }
         }
     }
     updated.updated_at = chrono::Utc::now();
