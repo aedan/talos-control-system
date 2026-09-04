@@ -1,6 +1,6 @@
 use axum::Router;
 use axum::middleware::from_fn_with_state;
-use axum::routing::{delete, get, post, put};
+use axum::routing::{any, delete, get, post, put};
 use tower_http::cors::{AllowHeaders, AllowMethods, Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
@@ -9,6 +9,7 @@ use crate::AppState;
 use crate::config::BrandingConfig;
 
 pub mod handlers;
+pub mod ilo_console_handlers;
 pub mod k8s_action_handlers;
 pub mod k8s_common;
 pub mod k8s_list_handlers;
@@ -216,6 +217,24 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route("/machines/:id/boot-device", post(handlers::machine_boot_device))
         .route("/machines/:id/mount-iso", post(handlers::machine_mount_iso))
         .route("/machines/:id/unmount-iso", post(handlers::machine_unmount_iso))
+        // OOB console: iLO HTML5 (asset proxy + KVM WS, session-gated) and Dell SOL
+        .route(
+            "/machines/:id/console/session",
+            post(ilo_console_handlers::create_console_session),
+        )
+        .route(
+            "/machines/:id/console/session/close",
+            post(ilo_console_handlers::close_console_session),
+        )
+        .route("/machines/:id/console/sol", get(ilo_console_handlers::sol_ws))
+        .route(
+            "/machines/:id/console/:sid/wss/ircport",
+            get(ilo_console_handlers::ilo_kvm_ws),
+        )
+        .route(
+            "/machines/:id/console/:sid/{*path}",
+            any(ilo_console_handlers::ilo_asset),
+        )
         .route("/metal/status", get(handlers::metal_status))
         .route(
             "/settings/metal/config",

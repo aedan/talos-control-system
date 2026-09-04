@@ -42,6 +42,13 @@ pub fn extract_claims_from_request(request: &Request) -> Option<RbacClaims> {
 }
 
 pub fn map_route_to_resource(uri: &str) -> Option<Resource> {
+    // The iLO console asset-proxy and KVM-WebSocket routes are hit by the
+    // iLO's own <script>/WS (no Authorization header). They are gated by the
+    // unguessable `ilo_…` session id instead, so exempt them from RBAC. The
+    // console `session` mint and `sol` WS keep normal machine auth.
+    if uri.contains("/console/") && console_segment_is_session(uri) {
+        return None;
+    }
     if uri.starts_with("/api/clusters") {
         Some(Resource::Cluster)
     } else if uri.starts_with("/api/machines") {
@@ -58,6 +65,15 @@ pub fn map_route_to_resource(uri: &str) -> Option<Resource> {
         Some(Resource::User)
     } else {
         None
+    }
+}
+
+/// True if the path segment after `/console/` is an `ilo_…` session id (asset
+/// proxy or KVM WS), i.e. a route that must bypass RBAC auth.
+fn console_segment_is_session(uri: &str) -> bool {
+    match uri.rsplit_once("/console/") {
+        Some((_, rest)) => rest.split('/').next().unwrap_or("").starts_with("ilo_"),
+        None => false,
     }
 }
 
@@ -106,6 +122,13 @@ pub async fn rbac_middleware(
 ) -> axum::response::Response {
     let uri = request.uri().path().to_string();
     let method = request.method().clone();
+
+    // Session-gated console routes (iLO asset proxy / KVM WS) bypass RBAC entirely:
+    // they carry no Authorization header (iLO's own JS makes the calls) and are
+    // authenticated by the unguessable `ilo_…` session id inside the path.
+    if console_segment_is_session(&uri) {
+        return next.run(request).await;
+    }
 
     let claims = match extract_claims_from_request(&request) {
         Some(c) => c,

@@ -125,4 +125,46 @@ impl IpmiClient {
         }
         Ok(())
     }
+
+    /// Start an interactive Serial-over-LAN session.
+    ///
+    /// Spawns a long-lived `ipmitool … sol activate` process with piped stdio
+    /// (distinct from the fire-and-forget [`run`]). The caller owns the returned
+    /// `Child` and bridges its stdin/stdout (e.g. over a WebSocket). Sending the
+    /// SOL escape `~.` (or dropping the child) ends the session.
+    pub async fn sol_activate(&self) -> Result<tokio::process::Child, AppError> {
+        let check = Command::new("ipmitool")
+            .arg("-V")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+        if check.is_err() || !check.map(|s| s.success()).unwrap_or(false) {
+            return Err(AppError::Network(
+                "ipmitool not found on PATH; install ipmitool for SOL console".into(),
+            ));
+        }
+
+        let mut cmd = Command::new("ipmitool");
+        cmd.arg("-I")
+            .arg(&self.interface)
+            .arg("-H")
+            .arg(&self.host)
+            .arg("-U")
+            .arg(&self.user)
+            .arg("-P")
+            .arg(&self.password)
+            .arg("-N")
+            .arg("0")
+            .arg("sol")
+            .arg("activate");
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        cmd.stdin(Stdio::piped());
+
+        let child = cmd
+            .spawn()
+            .map_err(|e| AppError::Network(format!("ipmitool sol spawn: {e}")))?;
+        Ok(child)
+    }
 }

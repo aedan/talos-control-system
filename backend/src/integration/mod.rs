@@ -1,5 +1,6 @@
 pub mod bmc;
 pub mod image_factory;
+pub mod ilo_console;
 pub mod k8s_explorer;
 pub mod kubernetes;
 pub mod talosctl;

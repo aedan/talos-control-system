@@ -17,21 +17,24 @@
     type NetworkBuilderKeys,
   } from '$lib/networkBuilder';
   import { renderYamlDiff } from '$lib/diffView';
-
-  interface ServiceRow {
-    id: string;
-    state: string;
-    healthy: boolean;
-    unknown: boolean;
-  }
+  import { openConsoleSession, closeConsoleSession, openSolSession, type ConsoleSession, type SolHandle } from '$lib/api/iloConsole';
+  import { Terminal } from '@xterm/xterm';
+  import { FitAddon } from '@xterm/addon-fit';
+  import '@xterm/xterm/css/xterm.css';
 
   let machine = $state<Machine | null>(null);
   let loading = $state(true);
   let error = $state('');
   let actionBusy = $state(false);
   let editAddress = $state('');
-  let services = $state<ServiceRow[]>([]);
-  let servicesError = $state('');
+  // OOB console overlay state
+  let consoleOpen = $state(false);
+  let consoleBusy = $state(false);
+  let consoleMode = $state<'ilo' | 'sol' | 'none'>('none');
+  let consoleEmbed = $state('');
+  let consoleSid = $state('');
+  let consoleIdracUrl = $state('');
+  let consoleError = $state('');
   let versions = $state<MachineVersions | null>(null);
   let extensions = $state<MachineExtension[]>([]);
   let extBusy = $state(false);
@@ -333,21 +336,6 @@
     }
   }
 
-  async function probeVersion() {
-    actionBusy = true;
-    try {
-      const res = (await client.get(`/machines/${$page.params.id}/version`)) as {
-        talosVersion: string;
-      };
-      if (machine) machine = { ...machine, talosVersion: res.talosVersion };
-      success(`Talos version: ${res.talosVersion}`);
-    } catch (e: unknown) {
-      notifyError(e instanceof Error ? e.message : 'Version probe failed');
-    } finally {
-      actionBusy = false;
-    }
-  }
-
   async function loadHostname() {
     try {
       const res = (await client.get(`/machines/${$page.params.id}/hostname`)) as {
@@ -359,17 +347,113 @@
     }
   }
 
-  async function loadServices() {
-    servicesError = '';
-    try {
-      const res = (await client.get(`/machines/${$page.params.id}/services`)) as {
-        services: ServiceRow[];
-      };
-      services = res.services || [];
-    } catch (e: unknown) {
-      servicesError = e instanceof Error ? e.message : 'Failed to load services';
-      services = [];
+  // ---- OOB console ----
+
+  let solTerm: Terminal | null = null;
+  let solFit: FitAddon | null = null;
+  let solHandle: SolHandle | null = null;
+  let solEl: HTMLDivElement | null = null;
+
+  // Svelte action: mount the SOL terminal into the div when it appears.
+  function solContainer(node: HTMLDivElement) {
+    solEl = node;
+    if (consoleMode === 'sol') {
+      // Defer so the overlay layout is painted before fit().
+      requestAnimationFrame(() => {
+        startSol();
+        window.addEventListener('resize', onSolResize);
+      });
     }
+    return {
+      destroy() {
+        window.removeEventListener('resize', onSolResize);
+        stopSol();
+        solEl = null;
+      },
+    };
+  }
+
+  function onSolResize() {
+    solFit?.fit();
+  }
+
+  async function openConsole() {
+    if (!machine) return;
+    consoleBusy = true;
+    consoleError = '';
+    consoleMode = 'none';
+    try {
+      const res: ConsoleSession = await openConsoleSession($page.params.id!);
+      if (!res.ok && res.mode === 'none') {
+        consoleError = res.error || 'Console unavailable';
+        return;
+      }
+      consoleMode = res.mode;
+      consoleSid = res.session_id || '';
+      consoleEmbed = res.embed_url || '';
+      consoleIdracUrl = res.idrac_console_url || '';
+      consoleOpen = true;
+      if (res.mode === 'sol') {
+        // SOL output banner (informational, not an error). The terminal is
+        // mounted by the solContainer action when the div appears.
+        if (res.error) consoleError = res.error;
+      }
+    } catch (e: unknown) {
+      consoleError = e instanceof Error ? e.message : 'Failed to open console';
+    } finally {
+      consoleBusy = false;
+    }
+  }
+
+  function closeConsole() {
+    stopSol();
+    if (consoleMode === 'ilo' && consoleSid) {
+      void closeConsoleSession($page.params.id!, consoleSid);
+    }
+    consoleOpen = false;
+    consoleMode = 'none';
+    consoleEmbed = '';
+    consoleSid = '';
+    consoleIdracUrl = '';
+    consoleError = '';
+  }
+
+  function startSol() {
+    stopSol();
+    if (!solEl) return;
+    const term = new Terminal({
+      cursorBlink: true,
+      fontSize: 13,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      theme: { background: '#0b0e14', foreground: '#d7dae0' },
+    });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    term.open(solEl);
+    fit.fit();
+    solTerm = term;
+    solFit = fit;
+
+    term.onData((data) => solHandle?.send(data));
+    const handle = openSolSession(
+      $page.params.id!,
+      (bytes) => term.write(bytes),
+      () => {
+        if (solTerm === term) {
+          term.write('\r\n\x1b[90m[SOL closed]\x1b[0m\r\n');
+        }
+      },
+    );
+    solHandle = handle;
+    term.focus();
+  }
+
+  function stopSol() {
+    solHandle?.close();
+    solHandle = null;
+    solTerm?.dispose();
+    solTerm = null;
+    solFit = null;
   }
 
   // Factory extension names are "org/module" (e.g. siderolabs/bnx2-bnx2x); the
@@ -766,9 +850,6 @@
       <div class="header-actions">
         <span class="status-badge">{machine.status}</span>
         <span class="type-badge">{roleLabel(machine.machineType)}</span>
-        <Button variant="secondary" size="sm" title="Probe the node for its running Talos version" onclick={probeVersion} disabled={actionBusy}>Version</Button>
-        <Button variant="secondary" size="sm" title="Fetch the node's live hostname from Talos" onclick={loadHostname} disabled={actionBusy}>Hostname</Button>
-        <Button variant="secondary" size="sm" title="List the Talos services running on this node and their health" onclick={loadServices} disabled={actionBusy}>Services</Button>
         <Button variant="secondary" size="sm" title="Bootstrap this control-plane node (initial etcd formation)" onclick={bootstrap} disabled={actionBusy}>Bootstrap</Button>
         <Button variant="danger" size="sm" title="Reboot this machine via the Talos API" onclick={reboot} disabled={actionBusy}>Reboot</Button>
         <Button variant="danger" size="sm" title="DESTRUCTIVE: factory-reset and wipe this machine via Talos" onclick={resetMachine} disabled={actionBusy}>Reset</Button>
@@ -1030,6 +1111,7 @@
           <Button variant="secondary" size="sm" title="Save BMC connection settings" onclick={saveBmc} disabled={actionBusy}>Save BMC</Button>
         </div>
         <div class="header-actions" style="margin-top:0.5rem">
+          <Button variant="secondary" size="sm" title="Open the out-of-band console (iLO HTML5 for HPE, SOL for Dell)" onclick={openConsole} disabled={actionBusy}>Console</Button>
           <Button variant="secondary" size="sm" title="Power on the machine via BMC" onclick={() => powerAction('on')} disabled={actionBusy}>On</Button>
           <Button variant="secondary" size="sm" title="Power off the machine via BMC" onclick={() => powerAction('off')} disabled={actionBusy}>Off</Button>
           <Button variant="secondary" size="sm" title="Power-cycle the machine via BMC" onclick={() => powerAction('cycle')} disabled={actionBusy}>Cycle</Button>
@@ -1388,40 +1470,44 @@ cluster:
         </div>
       </div>
     </section>
+  {/if}
 
-    {#if servicesError}
-      <div class="error">{servicesError}</div>
-    {/if}
-    {#if services.length > 0}
-      <section class="services">
-        <h2>Services</h2>
-        <table class="data-table">
-          <thead>
-            <tr><th>ID</th><th>State</th><th>Health</th></tr>
-          </thead>
-          <tbody>
-            {#each services as s (s.id)}
-              <tr>
-                <td class="mono">{s.id}</td>
-                <td>{s.state}</td>
-                <td>
-                  {#if s.unknown}
-                    <span class="health unk">unknown</span>
-                  {:else if s.healthy}
-                    <span class="health ok">healthy</span>
-                  {:else}
-                    <span class="health bad">unhealthy</span>
-                  {/if}
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </section>
-    {/if}
+  {#if consoleOpen}
+    <div class="console-overlay" role="dialog" aria-modal="true"
+         onkeydown={(e) => { if (e.key === 'Escape') closeConsole(); }}>
+      <div class="console-bar">
+        <span class="console-title">
+          {#if consoleBusy}
+            <Spinner size="sm" /> Opening…
+          {:else}
+            OOB console — {machine?.hostname || 'machine'}
+          {/if}
+          {#if consoleMode === 'ilo'}<span class="badge">iLO</span>{/if}
+          {#if consoleMode === 'sol'}<span class="badge">SOL</span>{/if}
+        </span>
+        <span class="console-actions">
+          {#if consoleMode === 'sol' && consoleIdracUrl}
+            <a class="console-link" href={consoleIdracUrl} target="_blank" rel="noopener"
+               title="Open Dell's native iDRAC console in a new tab">iDRAC console ↗</a>
+          {/if}
+          <Button variant="secondary" size="sm" title="Close the console (Esc)" onclick={closeConsole}>Close</Button>
+        </span>
+      </div>
+      <div class="console-body">
+        {#if consoleError}
+          <div class="console-error">{consoleError}</div>
+        {/if}
+        {#if consoleMode === 'ilo'}
+          <iframe class="ilo-frame" src={consoleEmbed} title="iLO remote console"></iframe>
+        {:else if consoleMode === 'sol'}
+          <div class="sol-term" use:solContainer></div>
+        {:else}
+          <div class="console-empty">Console unavailable.</div>
+        {/if}
+      </div>
+    </div>
   {/if}
 </div>
-
 <style>
   .machine-detail h1 { margin: 0; }
   .detail-header {
@@ -1685,7 +1771,6 @@ cluster:
     border-radius: 4px;
     border: 1px solid var(--tcs-border);
   }
-  .services h2 { margin: 0 0 0.75rem; }
   .data-table { width: 100%; border-collapse: collapse; }
   .data-table th, .data-table td {
     text-align: left;
@@ -1819,4 +1904,35 @@ cluster:
   .diff-view .diff-del { color: #f87171; background: rgba(248, 113, 113, 0.08); display: block; }
   .diff-view .diff-hunk { color: #60a5fa; display: block; }
   .diff-view .diff-ctx { color: var(--tcs-text-muted); display: block; }
+
+  /* ---- OOB console overlay ---- */
+  .console-overlay {
+    position: fixed; inset: 0; z-index: 1000;
+    background: #05070b;
+    display: flex; flex-direction: column;
+  }
+  .console-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.4rem 0.9rem;
+    background: #0b0e14;
+    border-bottom: 1px solid var(--tcs-border);
+    color: #e6e8ee;
+  }
+  .console-title { font-weight: 600; font-size: 0.95rem; display: flex; gap: 0.5rem; align-items: center; }
+  .console-actions { display: flex; gap: 0.6rem; align-items: center; }
+  .console-link {
+    color: #60a5fa; text-decoration: none; font-size: 0.85rem;
+    padding: 0.35rem 0.6rem; border: 1px solid var(--tcs-border); border-radius: 6px;
+  }
+  .console-link:hover { background: rgba(96,165,250,0.1); }
+  .console-body { flex: 1; position: relative; overflow: hidden; }
+  .console-error {
+    position: absolute; top: 0.5rem; left: 50%; transform: translateX(-50%);
+    z-index: 2; background: rgba(248,113,113,0.15); color: #fecaca;
+    border: 1px solid rgba(248,113,113,0.4); border-radius: 6px;
+    padding: 0.3rem 0.8rem; font-size: 0.8rem; max-width: 80%;
+  }
+  .ilo-frame { width: 100%; height: 100%; border: 0; background: #000; display: block; }
+  .sol-term { width: 100%; height: 100%; padding: 0.25rem; background: #0b0e14; }
+  .console-empty { color: var(--tcs-text-muted); padding: 2rem; text-align: center; }
 </style>
