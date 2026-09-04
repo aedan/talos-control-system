@@ -227,6 +227,14 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
             post(ilo_console_handlers::close_console_session),
         )
         .route("/machines/:id/console/sol", get(ilo_console_handlers::sol_ws))
+        // Empty-tail asset route: the iframe loads `/console/{sid}` (no trailing
+        // segment) as the console root. matchit's `*path` catch-all doesn't
+        // reliably match zero segments, so register the bare path explicitly —
+        // `ilo_asset` derives the asset from the raw URI either way.
+        .route(
+            "/machines/:id/console/:sid",
+            any(ilo_console_handlers::ilo_asset),
+        )
         .route(
             "/machines/:id/console/:sid/wss/ircport",
             get(ilo_console_handlers::ilo_kvm_ws),

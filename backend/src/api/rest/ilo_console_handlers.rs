@@ -15,6 +15,7 @@ use axum::Json;
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
+use crate::auth::jwt::verify_jwt;
 
 use crate::integration::bmc::{IpmiClient, BmcCredentials};
 use crate::integration::ilo_console::{asset, kvm, session};
@@ -69,7 +70,7 @@ pub async fn create_console_session(
     }
     let _ = q.force; // single-viewer: force is accepted but ignored
 
-    let (m, _plain, creds) = match machine_bmc(&state, id).await {
+    let (m, _plain, _creds) = match machine_bmc(&state, id).await {
         Ok(v) => v,
         Err((code, msg)) => {
             let _ = code;
@@ -86,10 +87,28 @@ pub async fn create_console_session(
         }
     };
 
-    let base_url = state.config.server.advertised_url.trim_end_matches('/').to_string();
+    let is_dell = m.bmc_type == "redfish";
 
-    // Try iLO first.
-    match session::open_console_session(&m, &state.config.auth.jwt_secret, &base_url).await {
+    // Dell iDRAC: no iLO JSON API. Go straight to SOL + a new-tab iDRAC link.
+    if is_dell {
+        let idrac_url = Some(session::idrac_console_url(&m.bmc_address));
+        audit(&state, &claims.sub, "sol_console_offer", &id.to_string(), &m.bmc_address).await;
+        return Ok(Json(session::ConsoleSessionResponse {
+            ok: true,
+            mode: "sol".into(),
+            session_id: None,
+            embed_url: None,
+            idrac_console_url: idrac_url,
+            shared: None,
+            viewers: None,
+            error: None,
+        }));
+    }
+
+    // HPE iLO: mint an iLO HTML5 console session (embed_path is relative so the
+    // browser loads it same-origin, avoiding mixed-content from a stale
+    // advertised_url).
+    match session::open_console_session(&m, &state.config.auth.jwt_secret).await {
         Ok((sid, embed, shared)) => {
             audit(&state, &claims.sub, "ilo_console_open", &id.to_string(), &sid).await;
             Ok(Json(session::ConsoleSessionResponse {
@@ -104,31 +123,19 @@ pub async fn create_console_session(
             }))
         }
         Err(e) => {
-            // Not an iLO (or login failed) -> offer SOL for this machine, plus an
-            // iDRAC new-tab link if it's a Dell (redfish-type) machine.
-            let idrac_url = if m.bmc_type == "redfish" || looks_like_idrac(&creds.address) {
-                Some(session::idrac_console_url(&m.bmc_address))
-            } else {
-                None
-            };
+            // iLO login failed -> fall back to SOL (HPE iLO supports SOL too).
             Ok(Json(session::ConsoleSessionResponse {
                 ok: true,
                 mode: "sol".into(),
                 session_id: None,
                 embed_url: None,
-                idrac_console_url: idrac_url,
+                idrac_console_url: None,
                 shared: None,
                 viewers: None,
                 error: Some(format!("iLO console unavailable; using SOL: {e}")),
             }))
         }
     }
-}
-
-fn looks_like_idrac(address: &str) -> bool {
-    // Address alone can't distinguish iLO/iDRAC; the real signal is `bmc_type`.
-    // This is a conservative fallback that's almost always false.
-    address.contains('/') && address.starts_with("https://")
 }
 
 /// GET/POST /machines/:machine_id/console/:sid/{path}  — iLO asset proxy.
@@ -222,6 +229,9 @@ async fn run_kvm(state: AppState, sess: session::IloSession, socket: WebSocket) 
 }
 
 /// GET /machines/:id/console/sol?token=…  — Dell SOL WebSocket bridge.
+///
+/// Auth is enforced by the RBAC middleware (it reads `?token=`); the handler
+/// only re-reads the token for audit attribution. Follows the `exec_ws` pattern.
 #[derive(Deserialize)]
 pub struct SolQuery {
     #[serde(default)]
@@ -232,20 +242,17 @@ pub async fn sol_ws(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Query(q): Query<SolQuery>,
-    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, (StatusCode, String)> {
-    // Auth via ?token= (WS clients can't set headers reliably) or header.
-    let token = q.token.clone().or_else(|| {
-        headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|h| h.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
-            .map(|s| s.to_string())
-    });
-    let claims = k8s_common_claims(&headers, token.as_deref())?;
-    if claims.role != "admin" && claims.role != "operator" {
-        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    // The RBAC middleware already validated the token + role for this route
+    // (it reads `?token=` the same way), so reaching here means the caller is
+    // authorized. Re-read the token only for audit attribution; if it's absent
+    // here we still proceed, logging without a subject.
+    let claims = q.token.as_deref().and_then(|t| verify_jwt(t).ok()).map(|t| t.claims);
+    if let Some(c) = &claims {
+        if c.role != "admin" && c.role != "operator" {
+            return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+        }
     }
 
     let (m, plain, creds) = match machine_bmc(&state, id).await {
@@ -264,14 +271,10 @@ pub async fn sol_ws(
         }
     };
 
-    audit(&state, &claims.sub, "sol_console_open", &id.to_string(), &m.bmc_address).await;
+    let sub = claims.map(|c| c.sub).unwrap_or_else(|| "unknown".into());
+    audit(&state, &sub, "sol_console_open", &id.to_string(), &m.bmc_address).await;
     let _ = plain;
     Ok(ws.on_upgrade(move |socket| run_sol(socket, child, m.bmc_address.clone(), id)))
-}
-
-/// WS-claims helper: header first, then token query.
-fn k8s_common_claims(headers: &HeaderMap, token: Option<&str>) -> Result<crate::auth::jwt::Claims, (StatusCode, String)> {
-    claims_from(headers, token)
 }
 
 /// Bridge a browser WebSocket to the `ipmitool sol activate` child.

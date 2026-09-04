@@ -117,20 +117,22 @@ fn find_machine_session(
 
 /// Open (or reuse) the iLO console session for a machine.
 ///
-/// Returns `(session_id, embed_url, reused)` on success, or an `Err` describing
-/// why the iLO console could not be opened (caller may then fall back to SOL).
+/// Returns `(session_id, embed_path, reused)` on success, or an `Err`
+/// describing why the iLO console could not be opened (caller may then fall
+/// back to SOL). `embed_path` is *relative* (`/api/machines/{id}/console/{sid}`)
+/// so the browser loads it same-origin — an absolute URL built from
+/// `advertised_url` can be the wrong scheme/port (e.g. `http://…:8081`) and
+/// gets blocked as mixed content inside the HTTPS TCS page.
 pub async fn open_console_session(
     machine: &Machine,
     jwt_secret: &str,
-    base_url: &str,
 ) -> Result<(String, String, bool), AppError> {
     // Reuse a live session for this machine.
     {
         let mut g = sessions();
         if let Some(sess) = find_machine_session(&g, machine.id) {
             let prefix = session_prefix(&machine.id.to_string(), &sess.session_id);
-            let embed = format!("{base_url}{prefix}");
-            return Ok((sess.session_id.clone(), embed, true));
+            return Ok((sess.session_id.clone(), prefix, true));
         }
         let purged = purge_expired(&mut g);
         for sess in purged {
@@ -153,10 +155,7 @@ pub async fn open_console_session(
     let session_key = json_login(&host, &machine.bmc_username, &plain).await?;
 
     let session_id = format!("ilo_{}", Uuid::new_v4().simple());
-    let embed_url = format!(
-        "{base_url}{}",
-        session_prefix(&machine.id.to_string(), &session_id)
-    );
+    let embed_path = session_prefix(&machine.id.to_string(), &session_id);
 
     let now = Instant::now();
     let sess = IloSession {
@@ -173,7 +172,7 @@ pub async fn open_console_session(
         let mut g = sessions();
         g.insert(session_id.clone(), sess);
     }
-    Ok((session_id, embed_url, false))
+    Ok((session_id, embed_path, false))
 }
 
 /// Close a session (best-effort iLO logout to free the BMC slot).
