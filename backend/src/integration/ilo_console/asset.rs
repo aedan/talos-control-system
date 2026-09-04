@@ -27,10 +27,11 @@ const JSON_CACHE_TTL: Duration = Duration::from_secs(3);
 // iLO's js/socket.js builds the KVM socket as:
 //     this.sockaddr = "wss://" + options.host + "/wss/ircport"
 // i.e. it points at the iLO host (self-signed cert, cross-origin). We rewrite it
-// to derive the URL from the *document's own* location, so it connects to TCS's
-// session prefix instead:  <origin>/<prefix>/wss/ircport.
+// to derive the URL from the document's `<base>` href (injected by the proxy as
+// `<prefix>/`), so it connects to TCS's session-scoped relay:
+//   <origin><prefix>/wss/ircport   (e.g. /api/machines/{id}/console/{sid}/wss/ircport)
 const SOCKADDR_OLD: &str = r#"this.sockaddr = "wss://" + options.host + "/wss/ircport""#;
-const SOCKADDR_NEW: &str = r#"this.sockaddr = (function(){var loc=self.location;var proto=loc.protocol==="https:"?"wss://":"ws://";var dir=loc.pathname.replace(/\/[^/]*$/,"/").replace(/\/js\/$/,"/");return proto+loc.host+dir+"wss/ircport"})()"#;
+const SOCKADDR_NEW: &str = r#"this.sockaddr = (function(){var proto=self.location.protocol==="https:"?"wss://":"ws://";var b=document.querySelector("base");var dir=b&&b.getAttribute("href");if(!dir){var p=self.location.pathname;dir=p.replace(/\/js\/$/,"");}if(dir.charAt(dir.length-1)!=="/"){dir+="/";}return proto+self.location.host+dir+"wss/ircport"})()"#;
 
 // renderer.js: in an iframe, iLO sets path="../" so Worker("js/worker_decoder.js")
 // resolves outside the session prefix and 404s (black KVM canvas). Force it to "".
@@ -214,6 +215,7 @@ pub fn apply_rewrites(path: &str, body: &[u8], prefix: &str) -> Vec<u8> {
             text = text.replace("href='/favicon.ico", &format!("href='{pfx}/favicon.ico"));
         }
         if name == "irc.html" || name.is_empty() {
+            text = inject_base(&text, prefix);
             text = inject_heartbeat(&text);
         }
         return text.into_bytes();
@@ -228,6 +230,33 @@ fn rewrite_socket_js(text: &str) -> String {
     // Fallback regex-ish: match any wss:// + options.host + /wss/ircport form.
     let re = regex::Regex::new(r#"this\.sockaddr\s*=\s*"wss://"\s*\+\s*options\.host\s*\+\s*"/wss/ircport""#).unwrap();
     re.replace(text, SOCKADDR_NEW).into_owned()
+}
+
+/// Inject a `<base>` tag so iLO's relative asset refs (`css/…`, `js/…`,
+/// `lang/…`) resolve under the session path instead of the bare `/console/`
+/// segment. iLO's `irc.html` uses unqualified relative paths; with the console
+/// served at `/console/{sid}` they would resolve to `/console/{asset}` (dropping
+/// the session id) and hit RBAC -> 401. A `<base href="{prefix}/">` pins them to
+/// `/console/{sid}/{asset}`, which the session-gated asset route serves.
+fn inject_base(text: &str, prefix: &str) -> String {
+    if text.contains("<base") || text.contains("<BASE") {
+        return text.to_string();
+    }
+    let base_tag = format!("<base href=\"{prefix}/\">");
+    // Insert right after the <head> open tag (case-insensitive); fall back to
+    // the top of the document if not found.
+    let lower = text.to_ascii_lowercase();
+    if let Some(idx) = lower.find("<head") {
+        if let Some(close) = text[idx..].find('>') {
+            let pos = idx + close + 1;
+            let mut out = String::with_capacity(text.len() + base_tag.len());
+            out.push_str(&text[..pos]);
+            out.push_str(&base_tag);
+            out.push_str(&text[pos..]);
+            return out;
+        }
+    }
+    format!("{base_tag}{text}")
 }
 
 fn inject_heartbeat(text: &str) -> String {
