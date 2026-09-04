@@ -232,7 +232,7 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
             get(ilo_console_handlers::ilo_kvm_ws),
         )
         .route(
-            "/machines/:id/console/:sid/{*path}",
+            "/machines/:id/console/:sid/*path",
             any(ilo_console_handlers::ilo_asset),
         )
         .route("/metal/status", get(handlers::metal_status))
