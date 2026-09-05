@@ -66,10 +66,6 @@ pub struct ConsoleSessionResponse {
     pub shared: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub viewers: Option<u32>,
-    /// iDRAC login URL (https://<idrac>/login.html#tcs=<single-use token>) that a
-    /// TCS auto-login browser extension opens to fill + submit the iDRAC form.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub idrac_autologin_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -204,9 +200,12 @@ pub fn is_safe_session_id(id: &str) -> bool {
     id.starts_with("ilo_") && (8..=80).contains(&id.len())
 }
 
-/// iDRAC HTML5 console launch URL (new tab) for Dell machines.
+/// iDRAC console launch URL (new tab) for Dell machines. `?console` is a native
+/// iDRAC flag: after the user logs in (their browser's password manager
+/// autofills the form), the iDRAC launches the Virtual Console (video) directly
+/// instead of the main UI. See the iDRAC's own contLoginRequest() source.
 pub fn idrac_console_url(bmc_address: &str) -> String {
-    format!("https://{}/login.html", bmc_host(bmc_address))
+    format!("https://{}/login.html?console", bmc_host(bmc_address))
 }
 
 /// Strip scheme/path/port from a stored BMC address, keep host[:port].

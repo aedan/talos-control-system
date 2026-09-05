@@ -20,10 +20,16 @@ export interface ConsoleSession {
   sessionId: string | null;
   embedUrl: string | null;
   idracConsoleUrl: string | null;
-  idracAutologinUrl: string | null;
   shared: boolean | null;
   viewers: number | null;
   error: string | null;
+}
+
+export interface IdracCredentials {
+  ok: boolean;
+  username: string;
+  password: string;
+  idracUrl: string;
 }
 
 function token(): string | null {
@@ -53,6 +59,16 @@ export async function closeConsoleSession(
   } catch {
     // Non-fatal: the session expires server-side after its TTL.
   }
+}
+
+/**
+ * Reveal a Dell machine's iDRAC login credentials (operator/admin, audited).
+ * Used by the "Show iDRAC login" popup so a user whose browser password
+ * manager hasn't saved the creds can read + use them.
+ */
+export async function getIdracCredentials(machineId: string): Promise<IdracCredentials> {
+  const res = await client.get(`/machines/${machineId}/console/idrac-credentials`);
+  return res as IdracCredentials;
 }
 
 export interface SolHandle {
