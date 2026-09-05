@@ -50,6 +50,16 @@ const REST_PREFIXER_OLD: &str = r#""rest/" == my_url.match("^rest/") && (my_url 
 const GETCACHE_JSON_OLD: &str = r#"reqUrl: "/json/" + req.name"#;
 const GETCACHE_REST_OLD: &str = r#"reqUrl: "/rest/" + req.name"#;
 
+// icons.js loads the OEM icon set via `$.getScript(oemIconpath)` where
+// oemIconpath = `window.top === window.self ? "js/extendedIcons.js"
+// : "../js/extendedIcons.js"`. Inside the iframe it picks the `../` form, which
+// — combined with the injected <base href="{prefix}/"> — resolves the `../`
+// *out of* the session segment (to /console/js/extendedIcons.js, sid dropped)
+// and 401s. Force the non-`../` form so it resolves under the session path.
+const OEMICON_OLD: &str =
+    r#"oemIconpath = window.top === window.self ? "js/extendedIcons.js" : "../js/extendedIcons.js""#;
+const OEMICON_NEW: &str = r#"oemIconpath = "js/extendedIcons.js""#;
+
 const HEARTBEAT_SCRIPT: &str = r#"<script>(function(){function p(e){try{parent.postMessage({tcsIlo:e||"alive"},"*")}catch(x){}}p("ready");setInterval(function(){p("alive")},2000);window.addEventListener("pagehide",function(){p("down")});})();</script>"#;
 
 struct CacheEntry {
@@ -207,6 +217,9 @@ pub fn apply_rewrites(path: &str, body: &[u8], prefix: &str) -> Vec<u8> {
         }
         if text.contains(IFRAME_REL_OLD) || text.contains("worker_decoder") {
             text = text.replace(IFRAME_REL_OLD, IFRAME_REL_NEW);
+        }
+        if text.contains(OEMICON_OLD) {
+            text = text.replace(OEMICON_OLD, OEMICON_NEW);
         }
         if text.contains("my_url") || text.contains("/json/") || text.contains("favicon.ico") {
             let pfx = prefix.trim_end_matches('/');

@@ -21,13 +21,6 @@ use super::session::bmc_origin;
 use crate::AppState;
 use crate::integration::ilo_console::session::IloSession;
 
-// DVCNET command byte values (from iLO console / genestack).
-const HELLO: u8 = 80; // DVCNET.CMD_AUTHENTICATE
-const AUTH_OK: u8 = 82; // DVCNET.CMD_AUTHENTICATED
-const BUSY: u8 = 83;
-const SEIZE: u8 = 85;
-const BUSY_NO_MURC: u8 = 89;
-
 type Upstream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 fn upstream_url(bmc_host: &str) -> String {
@@ -95,16 +88,6 @@ impl rustls::client::danger::ServerCertVerifier for InsecureVerifier {
     }
 }
 
-fn hello_frame(channel: u8, session_key: &str) -> Vec<u8> {
-    let mut frame = vec![0u8; 34];
-    frame[0] = channel;
-    frame[1] = 32;
-    let key = session_key.as_bytes();
-    let n = key.len().min(32);
-    frame[2..2 + n].copy_from_slice(&key[..n]);
-    frame
-}
-
 async fn connect_upstream(url: &str, session: &IloSession) -> Result<Upstream, String> {
     let origin = bmc_origin(&session.bmc_host);
     let mut req = url.into_client_request().map_err(|e| e.to_string())?;
@@ -127,52 +110,18 @@ async fn connect_upstream(url: &str, session: &IloSession) -> Result<Upstream, S
     }
 }
 
-async fn recv_bytes(
-    up: &mut Upstream,
-) -> Result<Vec<u8>, String> {
-    match up.next().await {
-        Some(Ok(TwsMsg::Binary(b))) => Ok(b.to_vec()),
-        Some(Ok(TwsMsg::Text(t))) => Ok(t.as_str().as_bytes().to_vec()),
-        Some(Ok(_)) => Err("unexpected upstream frame type".into()),
-        Some(Err(e)) => Err(e.to_string()),
-        None => Err("upstream closed".into()),
-    }
-}
-
-async fn bmc_handshake(up: &mut Upstream, session: &IloSession, channel: u8) -> Result<(), String> {
-    let first = recv_bytes(up).await?;
-    if first.is_empty() || first[0] != HELLO {
-        return Err(format!(
-            "iLO did not send AUTHENTICATE (got 0x{:02x})",
-            first.first().copied().unwrap_or(0)
-        ));
-    }
-    up.send(TwsMsg::Binary(hello_frame(channel, &session.session_key).into()))
-        .await
-        .map_err(|e| e.to_string())?;
-    let auth = recv_bytes(up).await?;
-    let status = auth.first().copied().unwrap_or(0);
-    if status == BUSY || status == BUSY_NO_MURC {
-        up.send(TwsMsg::Binary(vec![SEIZE, 0].into()))
-            .await
-            .map_err(|e| e.to_string())?;
-        let auth2 = recv_bytes(up).await?;
-        let s2 = auth2.first().copied().unwrap_or(0);
-        if s2 != AUTH_OK {
-            return Err(format!("iLO seize status {s2}"));
-        }
-        return Ok(());
-    }
-    if status != AUTH_OK {
-        return Err(format!("iLO handshake status {status}"));
-    }
-    Ok(())
-}
-
 /// Relay one browser <-> iLO KVM session (single viewer).
+///
+/// The relay is **transparent**: iLO's HTML5 console performs the DVCNET
+/// handshake *itself* in the browser (socket.js `sockrecv_auth` expects to
+/// receive CMD_AUTHENTICATE(80), reply with the 34-byte session-key hello, and
+/// receive CMD_AUTHENTICATED(82)). TCS must NOT do that handshake on the
+/// server side — doing so consumes the 80 the browser needs and hands it video
+/// bytes first, which iLO's `IRC_SERVER_HELLO` parses as a bogus status and
+/// reports as "Handshake error". So we just bridge raw bytes both directions.
 pub async fn run_kvm(_state: AppState, session: IloSession, mut socket: WebSocket) {
     let url = upstream_url(&session.bmc_host);
-    let mut up = match connect_upstream(&url, &session).await {
+    let up = match connect_upstream(&url, &session).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "iLO KVM upstream connect failed");
@@ -181,17 +130,10 @@ pub async fn run_kvm(_state: AppState, session: IloSession, mut socket: WebSocke
         }
     };
 
-    const CHANNEL: u8 = 1; // KVM channel
-    if let Err(e) = bmc_handshake(&mut up, &session, CHANNEL).await {
-        tracing::warn!(error = %e, "iLO KVM handshake failed");
-        let _ = socket.send(Message::Close(None)).await;
-        return;
-    }
-
     let (mut browser_tx, mut browser_rx) = socket.split();
     let (mut up_tx, mut up_rx) = up.split();
 
-    // browser -> upstream (HID keyboard/mouse).
+    // browser -> upstream (handshake hello + HID keyboard/mouse + video control).
     let to_up = tokio::spawn(async move {
         while let Some(Ok(msg)) = browser_rx.next().await {
             let bytes = match msg {
@@ -205,9 +147,8 @@ pub async fn run_kvm(_state: AppState, session: IloSession, mut socket: WebSocke
         }
     });
 
-    // upstream -> browser (video + CMD). Ends when the iLO drops the stream OR
-    // the browser disconnects (a send to a closed socket fails) — so awaiting it
-    // is the "session over" signal for both directions.
+    // upstream -> browser (CMD_AUTHENTICATE, CMD_AUTHENTICATED, then video/CMD).
+    // Ends when the iLO drops the stream OR the browser disconnects.
     let to_browser = tokio::spawn(async move {
         while let Some(Ok(msg)) = up_rx.next().await {
             if let TwsMsg::Binary(b) = msg {

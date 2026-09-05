@@ -238,12 +238,24 @@ async fn probe_and_update(
         None => None,
     };
 
-    let version = {
-        // Prefer the Siderolink tunnel IP when connected; else the LAN address.
+    // Resolve a working endpoint: prefer the SideroLink tunnel IP, fall back to
+    // the LAN address. The IPv6 tunnel can flap momentarily (all of a cluster's
+    // nodes drop at once), which would mass-flap their status. A node is only
+    // counted as a failed probe if it's unreachable via BOTH paths.
+    let (version, working_endpoint) = {
         let endpoint = crate::controllers::cluster::effective_endpoint(pool, &machine)
             .await
             .unwrap_or_else(|_| machine.address.clone());
-        TalosctlClient::get_version(&endpoint, talosconfig.as_deref()).await
+        match TalosctlClient::get_version(&endpoint, talosconfig.as_deref()).await {
+            Ok(v) => (Ok(v), endpoint),
+            Err(_) if endpoint != machine.address => {
+                // Tunnel endpoint failed; try the LAN address.
+                let lan = machine.address.clone();
+                let res = TalosctlClient::get_version(&lan, talosconfig.as_deref()).await;
+                (res, lan)
+            }
+            Err(e) => (Err(e), endpoint),
+        }
     };
 
     let mut updated = machine;
@@ -255,13 +267,10 @@ async fn probe_and_update(
 
             // Capture the node's Talos MUID once so the SideroLink peer (keyed by
             // MUID) can correlate back to this machine. Only fetched while the
-            // MUID is empty and the node is reachable (LAN or tunnel).
+            // MUID is empty and the node is reachable (via the working endpoint).
             if updated.muid.is_empty() {
-                let endpoint = crate::controllers::cluster::effective_endpoint(pool, &updated)
-                    .await
-                    .unwrap_or_else(|_| updated.address.clone());
                 if let Ok(Some(muid)) =
-                    TalosctlClient::get_muid(&endpoint, talosconfig.as_deref()).await
+                    TalosctlClient::get_muid(&working_endpoint, talosconfig.as_deref()).await
                 {
                     if let Ok(true) = repos::machine::set_muid(pool, machine_id, &muid).await {
                         info!(
