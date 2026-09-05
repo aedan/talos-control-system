@@ -227,6 +227,13 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
             post(ilo_console_handlers::close_console_session),
         )
         .route("/machines/:id/console/sol", get(ilo_console_handlers::sol_ws))
+        // iDRAC auto-login: the TCS browser extension redeems a single-use
+        // token (from the iDRAC login page's #tcs fragment) for this machine's
+        // iDRAC creds. Self-authenticating; exempted from RBAC in middleware.
+        .route(
+            "/machines/:id/console/idrac-autologin/redeem",
+            post(ilo_console_handlers::idrac_autologin_redeem),
+        )
         // Empty-tail asset route: the iframe loads `/console/{sid}` (no trailing
         // segment) as the console root. matchit's `*path` catch-all doesn't
         // reliably match zero segments, so register the bare path explicitly —

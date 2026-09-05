@@ -34,6 +34,7 @@
   let consoleEmbed = $state('');
   let consoleSid = $state('');
   let consoleIdracUrl = $state('');
+  let consoleIdracAutologinUrl = $state('');
   let consoleError = $state('');
   let versions = $state<MachineVersions | null>(null);
   let extensions = $state<MachineExtension[]>([]);
@@ -392,7 +393,14 @@
       consoleSid = res.sessionId || '';
       consoleEmbed = res.embedUrl || '';
       consoleIdracUrl = res.idracConsoleUrl || '';
+      consoleIdracAutologinUrl = res.idracAutologinUrl || '';
       consoleOpen = true;
+      if (res.mode === 'sol' && res.idracAutologinUrl) {
+        // Dell: open the iDRAC in a new tab so the TCS auto-login extension can
+        // sign the user in and show the real video console. SOL stays inline as
+        // a fallback if the iDRAC tab isn't usable.
+        window.open(res.idracAutologinUrl, '_blank', 'noopener');
+      }
       if (res.mode === 'sol') {
         // SOL output banner (informational, not an error). The terminal is
         // mounted by the solContainer action when the div appears.
@@ -415,6 +423,7 @@
     consoleEmbed = '';
     consoleSid = '';
     consoleIdracUrl = '';
+    consoleIdracAutologinUrl = '';
     consoleError = '';
   }
 
@@ -1486,7 +1495,10 @@ cluster:
           {#if consoleMode === 'sol'}<span class="badge">SOL</span>{/if}
         </span>
         <span class="console-actions">
-          {#if consoleMode === 'sol' && consoleIdracUrl}
+          {#if consoleMode === 'sol' && consoleIdracAutologinUrl}
+            <a class="console-link" href={consoleIdracAutologinUrl} target="_blank" rel="noopener"
+               title="Open the iDRAC (auto-login) in a new tab for the video console">iDRAC video console ↗</a>
+          {:else if consoleMode === 'sol' && consoleIdracUrl}
             <a class="console-link" href={consoleIdracUrl} target="_blank" rel="noopener"
                title="Open Dell's native iDRAC console in a new tab">iDRAC console ↗</a>
           {/if}
@@ -1496,6 +1508,12 @@ cluster:
       <div class="console-body">
         {#if consoleError}
           <div class="console-error">{consoleError}</div>
+        {/if}
+        {#if consoleMode === 'sol' && consoleIdracAutologinUrl}
+          <div class="console-hint">
+            The iDRAC <b>video console</b> opened in a new tab (auto-login via the
+            TCS extension). Below is the <b>SOL serial terminal</b> as a fallback.
+          </div>
         {/if}
         {#if consoleMode === 'ilo'}
           <iframe class="ilo-frame" src={consoleEmbed} title="iLO remote console"></iframe>
@@ -1925,14 +1943,18 @@ cluster:
     padding: 0.35rem 0.6rem; border: 1px solid var(--tcs-border); border-radius: 6px;
   }
   .console-link:hover { background: rgba(96,165,250,0.1); }
-  .console-body { flex: 1; position: relative; overflow: hidden; }
+  .console-body { flex: 1; position: relative; overflow: hidden; display: flex; flex-direction: column; }
+  .console-hint {
+    flex: 0 0 auto; padding: 0.35rem 0.75rem; font-size: 0.78rem; line-height: 1.3;
+    color: #bae6fd; background: rgba(14,165,233,0.12); border-bottom: 1px solid rgba(14,165,233,0.25);
+  }
   .console-error {
     position: absolute; top: 0.5rem; left: 50%; transform: translateX(-50%);
     z-index: 2; background: rgba(248,113,113,0.15); color: #fecaca;
     border: 1px solid rgba(248,113,113,0.4); border-radius: 6px;
     padding: 0.3rem 0.8rem; font-size: 0.8rem; max-width: 80%;
   }
-  .ilo-frame { width: 100%; height: 100%; border: 0; background: #000; display: block; }
-  .sol-term { width: 100%; height: 100%; padding: 0.25rem; background: #0b0e14; }
+  .ilo-frame { width: 100%; flex: 1 1 auto; min-height: 0; border: 0; background: #000; display: block; }
+  .sol-term { width: 100%; flex: 1 1 auto; min-height: 0; padding: 0.25rem; background: #0b0e14; }
   .console-empty { color: var(--tcs-text-muted); padding: 2rem; text-align: center; }
 </style>

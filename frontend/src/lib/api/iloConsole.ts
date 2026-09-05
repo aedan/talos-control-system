@@ -20,6 +20,7 @@ export interface ConsoleSession {
   sessionId: string | null;
   embedUrl: string | null;
   idracConsoleUrl: string | null;
+  idracAutologinUrl: string | null;
   shared: boolean | null;
   viewers: number | null;
   error: string | null;

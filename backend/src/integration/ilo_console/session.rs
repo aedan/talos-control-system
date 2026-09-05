@@ -66,6 +66,10 @@ pub struct ConsoleSessionResponse {
     pub shared: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub viewers: Option<u32>,
+    /// iDRAC login URL (https://<idrac>/login.html#tcs=<single-use token>) that a
+    /// TCS auto-login browser extension opens to fill + submit the iDRAC form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idrac_autologin_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

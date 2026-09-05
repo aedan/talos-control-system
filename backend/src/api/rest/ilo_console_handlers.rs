@@ -16,6 +16,8 @@ use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 use crate::auth::jwt::verify_jwt;
+use crate::auth::jwt::{create_jwt, create_claims};
+use std::time::Duration;
 
 use crate::integration::bmc::{IpmiClient, BmcCredentials};
 use crate::integration::ilo_console::{asset, kvm, session};
@@ -54,6 +56,110 @@ pub struct ForceQuery {
     force: bool,
 }
 
+/// Single-use nonces for iDRAC auto-login tokens. A nonce is burned the first
+/// time it is redeemed, so a token in a URL fragment can only fetch creds once.
+/// Bounded: prune entries older than 15 min to avoid unbounded growth.
+static REDEEMED_NONCES: std::sync::LazyLock<std::sync::Mutex<Vec<(String, std::time::Instant)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+const NONCE_TTL: Duration = Duration::from_secs(900);
+
+fn nonce_burned(nonce: &str) -> bool {
+    let mut v = REDEEMED_NONCES.lock().unwrap();
+    let cutoff = std::time::Instant::now() - NONCE_TTL;
+    v.retain(|(_, t)| *t > cutoff);
+    v.iter().any(|(n, _)| n == nonce)
+}
+
+fn nonce_burn(nonce: &str) {
+    let mut v = REDEEMED_NONCES.lock().unwrap();
+    v.push((nonce.to_string(), std::time::Instant::now()));
+}
+
+/// Mint the iDRAC auto-login URL for a Dell machine: a 120s single-use JWT
+/// (sub = `idrac-autologin:<machine_id>:<nonce>`) embedded in the login page's
+/// URL fragment (`#tcs=<token>`). The fragment is never sent to the iDRAC, and
+/// the redeem endpoint burns the nonce so the token is one-shot.
+async fn mint_idrac_autologin_url(
+    m: &crate::db::models::machine::Machine,
+    user: &str,
+) -> Option<String> {
+    let nonce = Uuid::new_v4().to_string();
+    let subject = format!("idrac-autologin:{}:{}", m.id, nonce);
+    let claims = create_claims(&subject, "idrac-autologin", Duration::from_secs(120));
+    let token = create_jwt(&claims).ok()?;
+    let base = session::idrac_console_url(&m.bmc_address);
+    // The fragment (#tcs=…&m=…) is never sent to the iDRAC; the TCS auto-login
+    // extension reads it to redeem the token for this machine's creds.
+    Some(format!("{base}#tcs={token}&m={}", m.id))
+}
+
+/// POST /machines/:id/console/idrac-autologin/redeem
+///
+/// Redeem a single-use auto-login token (sent in the request body by the TCS
+/// browser extension, which read it from the iDRAC login page's `#tcs` fragment)
+/// for this machine's iDRAC credentials. The JWT must have role
+/// `idrac-autologin` and its embedded machine id must match the path; the nonce
+/// is burned so a token works exactly once.
+pub async fn idrac_autologin_redeem(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<IdracRedeemBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = body.token.trim().to_string();
+    if token.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "missing token".into()));
+    }
+    let data = verify_jwt(&token).map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?;
+    if data.claims.role != "idrac-autologin" {
+        return Err((StatusCode::FORBIDDEN, "not an autologin token".into()));
+    }
+    // sub = "idrac-autologin:<machine_id>:<nonce>"
+    let rest = data
+        .claims
+        .sub
+        .strip_prefix("idrac-autologin:")
+        .ok_or_else(|| (StatusCode::FORBIDDEN, "malformed token".into()))?;
+    let (tok_machine, nonce) = rest
+        .rsplit_once(':')
+        .ok_or_else(|| (StatusCode::FORBIDDEN, "malformed token".into()))?;
+    let tok_machine: Uuid = tok_machine
+        .parse()
+        .map_err(|_| (StatusCode::FORBIDDEN, "malformed token".into()))?;
+    if tok_machine != id {
+        return Err((StatusCode::FORBIDDEN, "token for a different machine".into()));
+    }
+    if nonce_burned(nonce) {
+        return Err((StatusCode::FORBIDDEN, "token already used".into()));
+    }
+    let m = crate::db::repos::machine::get(&state.db_pool, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Machine not found".into()))?;
+    if m.bmc_type != "redfish" {
+        return Err((StatusCode::BAD_REQUEST, "machine has no iDRAC".into()));
+    }
+    let enc = m
+        .bmc_password_enc
+        .as_ref()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "BMC password not configured".into()))?;
+    let plain = crate::utils::secrets::decrypt(&state.config.auth.jwt_secret, enc)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    nonce_burn(nonce);
+    let host = session::bmc_host(&m.bmc_address);
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "username": m.bmc_username,
+        "password": plain,
+        "idracHost": host,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct IdracRedeemBody {
+    token: String,
+}
+
 /// POST /machines/:id/console/session
 ///
 /// Mint (or reuse) an iLO console session. Falls back to SOL mode if the BMC is
@@ -80,6 +186,7 @@ pub async fn create_console_session(
                 session_id: None,
                 embed_url: None,
                 idrac_console_url: None,
+                idrac_autologin_url: None,
                 shared: None,
                 viewers: None,
                 error: Some(msg),
@@ -95,6 +202,13 @@ pub async fn create_console_session(
     // (serial-over-LAN, which TCS can drive) plus a new-tab iDRAC link.
     if is_dell {
         let idrac_url = Some(session::idrac_console_url(&m.bmc_address));
+        // Auto-login URL: a short-lived, single-use token embedded in the iDRAC
+        // login page's URL fragment. The TCS auto-login browser extension reads
+        // it, redeems it against /console/idrac-autologin/redeem for this
+        // machine's iDRAC creds, and fills + submits the form (real browser TLS,
+        // so the iDRAC's bot-gate is satisfied). See the extension under
+        // frontend/extension/.
+        let autologin_url = mint_idrac_autologin_url(&m, &claims.sub).await;
         audit(&state, &claims.sub, "sol_console_offer", &id.to_string(), &m.bmc_address).await;
         return Ok(Json(session::ConsoleSessionResponse {
             ok: true,
@@ -102,6 +216,7 @@ pub async fn create_console_session(
             session_id: None,
             embed_url: None,
             idrac_console_url: idrac_url,
+            idrac_autologin_url: autologin_url,
             shared: None,
             viewers: None,
             error: None,
@@ -120,6 +235,7 @@ pub async fn create_console_session(
                 session_id: Some(sid),
                 embed_url: Some(embed),
                 idrac_console_url: None,
+                idrac_autologin_url: None,
                 shared: Some(shared),
                 viewers: Some(1),
                 error: None,
@@ -133,6 +249,7 @@ pub async fn create_console_session(
                 session_id: None,
                 embed_url: None,
                 idrac_console_url: None,
+                idrac_autologin_url: None,
                 shared: None,
                 viewers: None,
                 error: Some(format!("iLO console unavailable; using SOL: {e}")),

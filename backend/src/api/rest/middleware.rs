@@ -130,6 +130,13 @@ pub async fn rbac_middleware(
         return next.run(request).await;
     }
 
+    // The iDRAC auto-login redeem endpoint is called cross-origin by the TCS
+    // browser extension (no TCS auth header); it self-authenticates via the
+    // single-use autologin JWT in the request body. Bypass RBAC here.
+    if uri.contains("/console/idrac-autologin/redeem") {
+        return next.run(request).await;
+    }
+
     let claims = match extract_claims_from_request(&request) {
         Some(c) => c,
         None => {
