@@ -89,7 +89,10 @@ pub async fn create_console_session(
 
     let is_dell = m.bmc_type == "redfish";
 
-    // Dell iDRAC: no iLO JSON API. Go straight to SOL + a new-tab iDRAC link.
+    // Dell iDRAC: the HTML5 KVM video console is TLS-fingerprint/bot-gated to
+    // real browsers (a server-side client gets 404 on the login page / viewer
+    // assets), so TCS cannot proxy it the way it proxies iLO. Offer SOL
+    // (serial-over-LAN, which TCS can drive) plus a new-tab iDRAC link.
     if is_dell {
         let idrac_url = Some(session::idrac_console_url(&m.bmc_address));
         audit(&state, &claims.sub, "sol_console_offer", &id.to_string(), &m.bmc_address).await;
