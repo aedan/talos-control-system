@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.69] — 2026-09-06
+
+### Fixed
+- **iDRAC 7 Console menu disappeared again after 0.5.68.** Forcing `lsnb.html` on an interval, wrapping `tcsTop` in a `Proxy`, and rewriting every `parent.*` raced the frameset: session/locale/`treelist.html` never ran and the spinner returned. Restored the 0.5.67 load path. Content-frame navigations still go through `tcsNav("da"|"lsnb", url)` so menu clicks stay on the console prefix.
+
 ## [0.5.68] — 2026-09-06
 
 ### Fixed
