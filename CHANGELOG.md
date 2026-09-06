@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.62] — 2026-09-06
+
+### Fixed
+- **iDRAC 7 "session table full" on Console.** 12G iDRAC caps concurrent user sessions (this R720 was holding 8 leaked `root` sessions from earlier probes). Before `/data/login`, TCS now DELETEs leftover `/redfish/v1/Sessions` with basic auth, retries once after a table-full response, and does not fall through to iDRAC 9 / GetKVMSession (which only burns more slots). Failed viewer probes log out so the slot is not leaked.
+
 ## [0.5.61] — 2026-09-06
 
 ### Fixed

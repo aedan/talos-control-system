@@ -217,7 +217,16 @@ async fn login_idrac(host: &str, username: &str, password: &str) -> Result<Login
 
     match idrac7_data_login(host, username, password).await {
         Ok(r) => return Ok(r),
-        Err(e) => errors.push(format!("iDRAC7/8 login: {e}")),
+        Err(e) => {
+            let msg = e.to_string();
+            errors.push(format!("iDRAC7/8 login: {e}"));
+            // Session-full / bad-password on /data/login means this *is* an
+            // iDRAC 7/8. Falling through to iDRAC 9 / GetKVMSession only
+            // burns more session slots.
+            if msg.contains("session table full") || msg.contains("login rejected") {
+                return Err(AppError::Network(errors.join("; ")));
+            }
+        }
     }
     match idrac9_session_login(host, username, password).await {
         Ok(r) => return Ok(r),
@@ -232,6 +241,47 @@ async fn login_idrac(host: &str, username: &str, password: &str) -> Result<Login
         "iDRAC HTML5 console login failed ({})",
         errors.join("; ")
     )))
+}
+
+/// Drop leftover GUI/Redfish sessions so `/data/login` has a free slot.
+/// iDRAC 7 caps concurrent user sessions (often 4–8); TCS probes and failed
+/// console opens leak them. DELETE via `/redfish/v1/Sessions` with basic auth.
+async fn clear_idrac_sessions(origin: &str, username: &str, password: &str) {
+    let client = match api_client() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let list = client
+        .get(format!("{origin}/redfish/v1/Sessions"))
+        .basic_auth(username, Some(password))
+        .header("Accept", "application/json")
+        .send()
+        .await;
+    let Ok(resp) = list else { return };
+    if !resp.status().is_success() {
+        return;
+    }
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    let members = body
+        .get("Members")
+        .and_then(|m| m.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for m in members {
+        let Some(id) = m.get("@odata.id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let url = if id.starts_with("http") {
+            id.to_string()
+        } else {
+            format!("{origin}{id}")
+        };
+        let _ = client
+            .delete(&url)
+            .basic_auth(username, Some(password))
+            .send()
+            .await;
+    }
 }
 
 async fn redfish_kvm_launch(
@@ -466,11 +516,21 @@ async fn idrac7_data_login(
     password: &str,
 ) -> Result<LoginResult, AppError> {
     let origin = bmc_origin(host);
+    // Free leaked GUI sessions *before* the first /data/login. Trying rustls
+    // then OpenSSL after a "table full" error just burns more slots.
+    clear_idrac_sessions(&origin, username, password).await;
+
     let mut last_tls_err = None;
     for native in [false, true] {
         match idrac7_data_login_with(native, &origin, username, password).await {
             Ok(r) => return Ok(r),
-            Err(e) => last_tls_err = Some(e),
+            Err(e) => {
+                let msg = e.to_string();
+                last_tls_err = Some(e);
+                if msg.contains("session table full") || msg.contains("login rejected") {
+                    break;
+                }
+            }
         }
     }
     Err(last_tls_err.unwrap_or_else(|| AppError::Network("iDRAC7/8 login failed".into())))
@@ -483,14 +543,6 @@ async fn idrac7_data_login_with(
     password: &str,
 ) -> Result<LoginResult, AppError> {
     let client = gui_client(native)?;
-
-    // Prime a session and prove HTML is reachable (gzip required on iDRAC 7).
-    let _ = client
-        .get(format!("{origin}/start.html?console"))
-        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        .header("Accept-Language", "en-US,en;q=0.9")
-        .send()
-        .await;
 
     let form = format!(
         "user={}&password={}",
@@ -518,12 +570,7 @@ async fn idrac7_data_login_with(
         }
         let result = auth_result(&text);
         if result == Some(5) && attempt == 0 {
-            // Session table full from a previous TCS attempt — free our slot.
-            let _ = client
-                .get(format!("{origin}/data/logout"))
-                .header("Cookie", cookie_header(&cookies).unwrap_or_default())
-                .send()
-                .await;
+            clear_idrac_sessions(origin, username, password).await;
             cookies.clear();
             continue;
         }
@@ -560,15 +607,23 @@ async fn idrac7_data_login_with(
     // index.html JS parses ST1/ST2 out of window.location.href; ST2 must be last.
     let viewer_path = format!("/index.html?ST1={st1},ST2={st2}");
 
-    let (use_native_tls, cookies) =
-        probe_viewer(origin, &viewer_path, &cookies, None).await?;
-    Ok(LoginResult {
-        cookies,
-        x_auth_token: None,
-        viewer_path,
-        redfish_session_uri: None,
-        use_native_tls: use_native_tls || native,
-    })
+    match probe_viewer(origin, &viewer_path, &cookies, None).await {
+        Ok((use_native_tls, cookies)) => Ok(LoginResult {
+            cookies,
+            x_auth_token: None,
+            viewer_path,
+            redfish_session_uri: None,
+            use_native_tls: use_native_tls || native,
+        }),
+        Err(e) => {
+            let _ = client
+                .get(format!("{origin}/data/logout"))
+                .header("Cookie", cookie_header(&cookies).unwrap_or_default())
+                .send()
+                .await;
+            Err(e)
+        }
+    }
 }
 
 fn auth_result(xml: &str) -> Option<u32> {
