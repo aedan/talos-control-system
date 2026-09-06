@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.73] — 2026-09-06
+
+### Fixed
+- **iDRAC 7 Console still showed a spinner after System Summary had actually loaded.** v0.5.72 requests `sysSummary.html` / `sysSummaryData.html`. That page calls `progressBar.show()` and only hides it when `top.isCustomGui == 1` (custom OEM GUI). Stock 12G never hits that branch, so the overlay spinner stays on top of the summary iframe. TCS now always dismisses that overlay, and `tcsTop` walks ancestors for `localeObj` so `sysSummary.jsesp` can run.
+
 ## [0.5.72] — 2026-09-06
 
 ### Fixed
