@@ -78,8 +78,11 @@ pub fn is_safe_idrac_path(path: &str) -> bool {
 /// Build the injected rewrite script + `<base>` for a viewer HTML document.
 pub fn inject_prefix_hooks(html: &str, prefix: &str) -> String {
     let pfx = prefix.trim_end_matches('/');
+    // iDRAC 7 child frames use `top.TOKEN_VALUE` / `top.snb` / `top.treelist`
+    // expecting index.html to be the browsing-context top. Inside TCS it is
+    // not, so we expose `tcsTop` as the nearest window still on this session.
     let script = format!(
-        r#"<script>(function(){{var P="{pfx}";function f(u){{if(typeof u!=="string")return u;if(u.charAt(0)==="/"&&u.indexOf(P)!==0&&u.indexOf("//")!==0)return P+u;return u;}}try{{var OF=window.fetch;window.fetch=function(u,o){{if(typeof u==="string")u=f(u);else if(u&&u.url){{try{{u=new Request(f(u.url),u)}}catch(e){{}}}}return OF.call(this,u,o);}};var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){{arguments[1]=f(u);return xo.apply(this,arguments);}};var OW=window.WebSocket;window.WebSocket=function(u,p){{try{{var x=new URL(u,location.href);x.protocol=location.protocol==="https:"?"wss:":"ws:";if(x.port==="5900"||x.port==="5901"||x.port==="5902"){{x.host=location.host;x.pathname=P+"/__rfb/"+x.port;}}else{{x.host=location.host;if(x.pathname.indexOf(P)!==0)x.pathname=P+x.pathname;}}u=x.toString();}}catch(e){{}}return p!==undefined?new OW(u,p):new OW(u);}};window.WebSocket.prototype=OW.prototype;window.WebSocket.CONNECTING=OW.CONNECTING;window.WebSocket.OPEN=OW.OPEN;window.WebSocket.CLOSING=OW.CLOSING;window.WebSocket.CLOSED=OW.CLOSED;if(window.Worker){{var Wr=window.Worker;window.Worker=function(u,o){{return new Wr(f(u),o);}};}}var sa=HTMLElement.prototype.setAttribute;HTMLElement.prototype.setAttribute=function(n,v){{if((n==="src"||n==="href"||n==="action")&&typeof v==="string")v=f(v);return sa.call(this,n,v);}};}}catch(e){{}}}})();</script>"#
+        r#"<script>(function(){{function tcsTopGet(){{var w=window;try{{while(w.parent&&w.parent!==w){{if(w.parent===window.top)break;try{{var p=w.parent.location.pathname||"";if(p.indexOf("/console/idrac_")<0)break;}}catch(e){{break;}}w=w.parent;}}}}catch(e){{}}return w;}}try{{Object.defineProperty(window,"tcsTop",{{get:tcsTopGet}});}}catch(e){{window.tcsTop=tcsTopGet();}}var P="{pfx}";function f(u){{if(typeof u!=="string")return u;if(u.charAt(0)==="/"&&u.indexOf(P)!==0&&u.indexOf("//")!==0)return P+u;return u;}}try{{var OF=window.fetch;window.fetch=function(u,o){{if(typeof u==="string")u=f(u);else if(u&&u.url){{try{{u=new Request(f(u.url),u)}}catch(e){{}}}}return OF.call(this,u,o);}};var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){{arguments[1]=f(u);return xo.apply(this,arguments);}};var OW=window.WebSocket;window.WebSocket=function(u,p){{try{{var x=new URL(u,location.href);x.protocol=location.protocol==="https:"?"wss:":"ws:";if(x.port==="5900"||x.port==="5901"||x.port==="5902"){{x.host=location.host;x.pathname=P+"/__rfb/"+x.port;}}else{{x.host=location.host;if(x.pathname.indexOf(P)!==0)x.pathname=P+x.pathname;}}u=x.toString();}}catch(e){{}}return p!==undefined?new OW(u,p):new OW(u);}};window.WebSocket.prototype=OW.prototype;window.WebSocket.CONNECTING=OW.CONNECTING;window.WebSocket.OPEN=OW.OPEN;window.WebSocket.CLOSING=OW.CLOSING;window.WebSocket.CLOSED=OW.CLOSED;if(window.Worker){{var Wr=window.Worker;window.Worker=function(u,o){{return new Wr(f(u),o);}};}}var sa=HTMLElement.prototype.setAttribute;HTMLElement.prototype.setAttribute=function(n,v){{if((n==="src"||n==="href"||n==="action")&&typeof v==="string")v=f(v);return sa.call(this,n,v);}};}}catch(e){{}}}})();</script>"#
     );
     let base = format!("<base href=\"{pfx}/\">");
     let hook = format!("{script}{base}");
@@ -158,7 +161,20 @@ fn neutralize_idrac_framebust(text: &str) -> String {
         r#"(?i)\b(?:window\s*\.\s*)?(?:top|parent)\s*\.\s*(?:document\s*\.\s*)?location\s*\.\s*(?:replace|assign)\s*\("#,
     )
     .expect("idrac top-nav replace");
-    replace_call.replace_all(&t, "void (").into_owned()
+    let t = replace_call.replace_all(&t, "void (").into_owned();
+    rewrite_top_to_idrac_root(&t)
+}
+
+/// Child-frame JS uses the identifier `top` for index.html state (`top.snb`,
+/// `top.TOKEN_VALUE`, `eval("top."+…)`). `window.top` cannot be redefined, so
+/// rewrite those reads onto `tcsTop` (injected as the iDRAC frameset window).
+/// Do not match `.top` (CSS `style.top` / `vertical-align: top` is a different
+/// token — only `top.` / `top[` as a bare identifier).
+fn rewrite_top_to_idrac_root(text: &str) -> String {
+    let dot = regex::Regex::new(r"(^|[^.\w$])top\.").expect("idrac top-dot");
+    let t = dot.replace_all(text, "${1}tcsTop.").into_owned();
+    let bracket = regex::Regex::new(r"(^|[^.\w$])top\[").expect("idrac top-bracket");
+    bracket.replace_all(&t, "${1}tcsTop[").into_owned()
 }
 
 fn rewrite_attr_slash_urls(text: &str, pfx: &str) -> String {
@@ -202,13 +218,21 @@ pub fn apply_rewrites(path: &str, ctype: &str, body: &[u8], prefix: &str, bmc_ho
     let mut text = String::from_utf8_lossy(body).into_owned();
     text = neutralize_idrac_framebust(&text);
     text = rewrite_absolute_urls(&text, prefix, bmc_host);
-    let is_html = ctype.contains("html")
-        || name.ends_with(".html")
-        || path.is_empty()
-        || path == "console"
-        || path.starts_with("console?")
-        || text.trim_start().to_ascii_lowercase().starts_with("<!doctype")
-        || text.trim_start().to_ascii_lowercase().starts_with("<html");
+    // iDRAC 7 serves `functions.jsesp` as text/html. Injecting <base>/<script>
+    // into it makes the file unparseable as JS and the da frame never leaves
+    // blankLoading.html.
+    let looks_like_script = name.ends_with(".js")
+        || name.ends_with(".jsesp")
+        || ctype.contains("javascript")
+        || ctype.contains("ecmascript");
+    let is_html = !looks_like_script
+        && (ctype.contains("html")
+            || name.ends_with(".html")
+            || path.is_empty()
+            || path == "console"
+            || path.starts_with("console?")
+            || text.trim_start().to_ascii_lowercase().starts_with("<!doctype")
+            || text.trim_start().to_ascii_lowercase().starts_with("<html"));
     if is_html {
         text = inject_prefix_hooks(&text, prefix);
         text = inject_heartbeat(&text);
@@ -579,6 +603,35 @@ mod tests {
         assert!(!out.contains("top.location.replace("));
         assert!(out.contains(r#"void ("/sclogin.html")"#));
         assert!(out.contains(r#"tcsNoop = "/login.html""#));
+    }
+
+    #[test]
+    fn top_identifier_rewritten_to_tcs_top() {
+        let js = r#"lookup = top.treelist.Lookup; eval("top." + name); top.snb.f_getHTML(cat); el.style.top = "0"; vertical-align: top;"#;
+        let out = neutralize_idrac_framebust(js);
+        assert!(out.contains("tcsTop.treelist.Lookup"));
+        assert!(out.contains(r#"eval("tcsTop." + name)"#));
+        assert!(out.contains("tcsTop.snb.f_getHTML"));
+        assert!(out.contains(r#"el.style.top = "0""#));
+        assert!(out.contains("vertical-align: top;"));
+        assert!(!out.contains("top.treelist"));
+    }
+
+    #[test]
+    fn jsesp_not_html_injected() {
+        let js = b"if(typeof(top.ssnObj) != \"undefined\") { var x = top.localeObj['btn_ok']; }";
+        let out = apply_rewrites(
+            "functions.jsesp",
+            "text/html",
+            js,
+            "/api/machines/m/console/idrac_abc",
+            "10.0.0.5",
+        );
+        let s = String::from_utf8(out).unwrap();
+        assert!(!s.contains("<base "));
+        assert!(!s.contains("<script>"));
+        assert!(s.contains("tcsTop.ssnObj"));
+        assert!(s.contains("tcsTop.localeObj"));
     }
 
     #[test]

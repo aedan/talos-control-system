@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.67] — 2026-09-06
+
+### Fixed
+- **iDRAC 7 Console chrome loaded but the content pane spun forever.** Child frames (`treelist.html`, `snb.html`, `functions.jsesp`) read `top.TOKEN_VALUE` / `top.snb` / `top.treelist` expecting `index.html` to be the window top. Inside TCS that is the app, so `sysSummary.html` never replaces `blankLoading.html`. Proxied JS now uses `tcsTop` (the iDRAC frameset). Also stop HTML-injecting `functions.jsesp`, which iDRAC serves as `text/html`.
+
 ## [0.5.66] — 2026-09-06
 
 ### Fixed
