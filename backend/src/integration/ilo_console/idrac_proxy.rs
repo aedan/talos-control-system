@@ -129,6 +129,22 @@ pub fn rewrite_absolute_urls(text: &str, prefix: &str, bmc_host: &str) -> String
     t
 }
 
+/// iDRAC 7 `CheckTop()` does `top.document.location.href.search('index')` and
+/// if missing sends the *top* window to `/start.html`. Inside TCS the top
+/// window is the TCS app (no `index` in the URL), so a successful login is
+/// immediately replaced by the iDRAC login page. Force the check to pass.
+fn neutralize_idrac_framebust(text: &str) -> String {
+    text.replace(
+        "if ( top.document.location.href.search('index') < 0 )",
+        "if ( false )",
+    )
+    .replace("if (top.frames.length >= 1)", "if (false)")
+    .replace("if(top.frames.length>=1)", "if(false)")
+    .replace("if (top != self)", "if (false)")
+    .replace("if (top !== self)", "if (false)")
+    .replace("if(top!=self)", "if(false)")
+}
+
 fn rewrite_attr_slash_urls(text: &str, pfx: &str) -> String {
     let re = regex::Regex::new(
         r#"(?i)(\b(?:src|href|action|poster|data-src|data-href)\s*=\s*["'])(/[^"']*)"#,
@@ -168,6 +184,7 @@ pub fn apply_rewrites(path: &str, ctype: &str, body: &[u8], prefix: &str, bmc_ho
         return body.to_vec();
     }
     let mut text = String::from_utf8_lossy(body).into_owned();
+    text = neutralize_idrac_framebust(&text);
     text = rewrite_absolute_urls(&text, prefix, bmc_host);
     let is_html = ctype.contains("html")
         || name.ends_with(".html")
@@ -526,6 +543,14 @@ mod tests {
         assert_eq!(parse_rel_from_uri(p, "idrac_abc"), "restgui/foo.js");
         let p = "/api/machines/111/console/idrac_abc";
         assert_eq!(parse_rel_from_uri(p, "idrac_abc"), "");
+    }
+
+    #[test]
+    fn checktop_neutralized() {
+        let js = "function CheckTop()\n{\n\t\tif ( top.document.location.href.search('index') < 0 )\n\t\t{\n\t\t\t\ttop.document.location.href = \"/start.html\";\n";
+        let out = neutralize_idrac_framebust(js);
+        assert!(out.contains("if ( false )"));
+        assert!(!out.contains("if ( top.document.location.href.search('index') < 0 )"));
     }
 
     #[test]

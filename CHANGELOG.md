@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.65] — 2026-09-06
+
+### Fixed
+- **iDRAC 7 Console dumped you at the login page right after a successful login.** `functions.js` `CheckTop()` tests `top.document.location.href` for `index`. In the TCS overlay `top` is the TCS app, not `index.html`, so it navigates to `/start.html` / `/login.html`. That check is now disabled in proxied JS.
+
 ## [0.5.64] — 2026-09-06
 
 ### Fixed
