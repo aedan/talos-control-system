@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.63] — 2026-09-06
+
+### Fixed
+- **iDRAC 7 Console spinner never finished.** The 12G UI's `/session?getSsnVar=…` API returns the login HTML unless the `ST2` session token is sent as an HTTP *header* (query-string ST2 is ignored). Child frames don't have `ST2=` in `location.href`, so the JS never set the header. TCS now attaches `ST1`/`ST2` from the login `forwardUrl` on every proxied request and does not HTML-rewrite `/session` or `/data` API bodies.
+
 ## [0.5.62] — 2026-09-06
 
 ### Fixed

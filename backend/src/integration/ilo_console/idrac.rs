@@ -633,7 +633,7 @@ fn auth_result(xml: &str) -> Option<u32> {
     lower[start..start + end].trim().parse().ok()
 }
 
-fn parse_st_tokens(xml: &str) -> Option<(String, String)> {
+pub(crate) fn parse_st_tokens(xml: &str) -> Option<(String, String)> {
     // forwardUrl is `index.html?ST1=<hex>,ST2=<hex>`
     let re = regex::Regex::new(r"ST1=([0-9a-fA-F]+),ST2=([0-9a-fA-F]+)").ok()?;
     let caps = re.captures(xml)?;

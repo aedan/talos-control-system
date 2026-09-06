@@ -147,17 +147,20 @@ fn rewrite_attr_slash_urls(text: &str, pfx: &str) -> String {
 
 pub fn apply_rewrites(path: &str, ctype: &str, body: &[u8], prefix: &str, bmc_host: &str) -> Vec<u8> {
     let name = path.rsplit('/').next().unwrap_or(path);
+    // `/session` and `/data` are XML/JSON APIs. Rewriting them as HTML turns a
+    // login-page fallback into a poisoned payload and the UI spinner never stops.
+    if name == "session" || name == "data" || ctype.contains("xml") || ctype.contains("json") {
+        return body.to_vec();
+    }
     let is_text = ctype.contains("javascript")
         || ctype.contains("ecmascript")
-        || ctype.contains("json")
         || ctype.contains("html")
         || ctype.contains("css")
-        || ctype.contains("xml")
         || ctype.contains("text/")
         || name.ends_with(".js")
         || name.ends_with(".html")
         || name.ends_with(".css")
-        || name.ends_with(".json")
+        || name.ends_with(".jsesp")
         || path.is_empty()
         || path == "console"
         || path.starts_with("console?");
@@ -235,15 +238,24 @@ pub async fn fetch_upstream(
     if let Some(t) = &sess.x_auth_token {
         req = req.header("X-Auth-Token", t);
     }
-    // URL host is the BMC address, which is what iDRAC 9 HostHeaderCheck wants.
+    // iDRAC 7 `/session` returns the login HTML unless ST2 is sent as a
+    // *header* (not a query param). The UI JS sets it from
+    // `window.location.href`, which child frames don't have — so we always
+    // attach the tokens from the login `forwardUrl`.
+    if let Some((st1, st2)) = super::idrac::parse_st_tokens(&sess.viewer_path) {
+        req = req.header("ST1", st1);
+        req = req.header("ST2", st2);
+    }
     req = req.header("Origin", &origin);
-    req = req.header("Referer", format!("{origin}/"));
+    req = req.header("Referer", format!("{}{}", origin, sess.viewer_path));
     for name in [
         "content-type",
         "xsrf-token",
         "x-requested-with",
         "x-csrf-token",
         "accept-language",
+        "st1",
+        "st2",
     ] {
         if let Some(v) = extra.get(name).and_then(|h| h.to_str().ok()) {
             if !v.is_empty() {
@@ -485,5 +497,18 @@ mod tests {
         assert_eq!(parse_rel_from_uri(p, "idrac_abc"), "restgui/foo.js");
         let p = "/api/machines/111/console/idrac_abc";
         assert_eq!(parse_rel_from_uri(p, "idrac_abc"), "");
+    }
+
+    #[test]
+    fn session_api_not_rewritten() {
+        let json = br#"{ "getSsnVar" : { "loginToDRAC" :"1" } }"#;
+        let out = apply_rewrites(
+            "session",
+            "application/json",
+            json,
+            "/api/machines/m/console/idrac_abc",
+            "10.0.0.5",
+        );
+        assert_eq!(out, json);
     }
 }
