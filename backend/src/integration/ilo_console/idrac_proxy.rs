@@ -132,17 +132,33 @@ pub fn rewrite_absolute_urls(text: &str, prefix: &str, bmc_host: &str) -> String
 /// iDRAC 7 `CheckTop()` does `top.document.location.href.search('index')` and
 /// if missing sends the *top* window to `/start.html`. Inside TCS the top
 /// window is the TCS app (no `index` in the URL), so a successful login is
-/// immediately replaced by the iDRAC login page. Force the check to pass.
+/// immediately replaced by the iDRAC login page *and* the TCS tab itself
+/// navigates away. Force the check to pass and rewrite remaining top-window
+/// location writes into no-ops (the iframe is same-origin with TCS).
 fn neutralize_idrac_framebust(text: &str) -> String {
-    text.replace(
-        "if ( top.document.location.href.search('index') < 0 )",
-        "if ( false )",
+    let t = text
+        .replace(
+            "if ( top.document.location.href.search('index') < 0 )",
+            "if ( false )",
+        )
+        .replace("if (top.frames.length >= 1)", "if (false)")
+        .replace("if(top.frames.length>=1)", "if(false)")
+        .replace("if (top != self)", "if (false)")
+        .replace("if (top !== self)", "if (false)")
+        .replace("if(top!=self)", "if(false)");
+    // `top.location = "/start.html"` / `.replace(...)` would still leave TCS.
+    // Turn those into a throwaway assignment / void call. No lookahead — the
+    // `regex` crate rejects it.
+    let assign = regex::Regex::new(
+        r#"(?i)\b(?:window\s*\.\s*)?(?:top|parent)\s*\.\s*(?:document\s*\.\s*)?location\s*(?:\.\s*href\s*)?\s*="#,
     )
-    .replace("if (top.frames.length >= 1)", "if (false)")
-    .replace("if(top.frames.length>=1)", "if(false)")
-    .replace("if (top != self)", "if (false)")
-    .replace("if (top !== self)", "if (false)")
-    .replace("if(top!=self)", "if(false)")
+    .expect("idrac top-nav assign");
+    let t = assign.replace_all(&t, "tcsNoop =").into_owned();
+    let replace_call = regex::Regex::new(
+        r#"(?i)\b(?:window\s*\.\s*)?(?:top|parent)\s*\.\s*(?:document\s*\.\s*)?location\s*\.\s*(?:replace|assign)\s*\("#,
+    )
+    .expect("idrac top-nav replace");
+    replace_call.replace_all(&t, "void (").into_owned()
 }
 
 fn rewrite_attr_slash_urls(text: &str, pfx: &str) -> String {
@@ -551,6 +567,18 @@ mod tests {
         let out = neutralize_idrac_framebust(js);
         assert!(out.contains("if ( false )"));
         assert!(!out.contains("if ( top.document.location.href.search('index') < 0 )"));
+        assert!(!out.contains("top.document.location.href ="));
+        assert!(out.contains("tcsNoop = \"/start.html\""));
+    }
+
+    #[test]
+    fn top_location_replace_neutralized() {
+        let js = r#"if (top.frames.length >= 1) top.location.replace("/sclogin.html"); parent.location = "/login.html";"#;
+        let out = neutralize_idrac_framebust(js);
+        assert!(out.contains("if (false)"));
+        assert!(!out.contains("top.location.replace("));
+        assert!(out.contains(r#"void ("/sclogin.html")"#));
+        assert!(out.contains(r#"tcsNoop = "/login.html""#));
     }
 
     #[test]

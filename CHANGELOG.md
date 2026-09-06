@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.66] — 2026-09-06
+
+### Fixed
+- **iDRAC 7 Console navigated the whole TCS tab** (browser Back was required to return). `CheckTop()` / `start.html` write `top.location` / `top.document.location`. The iframe is same-origin with TCS, so that replaced the TCS app with `/start.html`. Proxied JS now no-ops those writes, and the iDRAC iframe is sandboxed without `allow-top-navigation`.
+
 ## [0.5.65] — 2026-09-06
 
 ### Fixed

@@ -1487,7 +1487,12 @@ cluster:
         {#if consoleMode === 'ilo'}
           <iframe class="ilo-frame" src={consoleEmbed} title="iLO remote console"></iframe>
         {:else if consoleMode === 'idrac'}
-          <iframe class="ilo-frame" src={consoleEmbed} title="iDRAC virtual console"></iframe>
+          <iframe
+            class="ilo-frame"
+            src={consoleEmbed}
+            title="iDRAC virtual console"
+            sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
+          ></iframe>
         {:else if consoleMode === 'sol'}
           <div class="sol-term" use:solContainer></div>
         {:else}
