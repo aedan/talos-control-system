@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.77] — 2026-09-06
+
+### Fixed
+- **iDRAC 7 System Summary showed empty panes and menu clicks still did nothing.** `refreshbox()` waits forever for a KVM preview (`bPreviewLoaded`), so health/info/logs never fill. Tree clicks only called `snb.f_getHTML` across frames that cannot see each other. TCS now marks the preview loaded so summary data can populate, and menu selection also does `tcsOpenCat()` → `tcsNav("da", url)` from `TreeList.xml`.
+
 ## [0.5.76] — 2026-09-06
 
 ### Fixed
