@@ -217,7 +217,7 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route("/machines/:id/boot-device", post(handlers::machine_boot_device))
         .route("/machines/:id/mount-iso", post(handlers::machine_mount_iso))
         .route("/machines/:id/unmount-iso", post(handlers::machine_unmount_iso))
-        // OOB console: iLO HTML5 (asset proxy + KVM WS, session-gated) and Dell SOL
+        // OOB console: iLO HTML5 + iDRAC HTML5 (asset proxy + KVM WS, session-gated) and SOL fallback
         .route(
             "/machines/:id/console/session",
             post(ilo_console_handlers::create_console_session),

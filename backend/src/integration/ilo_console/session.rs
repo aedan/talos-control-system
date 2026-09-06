@@ -53,7 +53,7 @@ impl IloSession {
 #[serde(rename_all = "camelCase")]
 pub struct ConsoleSessionResponse {
     pub ok: bool,
-    pub mode: String, // "ilo" | "sol"
+    pub mode: String, // "ilo" | "idrac" | "sol"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     /// TCS-origin URL the browser iframes for the iLO console.

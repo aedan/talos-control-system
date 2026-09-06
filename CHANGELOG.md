@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.5.60] — 2026-09-05
+
+### Added
+- **Dell iDRAC HTML5 virtual console in the machine Console overlay.** Opening Console on a Dell/Redfish BMC logs into the iDRAC with the stored credentials (Redfish `GetKVMSession` Direct Launch, then iDRAC 9 `/sysmgmt` session, then iDRAC 8 `/data/login`), reverse-proxies the HTML5 / eHTML5 viewer from TCS's origin (the same model as iLO), and relays the viewer's WebSockets — including the remote-presence port 5900/5901 when the firmware still uses it. The BMC password never leaves the server. GUI fetches try HTTP/1.1 rustls first and fall back to OpenSSL if the viewer is TLS-fingerprint/bot-gated.
+
+### Changed
+- **Dell Console is HTML5-only.** SOL is no longer offered for iDRAC machines, and TCS no longer pops `login.html?console` in a new tab. If the virtual console cannot be opened, Console reports the error instead of dropping to a serial terminal.
+
 ## [0.5.48] — 2026-09-03
 
 ### Changed

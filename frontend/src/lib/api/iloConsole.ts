@@ -1,11 +1,12 @@
 // Client for the machine OOB console endpoints.
 //
-// Two modes:
+// Modes:
 //   - `mode: 'ilo'` — the server minted an iLO HTML5 session. Load `embed_url`
 //     in an <iframe>; the server reverse-proxies the iLO console assets and
 //     relays the KVM WebSocket, all same-origin (defeats X-Frame-Options).
-//   - `mode: 'sol'` — Serial-over-LAN. Open the SOL WebSocket (xterm.js). An
-//     optional `idrac_console_url` offers Dell's native console in a new tab.
+//   - `mode: 'idrac'` — same embed model for Dell iDRAC HTML5 / eHTML5 virtual
+//     console. There is no SOL fallback for Dell.
+//   - `mode: 'sol'` — Serial-over-LAN, used only if iLO HTML5 is unavailable.
 //
 // SOL / KVM WebSockets authenticate via `?token=` because WS clients cannot
 // set an Authorization header.
@@ -16,7 +17,7 @@ const API_BASE = '/api';
 
 export interface ConsoleSession {
   ok: boolean;
-  mode: 'ilo' | 'sol' | 'none';
+  mode: 'ilo' | 'idrac' | 'sol' | 'none';
   sessionId: string | null;
   embedUrl: string | null;
   idracConsoleUrl: string | null;

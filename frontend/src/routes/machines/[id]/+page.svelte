@@ -17,7 +17,7 @@
     type NetworkBuilderKeys,
   } from '$lib/networkBuilder';
   import { renderYamlDiff } from '$lib/diffView';
-  import { openConsoleSession, closeConsoleSession, getIdracCredentials, openSolSession, type ConsoleSession, type SolHandle } from '$lib/api/iloConsole';
+  import { openConsoleSession, closeConsoleSession, openSolSession, type ConsoleSession, type SolHandle } from '$lib/api/iloConsole';
   import { Terminal } from '@xterm/xterm';
   import { FitAddon } from '@xterm/addon-fit';
   import '@xterm/xterm/css/xterm.css';
@@ -30,14 +30,9 @@
   // OOB console overlay state
   let consoleOpen = $state(false);
   let consoleBusy = $state(false);
-  let consoleMode = $state<'ilo' | 'sol' | 'none'>('none');
+  let consoleMode = $state<'ilo' | 'idrac' | 'sol' | 'none'>('none');
   let consoleEmbed = $state('');
   let consoleSid = $state('');
-  let consoleIdracUrl = $state('');
-  let idracCredsOpen = $state(false);
-  let idracCreds = $state<{ username: string; password: string; idracUrl: string } | null>(null);
-  let idracCredsLoading = $state(false);
-  let idracCredsRevealed = $state(false);
   let consoleError = $state('');
   let versions = $state<MachineVersions | null>(null);
   let extensions = $state<MachineExtension[]>([]);
@@ -388,29 +383,14 @@
     consoleMode = 'none';
     try {
       const res: ConsoleSession = await openConsoleSession($page.params.id!);
-      if (!res.ok && res.mode === 'none') {
-        consoleError = res.error || 'Console unavailable';
-        return;
-      }
       consoleMode = res.mode;
       consoleSid = res.sessionId || '';
       consoleEmbed = res.embedUrl || '';
-      consoleIdracUrl = res.idracConsoleUrl || '';
       consoleOpen = true;
-      if (res.mode === 'sol' && res.idracConsoleUrl) {
-        // Dell: open the iDRAC in a new tab. `login.html?console` deep-links
-        // straight into the Virtual Console (video) after login — the user's
-        // browser password manager autofills the form. SOL stays inline as a
-        // fallback if the iDRAC tab isn't usable.
-        window.open(res.idracConsoleUrl, '_blank', 'noopener');
-      }
-      if (res.mode === 'sol') {
-        // SOL output banner (informational, not an error). The terminal is
-        // mounted by the solContainer action when the div appears.
-        if (res.error) consoleError = res.error;
-      }
+      if (res.error || !res.ok) consoleError = res.error || 'Console unavailable';
     } catch (e: unknown) {
       consoleError = e instanceof Error ? e.message : 'Failed to open console';
+      consoleOpen = true;
     } finally {
       consoleBusy = false;
     }
@@ -418,50 +398,14 @@
 
   function closeConsole() {
     stopSol();
-    if (consoleMode === 'ilo' && consoleSid) {
+    if ((consoleMode === 'ilo' || consoleMode === 'idrac') && consoleSid) {
       void closeConsoleSession($page.params.id!, consoleSid);
     }
     consoleOpen = false;
     consoleMode = 'none';
     consoleEmbed = '';
     consoleSid = '';
-    consoleIdracUrl = '';
-    idracCredsOpen = false;
-    idracCreds = null;
-    idracCredsRevealed = false;
     consoleError = '';
-  }
-
-  // "Show iDRAC login": reveal the stored iDRAC creds for this Dell machine.
-  async function showIdracCreds() {
-    if (idracCredsLoading) return;
-    idracCredsOpen = true;
-    idracCredsLoading = true;
-    idracCredsRevealed = false;
-    idracCreds = null;
-    try {
-      const c = await getIdracCredentials($page.params.id!);
-      idracCreds = { username: c.username, password: c.password, idracUrl: c.idracUrl };
-    } catch (e: unknown) {
-      consoleError = e instanceof Error ? e.message : 'Failed to load iDRAC credentials';
-    } finally {
-      idracCredsLoading = false;
-    }
-  }
-
-  function closeIdracCreds() {
-    idracCredsOpen = false;
-    idracCreds = null;
-    idracCredsRevealed = false;
-  }
-
-  async function copyCred(field: 'username' | 'password') {
-    if (!idracCreds) return;
-    try {
-      await navigator.clipboard.writeText(idracCreds[field]);
-    } catch {
-      // clipboard unavailable; the value is visible for manual copy
-    }
   }
 
   function startSol() {
@@ -1157,7 +1101,7 @@
           <Button variant="secondary" size="sm" title="Save BMC connection settings" onclick={saveBmc} disabled={actionBusy}>Save BMC</Button>
         </div>
         <div class="header-actions" style="margin-top:0.5rem">
-          <Button variant="secondary" size="sm" title="Open the out-of-band console (iLO HTML5 for HPE, SOL for Dell)" onclick={openConsole} disabled={actionBusy}>Console</Button>
+          <Button variant="secondary" size="sm" title="Open the out-of-band console (iLO HTML5 for HPE, iDRAC HTML5 virtual console for Dell)" onclick={openConsole} disabled={actionBusy}>Console</Button>
           <Button variant="secondary" size="sm" title="Power on the machine via BMC" onclick={() => powerAction('on')} disabled={actionBusy}>On</Button>
           <Button variant="secondary" size="sm" title="Power off the machine via BMC" onclick={() => powerAction('off')} disabled={actionBusy}>Off</Button>
           <Button variant="secondary" size="sm" title="Power-cycle the machine via BMC" onclick={() => powerAction('cycle')} disabled={actionBusy}>Cycle</Button>
@@ -1529,14 +1473,10 @@ cluster:
             OOB console — {machine?.hostname || 'machine'}
           {/if}
           {#if consoleMode === 'ilo'}<span class="badge">iLO</span>{/if}
+          {#if consoleMode === 'idrac'}<span class="badge">iDRAC</span>{/if}
           {#if consoleMode === 'sol'}<span class="badge">SOL</span>{/if}
         </span>
         <span class="console-actions">
-          {#if consoleMode === 'sol' && consoleIdracUrl}
-            <a class="console-link" href={consoleIdracUrl} target="_blank" rel="noopener"
-               title="Open the iDRAC in a new tab (goes straight to the video console after login)">iDRAC video console ↗</a>
-            <Button variant="secondary" size="sm" title="Show the iDRAC username/password" onclick={showIdracCreds}>Show iDRAC login</Button>
-          {/if}
           <Button variant="secondary" size="sm" title="Close the console (Esc)" onclick={closeConsole}>Close</Button>
         </span>
       </div>
@@ -1544,63 +1484,16 @@ cluster:
         {#if consoleError}
           <div class="console-error">{consoleError}</div>
         {/if}
-        {#if consoleMode === 'sol' && consoleIdracUrl}
-          <div class="console-hint">
-            The iDRAC <b>video console</b> opened in a new tab (log in there —
-            "Show iDRAC login" reveals the credentials). Below is the
-            <b>SOL serial terminal</b> as a fallback.
-          </div>
-        {/if}
         {#if consoleMode === 'ilo'}
           <iframe class="ilo-frame" src={consoleEmbed} title="iLO remote console"></iframe>
+        {:else if consoleMode === 'idrac'}
+          <iframe class="ilo-frame" src={consoleEmbed} title="iDRAC virtual console"></iframe>
         {:else if consoleMode === 'sol'}
           <div class="sol-term" use:solContainer></div>
         {:else}
           <div class="console-empty">Console unavailable.</div>
         {/if}
       </div>
-
-      {#if idracCredsOpen}
-        <div class="idrac-creds-backdrop" role="dialog" aria-modal="true" onclick={closeIdracCreds}>
-          <div class="idrac-creds" onclick={(e) => e.stopPropagation()}>
-            <div class="idrac-creds-head">
-              <span>iDRAC login — {machine?.hostname || 'machine'}</span>
-              <Button variant="ghost" size="sm" title="Close (Esc)" onclick={closeIdracCreds}>✕</Button>
-            </div>
-            <div class="idrac-creds-body">
-              {#if idracCredsLoading}
-                <div class="idrac-creds-loading"><Spinner size="sm" /> Loading credentials…</div>
-              {:else if idracCreds}
-                <div class="cred-row">
-                  <label>Username</label>
-                  <div class="cred-val">
-                    <input readonly value={idracCreds.username} />
-                    <Button variant="ghost" size="sm" title="Copy username" onclick={() => copyCred('username')}>copy</Button>
-                  </div>
-                </div>
-                <div class="cred-row">
-                  <label>Password</label>
-                  <div class="cred-val">
-                    <input type={idracCredsRevealed ? 'text' : 'password'} value={idracCreds.password} readonly />
-                    <Button variant="ghost" size="sm" title={idracCredsRevealed ? 'Hide' : 'Show'}
-                            onclick={() => (idracCredsRevealed = !idracCredsRevealed)}>{idracCredsRevealed ? 'hide' : 'show'}</Button>
-                    <Button variant="ghost" size="sm" title="Copy password" onclick={() => copyCred('password')}>copy</Button>
-                  </div>
-                </div>
-                <a class="idrac-creds-link" href={idracCreds.idracUrl} target="_blank" rel="noopener">
-                  Open iDRAC console ↗ <span class="muted">(login.html?console)</span>
-                </a>
-                <p class="muted small">
-                  Enter these in the iDRAC login tab that opened. The password is
-                  shown on request only and is not stored in your browser.
-                </p>
-              {:else}
-                <div class="idrac-creds-error">{consoleError || 'Unable to load credentials'}</div>
-              {/if}
-            </div>
-          </div>
-        </div>
-      {/if}
     </div>
   {/if}
 </div>
@@ -2016,42 +1909,7 @@ cluster:
   }
   .console-title { font-weight: 600; font-size: 0.95rem; display: flex; gap: 0.5rem; align-items: center; }
   .console-actions { display: flex; gap: 0.6rem; align-items: center; }
-  .console-link {
-    color: #60a5fa; text-decoration: none; font-size: 0.85rem;
-    padding: 0.35rem 0.6rem; border: 1px solid var(--tcs-border); border-radius: 6px;
-  }
-  .console-link:hover { background: rgba(96,165,250,0.1); }
   .console-body { flex: 1; position: relative; overflow: hidden; display: flex; flex-direction: column; }
-  .console-hint {
-    flex: 0 0 auto; padding: 0.35rem 0.75rem; font-size: 0.78rem; line-height: 1.3;
-    color: #bae6fd; background: rgba(14,165,233,0.12); border-bottom: 1px solid rgba(14,165,233,0.25);
-  }
-  .idrac-creds-backdrop {
-    position: absolute; inset: 0; z-index: 5; background: rgba(0,0,0,0.55);
-    display: flex; align-items: center; justify-content: center; padding: 1rem;
-  }
-  .idrac-creds {
-    background: #0f172a; border: 1px solid #334155; border-radius: 10px;
-    width: min(460px, 100%); box-shadow: 0 12px 40px rgba(0,0,0,0.5);
-  }
-  .idrac-creds-head {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 0.6rem 0.8rem; border-bottom: 1px solid #1e293b; font-weight: 600; font-size: 0.9rem;
-  }
-  .idrac-creds-body { padding: 0.9rem 0.8rem; display: flex; flex-direction: column; gap: 0.7rem; }
-  .idrac-creds-loading { display: flex; align-items: center; gap: 0.5rem; color: #94a3b8; font-size: 0.85rem; }
-  .idrac-creds-error { color: #fca5a5; font-size: 0.85rem; }
-  .cred-row { display: flex; flex-direction: column; gap: 0.25rem; }
-  .cred-row label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: #94a3b8; }
-  .cred-val { display: flex; align-items: center; gap: 0.35rem; }
-  .cred-val input {
-    flex: 1; min-width: 0; background: #020617; border: 1px solid #334155; border-radius: 6px;
-    color: #e2e8f0; padding: 0.35rem 0.5rem; font-family: ui-monospace, monospace; font-size: 0.85rem;
-  }
-  .idrac-creds-link { color: #60a5fa; font-size: 0.85rem; text-decoration: none; }
-  .idrac-creds-link:hover { text-decoration: underline; }
-  .idrac-creds .muted { color: #94a3b8; }
-  .idrac-creds .small { font-size: 0.75rem; }
   .console-error {
     position: absolute; top: 0.5rem; left: 50%; transform: translateX(-50%);
     z-index: 2; background: rgba(248,113,113,0.15); color: #fecaca;

@@ -1,15 +1,16 @@
-//! iLO HTML5 remote console (in-portal).
+//! BMC HTML5 remote consoles (in-portal).
 //!
-//! Lets an operator open a machine's iLO console inside TCS without the browser
-//! needing to reach the iLO directly (management subnet, self-signed cert,
-//! `X-Frame-Options: sameorigin`). TCS logs into the iLO with the stored BMC
-//! credentials, serves the console assets from its own origin (rewriting the
-//! KVM WebSocket + relative json/rest URLs), and relays the binary KVM stream.
+//! Lets an operator open a machine's out-of-band console inside TCS without the
+//! browser needing to reach the BMC directly (management subnet, self-signed
+//! cert, `X-Frame-Options: sameorigin`).
 //!
-//! For Dell iDRAC machines (no JSON IRC), callers fall back to SOL (see
-//! `crate::integration::bmc::ipmi::IpmiClient::sol_activate`) plus an
-//! "open iDRAC console in a new tab" link.
+//! * HPE iLO: JSON login + proxied `irc.html` + DVCNET KVM WebSocket.
+//! * Dell iDRAC: Redfish `GetKVMSession` (or legacy GUI login) + reverse-proxied
+//!   HTML5 / eHTML5 virtual console + WebSocket relay. No SOL fallback.
 
 pub mod asset;
+pub mod idrac;
+pub mod idrac_proxy;
 pub mod kvm;
 pub mod session;
+pub mod tls;
