@@ -82,7 +82,7 @@ pub fn inject_prefix_hooks(html: &str, prefix: &str) -> String {
     // expecting index.html to be the browsing-context top. Inside TCS it is
     // not, so we expose `tcsTop` as the nearest window still on this session.
     let script = format!(
-        r#"<script>(function(){{var P="{pfx}";function tcsTopGet(){{var w=window;try{{while(w.parent&&w.parent!==w){{if(w.parent===window.top)break;try{{var p=w.parent.location.pathname||"";if(p.indexOf("/console/idrac_")<0)break;}}catch(e){{break;}}w=w.parent;}}}}catch(e){{}}return w;}}function tcsFrame(name){{var root=tcsTopGet();try{{if(root[name])return root[name];}}catch(e){{}}try{{if(root.frames&&root.frames[name])return root.frames[name];}}catch(e){{}}try{{var el=root.document.getElementsByName(name)[0];if(el)return el.contentWindow||el;}}catch(e){{}}return null;}}function tcsAbs(u){{if(typeof u!=="string"||!u)return u;if(u.charAt(0)==='#')return u;if(/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(u)){{try{{var x=new URL(u,location.href);if(x.origin===location.origin&&x.pathname.indexOf(P)!==0){{x.pathname=P+x.pathname;return x.toString();}}}}catch(e){{}}return u;}}if(u.indexOf("//")===0)return u;if(u.charAt(0)==="/")return u.indexOf(P)===0?u:P+u;return P+"/"+u.replace(/^\.\//,"");}}function tcsNav(name,u){{var abs=tcsAbs(u);var w=typeof name==="string"?tcsFrame(name):name;try{{if(w){{w.location.replace(abs);return;}}}}catch(e){{}}try{{if(w){{w.location.href=abs;return;}}}}catch(e){{}}try{{var n=typeof name==="string"?name:(w&&w.name);var el=n&&tcsTopGet().document.getElementsByName(n)[0];if(el)el.src=abs;}}catch(e){{}}}}try{{Object.defineProperty(window,"tcsTop",{{get:tcsTopGet}});}}catch(e){{window.tcsTop=tcsTopGet();}}window.tcsAbs=tcsAbs;window.tcsNav=tcsNav;window.tcsFrame=tcsFrame;function f(u){{if(typeof u!=="string")return u;if(u.charAt(0)==="/"&&u.indexOf(P)!==0&&u.indexOf("//")!==0)return P+u;return u;}}try{{var OF=window.fetch;window.fetch=function(u,o){{if(typeof u==="string")u=f(u);else if(u&&u.url){{try{{u=new Request(f(u.url),u)}}catch(e){{}}}}return OF.call(this,u,o);}};var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){{arguments[1]=f(u);return xo.apply(this,arguments);}};var OW=window.WebSocket;window.WebSocket=function(u,p){{try{{var x=new URL(u,location.href);x.protocol=location.protocol==="https:"?"wss:":"ws:";if(x.port==="5900"||x.port==="5901"||x.port==="5902"){{x.host=location.host;x.pathname=P+"/__rfb/"+x.port;}}else{{x.host=location.host;if(x.pathname.indexOf(P)!==0)x.pathname=P+x.pathname;}}u=x.toString();}}catch(e){{}}return p!==undefined?new OW(u,p):new OW(u);}};window.WebSocket.prototype=OW.prototype;window.WebSocket.CONNECTING=OW.CONNECTING;window.WebSocket.OPEN=OW.OPEN;window.WebSocket.CLOSING=OW.CLOSING;window.WebSocket.CLOSED=OW.CLOSED;if(window.Worker){{var Wr=window.Worker;window.Worker=function(u,o){{return new Wr(f(u),o);}};}}var sa=HTMLElement.prototype.setAttribute;HTMLElement.prototype.setAttribute=function(n,v){{if((n==="src"||n==="href"||n==="action")&&typeof v==="string")v=f(v);return sa.call(this,n,v);}};}}catch(e){{}}}})();</script>"#
+        r#"<script>(function(){{var P="{pfx}";function tcsTopGet(){{var w=window;try{{while(w.parent&&w.parent!==w){{if(w.parent===window.top)break;try{{var p=w.parent.location.pathname||"";if(p.indexOf("/console/idrac_")<0)break;}}catch(e){{break;}}w=w.parent;}}}}catch(e){{}}return w;}}function tcsEl(name){{try{{return tcsTopGet().document.getElementsByName(name)[0]||null;}}catch(e){{return null;}}}}function tcsFrame(name){{var el=tcsEl(name);try{{if(el&&el.contentWindow)return el.contentWindow;}}catch(e){{}}return null;}}function tcsAbs(u){{if(typeof u!=="string"||!u)return u;if(u.charAt(0)==='#')return u;if(/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(u)){{try{{var x=new URL(u,location.href);if(x.origin===location.origin&&x.pathname.indexOf(P)!==0){{x.pathname=P+x.pathname;return x.toString();}}}}catch(e){{}}return u;}}if(u.indexOf("//")===0)return u;if(u.charAt(0)==="/")return u.indexOf(P)===0?u:P+u;return P+"/"+u.replace(/^\.\//,"");}}function tcsNav(name,u){{var abs=tcsAbs(u);if(typeof name!=="string"&&name&&name.name)name=name.name;if(!name)return;try{{var el=tcsEl(name);if(el){{el.src=abs;return;}}}}catch(e){{}}try{{tcsTopGet().postMessage({{tcsIdracNav:name,url:abs}},"*");}}catch(e){{}}}}try{{window.addEventListener("message",function(ev){{var d=ev.data;if(!d||!d.tcsIdracNav)return;if(window!==tcsTopGet())return;try{{var el=document.getElementsByName(d.tcsIdracNav)[0];if(el)el.src=d.url;}}catch(e){{}}}});}}catch(e){{}}try{{Object.defineProperty(window,"tcsTop",{{get:tcsTopGet}});}}catch(e){{window.tcsTop=tcsTopGet();}}window.tcsAbs=tcsAbs;window.tcsNav=tcsNav;window.tcsFrame=tcsFrame;function f(u){{if(typeof u!=="string")return u;if(u.charAt(0)==="/"&&u.indexOf(P)!==0&&u.indexOf("//")!==0)return P+u;return u;}}try{{var OF=window.fetch;window.fetch=function(u,o){{if(typeof u==="string")u=f(u);else if(u&&u.url){{try{{u=new Request(f(u.url),u)}}catch(e){{}}}}return OF.call(this,u,o);}};var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){{arguments[1]=f(u);return xo.apply(this,arguments);}};var OW=window.WebSocket;window.WebSocket=function(u,p){{try{{var x=new URL(u,location.href);x.protocol=location.protocol==="https:"?"wss:":"ws:";if(x.port==="5900"||x.port==="5901"||x.port==="5902"){{x.host=location.host;x.pathname=P+"/__rfb/"+x.port;}}else{{x.host=location.host;if(x.pathname.indexOf(P)!==0)x.pathname=P+x.pathname;}}u=x.toString();}}catch(e){{}}return p!==undefined?new OW(u,p):new OW(u);}};window.WebSocket.prototype=OW.prototype;window.WebSocket.CONNECTING=OW.CONNECTING;window.WebSocket.OPEN=OW.OPEN;window.WebSocket.CLOSING=OW.CLOSING;window.WebSocket.CLOSED=OW.CLOSED;if(window.Worker){{var Wr=window.Worker;window.Worker=function(u,o){{return new Wr(f(u),o);}};}}var sa=HTMLElement.prototype.setAttribute;HTMLElement.prototype.setAttribute=function(n,v){{if((n==="src"||n==="href"||n==="action")&&typeof v==="string")v=f(v);return sa.call(this,n,v);}};}}catch(e){{}}}})();</script>"#
     );
     let base = format!("<base href=\"{pfx}/\">");
     let hook = format!("{script}{base}");
@@ -165,6 +165,10 @@ fn neutralize_idrac_framebust(text: &str) -> String {
     // Exact iDRAC 7 assignment: lsnb.html does `parent.da.location = link`
     // which otherwise resolves `sysSummary.html` against the TCS origin (404).
     let t = t.replace("parent.da.location = link", r#"tcsNav("da", link)"#);
+    let t = t.replace(
+        r#"parent.document.getElementById("navigationBar")"#,
+        r#"tcsTop.document.getElementById("navigationBar")"#,
+    );
     rewrite_top_to_idrac_root(&t)
 }
 
@@ -183,7 +187,20 @@ fn rewrite_top_to_idrac_root(text: &str) -> String {
     // flaky in Chrome; tcsNav falls back to getElementsByName.
     let nav = regex::Regex::new(r"tcsTop\.([A-Za-z_][A-Za-z0-9_]*)\.location\.replace\(")
         .expect("idrac tcsNav replace");
-    nav.replace_all(&t, "tcsNav(\"$1\", ").into_owned()
+    let t = nav.replace_all(&t, "tcsNav(\"$1\", ").into_owned();
+    // Named frames on the frameset window are often the <frame> element, not
+    // the content window — `tcsTop.lsnb.f_getHTML` is then undefined and menu
+    // clicks no-op. Always go through tcsFrame() which uses contentWindow.
+    let frames = regex::Regex::new(
+        r"tcsTop\.(da|lsnb|snb|treelist|globalnav|title|logo|hidden_frame|licenseframe|unlicensedBanner|virtual|blank)\.",
+    )
+    .expect("idrac frame alias");
+    let t = frames.replace_all(&t, "tcsFrame(\"$1\").").into_owned();
+    let parent_frames = regex::Regex::new(r"(^|[^.\w$])parent\.(snb|da|lsnb|treelist)\.")
+        .expect("idrac parent frame");
+    parent_frames
+        .replace_all(&t, "${1}tcsFrame(\"$2\").")
+        .into_owned()
 }
 
 fn rewrite_attr_slash_urls(text: &str, pfx: &str) -> String {
@@ -621,12 +638,13 @@ mod tests {
     fn top_identifier_rewritten_to_tcs_top() {
         let js = r#"lookup = top.treelist.Lookup; eval("top." + name); top.snb.f_getHTML(cat); el.style.top = "0"; vertical-align: top;"#;
         let out = neutralize_idrac_framebust(js);
-        assert!(out.contains("tcsTop.treelist.Lookup"));
+        assert!(out.contains(r#"tcsFrame("treelist").Lookup"#), "{out}");
         assert!(out.contains(r#"eval("tcsTop." + name)"#));
-        assert!(out.contains("tcsTop.snb.f_getHTML"));
+        assert!(out.contains(r#"tcsFrame("snb").f_getHTML"#), "{out}");
         assert!(out.contains(r#"el.style.top = "0""#));
         assert!(out.contains("vertical-align: top;"));
         assert!(!out.contains("top.treelist"));
+        assert!(!out.contains("tcsTop.treelist"));
     }
 
     #[test]
@@ -635,8 +653,9 @@ mod tests {
         let out = neutralize_idrac_framebust(js);
         assert!(out.contains(r#"tcsNav("lsnb", "lsnb.html")"#), "{out}");
         assert!(out.contains(r#"tcsNav("da", link)"#), "{out}");
-        assert!(out.contains("parent.snb.f_getHTML"));
+        assert!(out.contains(r#"tcsFrame("snb").f_getHTML"#), "{out}");
         assert!(!out.contains("parent.da.location"));
+        assert!(!out.contains("parent.snb.f_getHTML"));
     }
 
     #[test]

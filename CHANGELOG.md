@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.70] — 2026-09-06
+
+### Fixed
+- **iDRAC 7 menu and masthead loaded, but the center pane spun and clicks did nothing.** `lsnb.html` was requested; `sysSummary.html` never was. `tcsTop.lsnb` / `parent.snb` resolve to the `<frame>` element in Chrome, so `f_getHTML` is undefined and the `da` content frame never changes. Frame access now uses `contentWindow` via `tcsFrame()`, and `tcsNav()` sets the frame `src` on the frameset document (with a postMessage fallback).
+
 ## [0.5.69] — 2026-09-06
 
 ### Fixed
