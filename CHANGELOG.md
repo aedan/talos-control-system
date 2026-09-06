@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.75] — 2026-09-06
+
+### Fixed
+- **iDRAC 7 System Summary loaded but the center pane was white.** The spinner overlay was gone; `sysSummaryData.html` keeps `#contentArea` at `display:none` until JS runs, and that JS threw on `top.aimGetBoolPropObj` (session not ready). The inner iframe is also `position:fixed` vs the viewport, so in a frameset it paints off-screen. TCS now shows `#contentArea`, positions `#sysIframe` absolutely in the pane, and treats missing `aimGet*PropObj` / `localeObj` as `{}`.
+
 ## [0.5.74] — 2026-09-06
 
 ### Fixed

@@ -87,7 +87,7 @@ pub fn inject_prefix_hooks(html: &str, prefix: &str) -> String {
     let base = format!("<base href=\"{pfx}/\">");
     // Stock iDRAC 7 sysSummary writes #progressPage and only hides it for
     // OEM custom GUI. The overlay otherwise covers the summary iframe.
-    let hide_progress = r#"<style id="tcsHideProgress">#progressPage,.progressBackground,.progressContainer,#progressGraphic,#progressScreen{display:none!important;visibility:hidden!important}</style>"#;
+    let hide_progress = r#"<style id="tcsHideProgress">#progressPage,.progressBackground,.progressContainer,#progressGraphic,#progressScreen{display:none!important;visibility:hidden!important}#contentArea,#formArea{display:block!important}iframe#sysIframe{position:absolute!important;top:0;left:0;width:100%;height:100%}</style>"#;
     let hook = format!("{script}{hide_progress}{base}");
     let lower = html.to_ascii_lowercase();
     if let Some(idx) = lower.find("<head") {
@@ -164,6 +164,13 @@ fn neutralize_idrac_framebust(text: &str) -> String {
             "progressBar.hide(); var _ps=document.getElementById(\"progressScreen\"); if(_ps)_ps.style.display=\"none\"; var _pp=document.getElementById(\"progressPage\"); if(_pp)_pp.style.display=\"none\";",
         )
         .into_owned();
+    // sysSummaryData.html top-level `top.aimGetBoolPropObj['x']` throws if
+    // the frameset has not finished session/locale yet (da starts early).
+    let t = t
+        .replace("top.aimGetBoolPropObj[", "(tcsTop.aimGetBoolPropObj||{})[")
+        .replace("top.aimGetIntPropObj[", "(tcsTop.aimGetIntPropObj||{})[")
+        .replace("top.aimGetPropObj[", "(tcsTop.aimGetPropObj||{})[")
+        .replace("top.localeObj[", "(tcsTop.localeObj||{})[");
     // `top.location = "/start.html"` / `.replace(...)` would still leave TCS.
     // Turn those into a throwaway assignment / void call. No lookahead — the
     // `regex` crate rejects it.
@@ -293,6 +300,12 @@ pub fn apply_rewrites(path: &str, ctype: &str, body: &[u8], prefix: &str, bmc_ho
         text = text.replace(
             r#"<frame src="blankLoading.html" name="da""#,
             r#"<frame src="sysSummary.html" name="da""#,
+        );
+        // Nested sysSummary iframe is position:fixed vs the viewport, so in
+        // a frameset it paints off-screen and the da pane looks white.
+        text = text.replace(
+            "iframe { position:fixed; display:block; width:100%; border:none; }",
+            "iframe { position:absolute; top:0; left:0; display:block; width:100%; height:100%; border:none; }",
         );
     }
     text.into_bytes()
@@ -637,6 +650,21 @@ mod tests {
     }
 
     #[test]
+    fn syssummary_iframe_not_fixed() {
+        let html = "<html><head></head><body><style>iframe { position:fixed; display:block; width:100%; border:none; }</style></body></html>";
+        let out = apply_rewrites(
+            "sysSummary.html",
+            "text/html",
+            html.as_bytes(),
+            "/api/machines/m/console/idrac_abc",
+            "10.0.0.5",
+        );
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("position:absolute"), "{s}");
+        assert!(!s.contains("position:fixed"));
+    }
+
+    #[test]
     fn da_frame_starts_on_syssummary() {
         let html = r#"<html><head></head><frameset><frame src="blankLoading.html" name="da" scrolling="auto" /></frameset></html>"#;
         let out = apply_rewrites(
@@ -658,6 +686,7 @@ mod tests {
         assert!(out.contains(r#"var P="/api/machines/m/console/idrac_abc""#));
         assert!(out.contains(r#"<base href="/api/machines/m/console/idrac_abc/">"#));
         assert!(out.contains("tcsHideProgress"));
+        assert!(out.contains("#contentArea"));
     }
 
     #[test]
