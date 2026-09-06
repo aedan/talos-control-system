@@ -82,7 +82,7 @@ pub fn inject_prefix_hooks(html: &str, prefix: &str) -> String {
     // expecting index.html to be the browsing-context top. Inside TCS it is
     // not, so we expose `tcsTop` as the nearest window still on this session.
     let script = format!(
-        r#"<script>(function(){{function tcsTopGet(){{var w=window;try{{while(w.parent&&w.parent!==w){{if(w.parent===window.top)break;try{{var p=w.parent.location.pathname||"";if(p.indexOf("/console/idrac_")<0)break;}}catch(e){{break;}}w=w.parent;}}}}catch(e){{}}return w;}}try{{Object.defineProperty(window,"tcsTop",{{get:tcsTopGet}});}}catch(e){{window.tcsTop=tcsTopGet();}}var P="{pfx}";function f(u){{if(typeof u!=="string")return u;if(u.charAt(0)==="/"&&u.indexOf(P)!==0&&u.indexOf("//")!==0)return P+u;return u;}}try{{var OF=window.fetch;window.fetch=function(u,o){{if(typeof u==="string")u=f(u);else if(u&&u.url){{try{{u=new Request(f(u.url),u)}}catch(e){{}}}}return OF.call(this,u,o);}};var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){{arguments[1]=f(u);return xo.apply(this,arguments);}};var OW=window.WebSocket;window.WebSocket=function(u,p){{try{{var x=new URL(u,location.href);x.protocol=location.protocol==="https:"?"wss:":"ws:";if(x.port==="5900"||x.port==="5901"||x.port==="5902"){{x.host=location.host;x.pathname=P+"/__rfb/"+x.port;}}else{{x.host=location.host;if(x.pathname.indexOf(P)!==0)x.pathname=P+x.pathname;}}u=x.toString();}}catch(e){{}}return p!==undefined?new OW(u,p):new OW(u);}};window.WebSocket.prototype=OW.prototype;window.WebSocket.CONNECTING=OW.CONNECTING;window.WebSocket.OPEN=OW.OPEN;window.WebSocket.CLOSING=OW.CLOSING;window.WebSocket.CLOSED=OW.CLOSED;if(window.Worker){{var Wr=window.Worker;window.Worker=function(u,o){{return new Wr(f(u),o);}};}}var sa=HTMLElement.prototype.setAttribute;HTMLElement.prototype.setAttribute=function(n,v){{if((n==="src"||n==="href"||n==="action")&&typeof v==="string")v=f(v);return sa.call(this,n,v);}};}}catch(e){{}}}})();</script>"#
+        r#"<script>(function(){{var P="{pfx}";function tcsTopGet(){{var w=window;try{{while(w.parent&&w.parent!==w){{if(w.parent===window.top)break;try{{var p=w.parent.location.pathname||"";if(p.indexOf("/console/idrac_")<0)break;}}catch(e){{break;}}w=w.parent;}}}}catch(e){{}}return w;}}function tcsFrame(root,name){{try{{if(root[name])return root[name];}}catch(e){{}}try{{if(root.frames&&root.frames[name])return root.frames[name];}}catch(e){{}}try{{var el=root.document.getElementsByName(name)[0];if(el)return el.contentWindow||el;}}catch(e){{}}return null;}}function tcsAbs(u){{if(typeof u!=="string"||!u)return u;if(u.charAt(0)==='#')return u;if(/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(u)){{try{{var x=new URL(u,location.href);if(x.origin===location.origin&&x.pathname.indexOf(P)!==0){{x.pathname=P+x.pathname;return x.toString();}}}}catch(e){{}}return u;}}if(u.indexOf("//")===0)return u;if(u.charAt(0)==="/")return u.indexOf(P)===0?u:P+u;return P+"/"+u.replace(/^\.\//,"");}}function tcsNav(w,u){{var abs=tcsAbs(u);if(!w)return;try{{w.location.replace(abs);return;}}catch(e){{}}try{{w.location.href=abs;return;}}catch(e){{}}try{{var el=tcsTopGet().document.getElementsByName(w.name)[0];if(el)el.src=abs;}}catch(e){{}}}}function tcsTopWrap(){{var r=tcsTopGet();try{{return new Proxy(r,{{get:function(t,p){{if(typeof p==="symbol")return t[p];var v;try{{v=t[p];}}catch(e){{}}if(v!==undefined&&v!==null)return v;return tcsFrame(t,p);}}}});}}catch(e){{return r;}}}}try{{Object.defineProperty(window,"tcsTop",{{get:tcsTopWrap}});}}catch(e){{window.tcsTop=tcsTopWrap();}}window.tcsAbs=tcsAbs;window.tcsNav=tcsNav;try{{if(window===tcsTopGet()){{var n=0;var iv=setInterval(function(){{n++;try{{var el=document.getElementsByName("lsnb")[0];if(el){{var src=el.getAttribute("src")||"";if(src.indexOf("lsnb.html")<0)el.src=P+"/lsnb.html";}}}}catch(e){{}}if(n>40)clearInterval(iv);}},250);}}}}catch(e){{}}function f(u){{if(typeof u!=="string")return u;if(u.charAt(0)==="/"&&u.indexOf(P)!==0&&u.indexOf("//")!==0)return P+u;return u;}}try{{var OF=window.fetch;window.fetch=function(u,o){{if(typeof u==="string")u=f(u);else if(u&&u.url){{try{{u=new Request(f(u.url),u)}}catch(e){{}}}}return OF.call(this,u,o);}};var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){{arguments[1]=f(u);return xo.apply(this,arguments);}};var OW=window.WebSocket;window.WebSocket=function(u,p){{try{{var x=new URL(u,location.href);x.protocol=location.protocol==="https:"?"wss:":"ws:";if(x.port==="5900"||x.port==="5901"||x.port==="5902"){{x.host=location.host;x.pathname=P+"/__rfb/"+x.port;}}else{{x.host=location.host;if(x.pathname.indexOf(P)!==0)x.pathname=P+x.pathname;}}u=x.toString();}}catch(e){{}}return p!==undefined?new OW(u,p):new OW(u);}};window.WebSocket.prototype=OW.prototype;window.WebSocket.CONNECTING=OW.CONNECTING;window.WebSocket.OPEN=OW.OPEN;window.WebSocket.CLOSING=OW.CLOSING;window.WebSocket.CLOSED=OW.CLOSED;if(window.Worker){{var Wr=window.Worker;window.Worker=function(u,o){{return new Wr(f(u),o);}};}}var sa=HTMLElement.prototype.setAttribute;HTMLElement.prototype.setAttribute=function(n,v){{if((n==="src"||n==="href"||n==="action")&&typeof v==="string")v=f(v);return sa.call(this,n,v);}};}}catch(e){{}}}})();</script>"#
     );
     let base = format!("<base href=\"{pfx}/\">");
     let hook = format!("{script}{base}");
@@ -162,19 +162,28 @@ fn neutralize_idrac_framebust(text: &str) -> String {
     )
     .expect("idrac top-nav replace");
     let t = replace_call.replace_all(&t, "void (").into_owned();
+    // Exact iDRAC 7 assignment: lsnb.html does `parent.da.location = link`
+    // which otherwise resolves `sysSummary.html` against the TCS origin (404).
+    let t = t.replace("parent.da.location = link", "tcsNav(tcsTop.da, link)");
     rewrite_top_to_idrac_root(&t)
 }
 
-/// Child-frame JS uses the identifier `top` for index.html state (`top.snb`,
-/// `top.TOKEN_VALUE`, `eval("top."+…)`). `window.top` cannot be redefined, so
-/// rewrite those reads onto `tcsTop` (injected as the iDRAC frameset window).
-/// Do not match `.top` (CSS `style.top` / `vertical-align: top` is a different
-/// token — only `top.` / `top[` as a bare identifier).
+/// Child-frame JS uses the identifier `top` (and often `parent`) for index.html
+/// state (`top.snb`, `top.TOKEN_VALUE`, `eval("top."+…)`). `window.top` cannot
+/// be redefined, so rewrite those reads onto `tcsTop`. Do not match `.top`
+/// (CSS `style.top` / `vertical-align: top`).
 fn rewrite_top_to_idrac_root(text: &str) -> String {
     let dot = regex::Regex::new(r"(^|[^.\w$])top\.").expect("idrac top-dot");
     let t = dot.replace_all(text, "${1}tcsTop.").into_owned();
     let bracket = regex::Regex::new(r"(^|[^.\w$])top\[").expect("idrac top-bracket");
-    bracket.replace_all(&t, "${1}tcsTop[").into_owned()
+    let t = bracket.replace_all(&t, "${1}tcsTop[").into_owned();
+    let parent_dot = regex::Regex::new(r"(^|[^.\w$])parent\.").expect("idrac parent-dot");
+    let t = parent_dot.replace_all(&t, "${1}tcsTop.").into_owned();
+    // `tcsTop.lsnb.location.replace("lsnb.html")` → tcsNav so the URL is
+    // forced onto the session prefix even if named-frame lookup is flaky.
+    let nav = regex::Regex::new(r"tcsTop\.([A-Za-z_][A-Za-z0-9_]*)\.location\.replace\(")
+        .expect("idrac tcsNav replace");
+    nav.replace_all(&t, "tcsNav(tcsTop.$1, ").into_owned()
 }
 
 fn rewrite_attr_slash_urls(text: &str, pfx: &str) -> String {
@@ -236,6 +245,9 @@ pub fn apply_rewrites(path: &str, ctype: &str, body: &[u8], prefix: &str, bmc_ho
     if is_html {
         text = inject_prefix_hooks(&text, prefix);
         text = inject_heartbeat(&text);
+        // `<base href>` makes `href="#"` navigate to the prefix URL (or TCS).
+        text = text.replace("href=\"#\"", "href=\"javascript:void(0)\"");
+        text = text.replace("href='#'", "href='javascript:void(0)'");
     }
     text.into_bytes()
 }
@@ -615,6 +627,16 @@ mod tests {
         assert!(out.contains(r#"el.style.top = "0""#));
         assert!(out.contains("vertical-align: top;"));
         assert!(!out.contains("top.treelist"));
+    }
+
+    #[test]
+    fn lsnb_and_da_navigation_prefixed() {
+        let js = r#"top.lsnb.location.replace("lsnb.html"); parent.da.location = link; parent.snb.f_getHTML(cat);"#;
+        let out = neutralize_idrac_framebust(js);
+        assert!(out.contains(r#"tcsNav(tcsTop.lsnb, "lsnb.html")"#), "{out}");
+        assert!(out.contains("tcsNav(tcsTop.da, link)"), "{out}");
+        assert!(out.contains("tcsTop.snb.f_getHTML"));
+        assert!(!out.contains("parent.da.location"));
     }
 
     #[test]

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.68] — 2026-09-06
+
+### Fixed
+- **iDRAC 7 left menu and masthead loaded, but the main pane spun and every menu click was TCS `404 Not Found`.** After drawing the tree, `treelist.html` does `top.lsnb.location.replace("lsnb.html")` and `lsnb.html` does `parent.da.location = link` (`sysSummary.html`). Those relative URLs were resolving on the TCS origin, not the console prefix — and `lsnb.html` was never requested. Frame navigations now go through `tcsNav()` (absolute prefix URLs), `parent.*` maps to the iDRAC frameset, and `href="#"` is neutralized so `<base>` cannot hijack clicks.
+
 ## [0.5.67] — 2026-09-06
 
 ### Fixed
