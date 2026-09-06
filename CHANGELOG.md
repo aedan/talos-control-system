@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.71] — 2026-09-06
+
+### Fixed
+- **iDRAC 7 chrome loaded (`lsnb.html` included) but the center pane never left the spinner and menu clicks did nothing.** Child frames cannot use sibling `contentWindow` inside the overlay, so `f_getHTML` never ran and `sysSummary.html` was never requested. The frameset window now finds itself via `frameElement` / `<frameset>`, relays `f_getHTML` over `postMessage`, and the iDRAC iframe is no longer sandboxed (CheckTop is already no-op'd).
+
 ## [0.5.70] — 2026-09-06
 
 ### Fixed
