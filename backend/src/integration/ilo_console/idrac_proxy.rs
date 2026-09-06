@@ -203,7 +203,7 @@ pub async fn fetch_upstream(
     query: Option<&str>,
     extra: &HeaderMap,
     body: Option<Vec<u8>>,
-) -> Result<(u16, String, Vec<u8>, Vec<(String, String)>), AppError> {
+) -> Result<(u16, String, Vec<u8>, Vec<(String, String)>, Vec<(String, String)>), AppError> {
     let origin = bmc_origin(&sess.bmc_host);
     let rel = rel.trim_start_matches('/');
     let mut url = if rel.is_empty() {
@@ -242,10 +242,6 @@ pub async fn fetch_upstream(
     // *header* (not a query param). The UI JS sets it from
     // `window.location.href`, which child frames don't have — so we always
     // attach the tokens from the login `forwardUrl`.
-    if let Some((st1, st2)) = super::idrac::parse_st_tokens(&sess.viewer_path) {
-        req = req.header("ST1", st1);
-        req = req.header("ST2", st2);
-    }
     req = req.header("Origin", &origin);
     req = req.header("Referer", format!("{}{}", origin, sess.viewer_path));
     for name in [
@@ -254,14 +250,17 @@ pub async fn fetch_upstream(
         "x-requested-with",
         "x-csrf-token",
         "accept-language",
-        "st1",
-        "st2",
     ] {
         if let Some(v) = extra.get(name).and_then(|h| h.to_str().ok()) {
             if !v.is_empty() {
                 req = req.header(name, v);
             }
         }
+    }
+    // Always win over a child-frame ST2 parsed from a URL that has no token.
+    if let Some((st1, st2)) = super::idrac::parse_st_tokens(&sess.viewer_path) {
+        req = req.header("ST1", st1);
+        req = req.header("ST2", st2);
     }
     if let Some(b) = body {
         req = req.body(b);
@@ -279,12 +278,29 @@ pub async fn fetch_upstream(
         .and_then(|h| h.to_str().ok())
         .map(|s| s.split(';').next().unwrap_or("application/octet-stream").trim().to_string())
         .unwrap_or_else(|| "application/octet-stream".into());
+    let pass_headers = pass_through_response_headers(resp.headers());
     let bytes = resp
         .bytes()
         .await
         .map_err(|e| AppError::Network(format!("iDRAC body: {e}")))?
         .to_vec();
-    Ok((status, ctype, bytes, set_cookies))
+    Ok((status, ctype, bytes, set_cookies, pass_headers))
+}
+
+fn pass_through_response_headers(h: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (name, val) in h.iter() {
+        let n = name.as_str();
+        if n.eq_ignore_ascii_case("x_language")
+            || n.eq_ignore_ascii_case("x-language")
+            || n.eq_ignore_ascii_case("content-disposition")
+        {
+            if let Ok(v) = val.to_str() {
+                out.push((n.to_string(), v.to_string()));
+            }
+        }
+    }
+    out
 }
 
 pub fn into_response(
@@ -292,6 +308,7 @@ pub fn into_response(
     ctype: String,
     body: Vec<u8>,
     set_cookies: Vec<String>,
+    pass_headers: Vec<(String, String)>,
 ) -> Result<Response, AppError> {
     let mut builder = Response::builder()
         .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
@@ -299,7 +316,19 @@ pub fn into_response(
     builder = builder.header("X-Content-Type-Options", "nosniff");
     builder = builder.header("X-Frame-Options", "SAMEORIGIN");
     builder = builder.header("Referrer-Policy", "no-referrer");
-    // Drop upstream CSP/frame-busting; this document is served from TCS.
+    let mut has_lang = false;
+    for (n, v) in &pass_headers {
+        if n.eq_ignore_ascii_case("x_language") || n.eq_ignore_ascii_case("x-language") {
+            has_lang = true;
+        }
+        builder = builder.header(n.as_str(), v);
+    }
+    // iDRAC 7 index.html does getResponseHeader('X_Language').substring(0,2)
+    // and throws if the header is missing — the UI then never leaves the
+    // blankLoading spinner. Always provide a language header.
+    if !has_lang {
+        builder = builder.header("X_Language", "en-US");
+    }
     let mut res = builder
         .body(Body::from(body))
         .map_err(|e| AppError::Internal(format!("iDRAC asset response: {e}")))?;

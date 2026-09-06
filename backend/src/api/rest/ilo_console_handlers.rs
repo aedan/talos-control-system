@@ -342,7 +342,7 @@ async fn idrac_asset(
         .map_err(|e| (StatusCode::PAYLOAD_TOO_LARGE, format!("body: {e}")))?;
     let body = if body.is_empty() { None } else { Some(body.to_vec()) };
 
-    let (status, ctype, mut content, new_cookies) = idrac_proxy::fetch_upstream(
+    let (status, ctype, mut content, new_cookies, pass_headers) = idrac_proxy::fetch_upstream(
         &sess,
         &method,
         &rel,
@@ -365,7 +365,7 @@ async fn idrac_asset(
         .map(|(n, v)| idrac_proxy::rewrite_set_cookie(n, v, &prefix))
         .collect();
 
-    idrac_proxy::into_response(status, ctype, content, set_cookies)
+    idrac_proxy::into_response(status, ctype, content, set_cookies, pass_headers)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 

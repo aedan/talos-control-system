@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.64] — 2026-09-06
+
+### Fixed
+- **iDRAC 7 Console stuck on the loading spinner after login.** After `/session` succeeds, index.html does `getResponseHeader('X_Language').substring(0,2)` and throws if that header is missing — so `loadLocale()` / `treelist.html` never run and `blankLoading.html` spins forever. TCS now copies `X_Language` from the iDRAC (and always sends `en-US` if the BMC omitted it).
+
 ## [0.5.63] — 2026-09-06
 
 ### Fixed
