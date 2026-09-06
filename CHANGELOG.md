@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.74] — 2026-09-06
+
+### Fixed
+- **iDRAC 7 spinner still covered System Summary after 0.5.73.** The hide rewrite did not match firmware source (tabs). The overlay is `#progressPage` from `formatProgressPanel()`, not `#progressScreen`. TCS now injects CSS that hides `#progressPage` and matches `hideProgress` with a whitespace-tolerant regex.
+
 ## [0.5.73] — 2026-09-06
 
 ### Fixed
