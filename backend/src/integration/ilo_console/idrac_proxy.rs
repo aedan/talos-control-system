@@ -221,7 +221,14 @@ pub async fn fetch_upstream(
         &url,
     );
     req = req.header("User-Agent", CHROME_UA);
-    req = req.header("Accept", extra.get(header::ACCEPT).and_then(|h| h.to_str().ok()).unwrap_or("*/*"));
+    req = req.header(
+        "Accept",
+        extra
+            .get(header::ACCEPT)
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+    );
+    req = req.header("Accept-Language", "en-US,en;q=0.9");
     if let Some(c) = sess.cookie_header() {
         req = req.header("Cookie", c);
     }

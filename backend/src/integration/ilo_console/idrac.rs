@@ -210,22 +210,22 @@ struct LoginResult {
     use_native_tls: bool,
 }
 
-/// Try Redfish GetKVMSession (iDRAC 9 Direct Launch), then iDRAC 9 session
-/// API, then iDRAC 8 `/data/login`.
+/// iDRAC 7/8 `/data/login` first (R720 / 12G), then iDRAC 9 session API, then
+/// Redfish GetKVMSession Direct Launch.
 async fn login_idrac(host: &str, username: &str, password: &str) -> Result<LoginResult, AppError> {
     let mut errors = Vec::new();
 
-    match redfish_kvm_launch(host, username, password).await {
+    match idrac7_data_login(host, username, password).await {
         Ok(r) => return Ok(r),
-        Err(e) => errors.push(format!("GetKVMSession: {e}")),
+        Err(e) => errors.push(format!("iDRAC7/8 login: {e}")),
     }
     match idrac9_session_login(host, username, password).await {
         Ok(r) => return Ok(r),
         Err(e) => errors.push(format!("iDRAC9 session: {e}")),
     }
-    match idrac8_data_login(host, username, password).await {
+    match redfish_kvm_launch(host, username, password).await {
         Ok(r) => return Ok(r),
-        Err(e) => errors.push(format!("iDRAC8 login: {e}")),
+        Err(e) => errors.push(format!("GetKVMSession: {e}")),
     }
 
     Err(AppError::Network(format!(
@@ -453,46 +453,136 @@ async fn idrac9_session_login(
     finish_gui_login(origin, cookies, token, "/console").await
 }
 
-async fn idrac8_data_login(
+/// iDRAC 7/8 web login (`POST /data/login`).
+///
+/// 12G iDRAC 7 (R720, firmware 2.x) 404s every HTML asset unless the client
+/// sends `Accept-Encoding: gzip` — the pages are stored gzipped. After a
+/// successful login the authenticated UI is `/index.html?ST1=…,ST2=…` (the
+/// tokens come from `<forwardUrl>`). `/console` only redirects at the *login*
+/// page (`/start.html?console`), so it must not be used as the embed target.
+async fn idrac7_data_login(
     host: &str,
     username: &str,
     password: &str,
 ) -> Result<LoginResult, AppError> {
     let origin = bmc_origin(host);
-    let client = gui_client(false)?;
-    let url = format!("{origin}/data/login");
+    let mut last_tls_err = None;
+    for native in [false, true] {
+        match idrac7_data_login_with(native, &origin, username, password).await {
+            Ok(r) => return Ok(r),
+            Err(e) => last_tls_err = Some(e),
+        }
+    }
+    Err(last_tls_err.unwrap_or_else(|| AppError::Network("iDRAC7/8 login failed".into())))
+}
+
+async fn idrac7_data_login_with(
+    native: bool,
+    origin: &str,
+    username: &str,
+    password: &str,
+) -> Result<LoginResult, AppError> {
+    let client = gui_client(native)?;
+
+    // Prime a session and prove HTML is reachable (gzip required on iDRAC 7).
+    let _ = client
+        .get(format!("{origin}/start.html?console"))
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .send()
+        .await;
+
     let form = format!(
         "user={}&password={}",
         urlencoding::encode(username),
         urlencoding::encode(password)
     );
-    let resp = client
-        .post(&url)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        .body(form)
-        .send()
-        .await
-        .map_err(|e| AppError::Network(format!("iDRAC8 login: {e}")))?;
-    let status = resp.status().as_u16();
-    let cookies = collect_cookies(resp.headers());
-    let text = resp.text().await.unwrap_or_default();
-    if status >= 400 {
-        return Err(AppError::Network(format!("iDRAC8 login HTTP {status}")));
+    let mut cookies = Vec::new();
+    let mut text = String::new();
+    for attempt in 0..2 {
+        let resp = client
+            .post(format!("{origin}/data/login"))
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .header("Accept", "application/xml,text/xml,text/html;q=0.9,*/*;q=0.8")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .header("Referer", format!("{origin}/start.html?console"))
+            .body(form.clone())
+            .send()
+            .await
+            .map_err(|e| AppError::Network(format!("iDRAC7/8 login: {e}")))?;
+        let status = resp.status().as_u16();
+        cookies = merge_cookies(cookies, collect_cookies(resp.headers()));
+        text = resp.text().await.unwrap_or_default();
+        if status >= 400 {
+            return Err(AppError::Network(format!("iDRAC7/8 login HTTP {status}")));
+        }
+        let result = auth_result(&text);
+        if result == Some(5) && attempt == 0 {
+            // Session table full from a previous TCS attempt — free our slot.
+            let _ = client
+                .get(format!("{origin}/data/logout"))
+                .header("Cookie", cookie_header(&cookies).unwrap_or_default())
+                .send()
+                .await;
+            cookies.clear();
+            continue;
+        }
+        break;
     }
-    let lowered = text.to_ascii_lowercase();
-    if lowered.contains("<authresult>1</authresult>")
-        || lowered.contains("<authresult>99</authresult>")
-    {
-        return Err(AppError::Network("iDRAC8 login rejected".into()));
+
+    match auth_result(&text) {
+        Some(0) => {}
+        Some(1) | Some(99) => {
+            return Err(AppError::Network("iDRAC7/8 login rejected".into()));
+        }
+        Some(5) => {
+            return Err(AppError::Network(
+                "iDRAC session table full; close another console and retry".into(),
+            ));
+        }
+        Some(n) => {
+            return Err(AppError::Network(format!(
+                "iDRAC7/8 login authResult={n}"
+            )));
+        }
+        None => {
+            if !text.to_ascii_lowercase().contains("forwardurl") {
+                return Err(AppError::Network(
+                    "iDRAC7/8 login did not return a session".into(),
+                ));
+            }
+        }
     }
-    // Prefer HTML5 viewer; fall back to /console.
-    let viewer = if lowered.contains("html5") {
-        "/html5.html"
-    } else {
-        "/console"
-    };
-    finish_gui_login(origin, cookies, None, viewer).await
+
+    let (st1, st2) = parse_st_tokens(&text).ok_or_else(|| {
+        AppError::Network("iDRAC7/8 login missing ST1/ST2 session tokens".into())
+    })?;
+    // index.html JS parses ST1/ST2 out of window.location.href; ST2 must be last.
+    let viewer_path = format!("/index.html?ST1={st1},ST2={st2}");
+
+    let (use_native_tls, cookies) =
+        probe_viewer(origin, &viewer_path, &cookies, None).await?;
+    Ok(LoginResult {
+        cookies,
+        x_auth_token: None,
+        viewer_path,
+        redfish_session_uri: None,
+        use_native_tls: use_native_tls || native,
+    })
+}
+
+fn auth_result(xml: &str) -> Option<u32> {
+    let lower = xml.to_ascii_lowercase();
+    let start = lower.find("<authresult>")? + "<authresult>".len();
+    let end = lower[start..].find("</authresult>")?;
+    lower[start..start + end].trim().parse().ok()
+}
+
+fn parse_st_tokens(xml: &str) -> Option<(String, String)> {
+    // forwardUrl is `index.html?ST1=<hex>,ST2=<hex>`
+    let re = regex::Regex::new(r"ST1=([0-9a-fA-F]+),ST2=([0-9a-fA-F]+)").ok()?;
+    let caps = re.captures(xml)?;
+    Some((caps[1].to_string(), caps[2].to_string()))
 }
 
 async fn finish_gui_login(
@@ -550,6 +640,7 @@ async fn probe_viewer_with(
     let mut req = client
         .get(&url)
         .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+        .header("Accept-Language", "en-US,en;q=0.9")
         .header("Upgrade-Insecure-Requests", "1");
     if let Some(c) = cookie_header(cookies) {
         req = req.header("Cookie", c);
@@ -587,6 +678,13 @@ async fn probe_viewer_with(
         return Err(AppError::Network(format!(
             "viewer {path} did not return HTML"
         )));
+    }
+    // Authenticated iDRAC 7 index.html is ~45k; the login page is ~3k. A
+    // redirect to start.html means the session cookie did not stick.
+    if path.contains("index.html") && body.len() < 8000 {
+        return Err(AppError::Network(
+            "iDRAC returned the login page instead of the authenticated UI".into(),
+        ));
     }
     Ok(cookies)
 }
@@ -717,5 +815,22 @@ mod tests {
         let (n, v) = parse_set_cookie("_appwebSessionId_=abc; Path=/; HttpOnly").unwrap();
         assert_eq!(n, "_appwebSessionId_");
         assert_eq!(v, "abc");
+        let (n, v) = parse_set_cookie("-http-session-=37::http.session::xyz; Path=/").unwrap();
+        assert_eq!(n, "-http-session-");
+        assert_eq!(v, "37::http.session::xyz");
+    }
+
+    #[test]
+    fn parse_login_xml() {
+        let xml = r#"<?xml version="1.0"?><root><status>ok</status><authResult>0</authResult><forwardUrl>index.html?ST1=abc123,ST2=def456</forwardUrl></root>"#;
+        assert_eq!(auth_result(xml), Some(0));
+        assert_eq!(
+            parse_st_tokens(xml),
+            Some(("abc123".into(), "def456".into()))
+        );
+        assert_eq!(
+            auth_result("<authResult>5</authResult>"),
+            Some(5)
+        );
     }
 }

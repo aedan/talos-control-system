@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.61] — 2026-09-06
+
+### Fixed
+- **iDRAC 7 (R720 / 12G) virtual console 404ed every HTML page.** iDRAC 7 stores its GUI gzip-compressed and returns a fake `404 Access Error` unless the client sends `Accept-Encoding: gzip`. TCS now uses a gzip-capable HTTP client, logs in with `POST /data/login`, and embeds the authenticated UI at `/index.html?ST1=…,ST2=…` (the tokens from `<forwardUrl>`). `/console` only redirects to the *login* page on this firmware, so it is no longer used as the embed target. Session-table-full (`authResult=5`) triggers a logout retry.
+
 ## [0.5.60] — 2026-09-05
 
 ### Added
