@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.72] — 2026-09-06
+
+### Fixed
+- **iDRAC 7 center pane still spun; menu clicks still did nothing after 0.5.71.** `sysSummary.html` was never requested. Child frames cannot read sibling `contentWindow`, so `f_getHTML` died on `treelist.Lookup`. Frame lookup now uses `parent.frames[name]`, the `da` frame starts on `sysSummary.html` instead of `blankLoading.html`, and the frameset retries `snb.f_getHTML` from the parent (the direction that can see child windows).
+
 ## [0.5.71] — 2026-09-06
 
 ### Fixed
