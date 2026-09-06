@@ -1916,7 +1916,7 @@ cluster:
     border: 1px solid rgba(248,113,113,0.4); border-radius: 6px;
     padding: 0.3rem 0.8rem; font-size: 0.8rem; max-width: 80%;
   }
-  .ilo-frame { width: 100%; flex: 1 1 auto; min-height: 0; border: 0; background: #000; display: block; }
+  .ilo-frame { width: 100%; flex: 1 1 auto; min-height: 480px; border: 0; background: #fff; display: block; }
   .sol-term { width: 100%; flex: 1 1 auto; min-height: 0; padding: 0.25rem; background: #0b0e14; }
   .console-empty { color: var(--tcs-text-muted); padding: 2rem; text-align: center; }
 </style>

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.76] — 2026-09-06
+
+### Fixed
+- **iDRAC 7 center pane stayed white after the spinner was hidden.** `sysSummary.html` is only a wrapper with a `position:fixed` nested iframe; `sysSummaryData.html` keeps `#contentArea` hidden until JS that was throwing. The `da` frame now loads `sysSummaryData.html` directly, `#contentArea` is forced visible, and the frameset gives the content row a real height (`80%`) so it is not collapsed inside the TCS overlay.
+
 ## [0.5.75] — 2026-09-06
 
 ### Fixed
