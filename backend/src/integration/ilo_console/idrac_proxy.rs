@@ -168,6 +168,18 @@ fn neutralize_idrac_framebust(text: &str) -> String {
             "progressBar.hide(); var _ps=document.getElementById(\"progressScreen\"); if(_ps)_ps.style.display=\"none\"; var _pp=document.getElementById(\"progressPage\"); if(_pp)_pp.style.display=\"none\";",
         )
         .into_owned();
+    // virtualconsole.html: replace launchKVM so Safari/Firefox never take the
+    // Java `window.open(jnlp, '_self')` path.
+    let launch = regex::Regex::new(
+        r"function\s+launchKVM\s*\(\s*arg\s*\)\s*\{[\s\S]*?launchConsole\s*\(\s*isKVMEnabled\s*,\s*arg\s*\)\s*;\s*\}",
+    )
+    .expect("idrac launchKVM");
+    let t = launch
+        .replace_all(
+            &t,
+            r#"function launchKVM(arg){try{var port="5900";try{var el=document.getElementById("kvmPort");if(el&&el.value)port=el.value;}catch(e){}var u="virtualconsolehtml5.html?ipAddr="+encodeURIComponent(location.hostname)+"&kvmPort="+port+"&vmPriv=true&title=KVM&lang=en&aimSession=&ST2=&TokenName=ST1&TokenKey=";if(typeof tcsNav==="function")tcsNav("da",u);else window.location.href=u;}catch(e){}}"#,
+        )
+        .into_owned();
     // sysSummaryData.html top-level `top.aimGetBoolPropObj['x']` throws if
     // the frameset has not finished session/locale yet (da starts early).
     let t = t
@@ -776,11 +788,11 @@ mod tests {
         let js2 = r#"parent.snb.f_getHTML(newCat, tab, id, flag);"#;
         let out2 = neutralize_idrac_framebust(js2);
         assert!(out2.contains("tcsOpenCat(newCat,tab,id)"), "{out2}");
-        let launch = "var pluginType = top.aimGetIntPropObj['gui_kvm_plugin_type'];\ntop.htmlViewerWindow = window.open(htmlURL,'','toolbar=no,menubar=no,status=no,location=yes,resizable ');";
+        let launch = "function launchKVM(arg) {\n\t\t\tlaunchConsole(isKVMEnabled, arg);\n\t\t}";
         let out3 = neutralize_idrac_framebust(launch);
-        assert!(out3.contains("KVM_HTML_PLUGIN"), "{out3}");
+        assert!(out3.contains("virtualconsolehtml5.html"), "{out3}");
         assert!(out3.contains("tcsNav"), "{out3}");
-        assert!(!out3.contains("window.open(htmlURL"));
+        assert!(!out3.contains("launchConsole(isKVMEnabled"));
         assert!(out.contains(r#"tcsCall("snb","f_getHTML","#), "{out}");
         assert!(!out.contains("parent.da.location"));
         assert!(!out.contains("parent.snb.f_getHTML"));

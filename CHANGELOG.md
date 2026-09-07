@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.79] — 2026-09-07
+
+### Fixed
+- **Launch Virtual Console still did nothing after 0.5.78.** The HTML5 `window.open` rewrite missed firmware whitespace, so Safari/Firefox still ran Java `viewer.jnlp` in `_self`. `launchKVM()` is now replaced wholesale so the click always loads `virtualconsolehtml5.html` in the center pane.
+
 ## [0.5.78] — 2026-09-06
 
 ### Fixed
