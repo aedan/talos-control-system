@@ -82,12 +82,12 @@ pub fn inject_prefix_hooks(html: &str, prefix: &str) -> String {
     // expecting index.html to be the browsing-context top. Inside TCS it is
     // not, so we expose `tcsTop` as the nearest window still on this session.
     let script = format!(
-        r#"<script>(function(){{var P="{pfx}";function tcsIsFs(w){{try{{return !!(w&&w.document&&w.document.getElementsByTagName("frameset").length);}}catch(e){{return false;}}}}function tcsTopGet(){{var list=[];function add(x){{try{{if(x&&list.indexOf(x)<0)list.push(x);}}catch(e){{}}}}add(window);try{{var fe=window.frameElement;if(fe&&fe.ownerDocument)add(fe.ownerDocument.defaultView);}}catch(e){{}}var w=window;try{{while(w){{add(w);if(!w.parent||w.parent===w||w.parent===window.top)break;w=w.parent;}}}}catch(e){{}}for(var i=0;i<list.length;i++){{try{{if(list[i].localeObj)return list[i];}}catch(e){{}}}}for(var i=0;i<list.length;i++){{if(tcsIsFs(list[i]))return list[i];}}return list[0]||window;}}function tcsEl(name){{var doc;try{{doc=tcsTopGet().document;}}catch(e){{return null;}}try{{var n=doc.getElementsByName(name);if(n&&n[0])return n[0];}}catch(e){{}}try{{var fs=doc.getElementsByTagName("frame");for(var i=0;i<fs.length;i++){{if(fs[i].getAttribute("name")===name)return fs[i];}}}}catch(e){{}}return null;}}function tcsWin(f){{if(!f)return null;try{{if(f.document)return f;}}catch(e){{}}try{{if(f.contentWindow)return f.contentWindow;}}catch(e){{}}return null;}}function tcsFrame(name){{try{{var w=tcsWin(window.parent&&window.parent.frames&&window.parent.frames[name]);if(w)return w;}}catch(e){{}}try{{var r=tcsTopGet();var w=tcsWin(r.frames&&r.frames[name]);if(w)return w;}}catch(e){{}}try{{var w=tcsWin(window.parent&&window.parent[name]);if(w)return w;}}catch(e){{}}return tcsWin(tcsEl(name));}}function tcsAbs(u){{if(typeof u!=="string"||!u)return u;if(u.charAt(0)==='#')return u;if(/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(u)){{try{{var x=new URL(u,location.href);if(x.origin===location.origin&&x.pathname.indexOf(P)!==0){{x.pathname=P+x.pathname;return x.toString();}}}}catch(e){{}}return u;}}if(u.indexOf("//")===0)return u;if(u.charAt(0)==="/")return u.indexOf(P)===0?u:P+u;return P+"/"+u.replace(/^\.\//,"");}}function tcsNav(name,u){{var abs=tcsAbs(u);if(typeof name!=="string"&&name&&name.name)name=name.name;if(!name)return;try{{var el=tcsEl(name);if(el){{el.src=abs;return;}}}}catch(e){{}}try{{tcsTopGet().postMessage({{tcsIdracNav:name,url:abs}},"*");}}catch(e){{}}}}function tcsCall(frame,fn){{var args=Array.prototype.slice.call(arguments,2);try{{var w=tcsFrame(frame);if(w&&typeof w[fn]==="function")return w[fn].apply(w,args);}}catch(e){{}}try{{tcsTopGet().postMessage({{tcsIdracCall:1,frame:frame,fn:fn,args:args}},"*");}}catch(e){{}}}}try{{window.addEventListener("message",function(ev){{var d=ev.data;if(!d||!tcsIsFs(window))return;if(d.tcsIdracNav){{try{{var el=tcsEl(d.tcsIdracNav);if(el)el.src=d.url;}}catch(e){{}}}}if(d.tcsIdracCall){{try{{var w=tcsFrame(d.frame);if(w&&typeof w[d.fn]==="function")w[d.fn].apply(w,d.args||[]);}}catch(e){{}}}}}});}}catch(e){{}}try{{Object.defineProperty(window,"tcsTop",{{get:tcsTopGet}});}}catch(e){{window.tcsTop=tcsTopGet();}}window.tcsAbs=tcsAbs;window.tcsNav=tcsNav;window.tcsFrame=tcsFrame;window.tcsCall=tcsCall;try{{window.bPreviewLoaded=true;}}catch(e){{}}function tcsOpenCat(cat,tab,id){{var list=null;try{{if(window.data)list=window.data;}}catch(e){{}}try{{if(!list){{var tl=tcsFrame("treelist");if(tl&&tl.data)list=tl.data;}}}}catch(e){{}}try{{if(!list&&tcsTopGet().__tcsTreeData)list=tcsTopGet().__tcsTreeData;}}catch(e){{}}if(!list||!cat)return;var url="";for(var i=0;i<list.length;i++){{var r=list[i];if(!r||String(r[0])!==String(cat)||!r[3])continue;if(id&&String(r[2])===String(id)){{url=r[3];break;}}if(!url)url=r[3];}}if(!url)return;url+=url.indexOf("?")<0?"?":"&";url+="cat="+encodeURIComponent(cat);if(tab)url+="&tab="+encodeURIComponent(tab);if(id)url+="&id="+encodeURIComponent(id);tcsNav("da",url);}}window.tcsOpenCat=tcsOpenCat;try{{setInterval(function(){{try{{if(window.data&&window.data.length)tcsTopGet().__tcsTreeData=window.data;}}catch(e){{}}}},1000);}}catch(e){{}}try{{if(tcsIsFs(window)){{var _n=0;var _iv=setInterval(function(){{_n++;try{{var da=tcsEl("da");var snb=tcsFrame("snb");var tl=tcsFrame("treelist");var src=da?(da.getAttribute("src")||da.src||""):"";if(snb&&typeof snb.f_getHTML==="function"&&tl&&tl.data&&tl.data.length){{snb.f_getHTML(tl.data[0][0],"","","");if(src.indexOf("sysSummary")>=0||_n>8)clearInterval(_iv);}}else if(_n===6){{tcsNav("da","sysSummaryData.html");}}}}catch(e){{}}if(_n>40)clearInterval(_iv);}},500);}}}}catch(e){{}}function f(u){{if(typeof u!=="string")return u;if(u.charAt(0)==="/"&&u.indexOf(P)!==0&&u.indexOf("//")!==0)return P+u;return u;}}try{{var OF=window.fetch;window.fetch=function(u,o){{if(typeof u==="string")u=f(u);else if(u&&u.url){{try{{u=new Request(f(u.url),u)}}catch(e){{}}}}return OF.call(this,u,o);}};var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){{arguments[1]=f(u);return xo.apply(this,arguments);}};var OW=window.WebSocket;window.WebSocket=function(u,p){{try{{var x=new URL(u,location.href);x.protocol=location.protocol==="https:"?"wss:":"ws:";if(x.port==="5900"||x.port==="5901"||x.port==="5902"){{x.host=location.host;x.pathname=P+"/__rfb/"+x.port;}}else{{x.host=location.host;if(x.pathname.indexOf(P)!==0)x.pathname=P+x.pathname;}}u=x.toString();}}catch(e){{}}return p!==undefined?new OW(u,p):new OW(u);}};window.WebSocket.prototype=OW.prototype;window.WebSocket.CONNECTING=OW.CONNECTING;window.WebSocket.OPEN=OW.OPEN;window.WebSocket.CLOSING=OW.CLOSING;window.WebSocket.CLOSED=OW.CLOSED;if(window.Worker){{var Wr=window.Worker;window.Worker=function(u,o){{return new Wr(f(u),o);}};}}var sa=HTMLElement.prototype.setAttribute;HTMLElement.prototype.setAttribute=function(n,v){{if((n==="src"||n==="href"||n==="action")&&typeof v==="string")v=f(v);return sa.call(this,n,v);}};}}catch(e){{}}}})();</script>"#
+        r#"<script>(function(){{var P="{pfx}";function tcsIsFs(w){{try{{return !!(w&&w.document&&w.document.getElementsByTagName("frameset").length);}}catch(e){{return false;}}}}function tcsTopGet(){{var list=[];function add(x){{try{{if(x&&list.indexOf(x)<0)list.push(x);}}catch(e){{}}}}add(window);try{{var fe=window.frameElement;if(fe&&fe.ownerDocument)add(fe.ownerDocument.defaultView);}}catch(e){{}}var w=window;try{{while(w){{add(w);if(!w.parent||w.parent===w||w.parent===window.top)break;w=w.parent;}}}}catch(e){{}}function hasLoc(x){{try{{return !!(x&&x.localeObj&&x.localeObj["btn_ok"]);}}catch(e){{return false;}}}}for(var i=0;i<list.length;i++){{try{{if(tcsIsFs(list[i])&&hasLoc(list[i]))return list[i];}}catch(e){{}}}}for(var i=0;i<list.length;i++){{try{{if(list[i].TOKEN_VALUE&&hasLoc(list[i]))return list[i];}}catch(e){{}}}}for(var i=0;i<list.length;i++){{if(hasLoc(list[i]))return list[i];}}for(var i=0;i<list.length;i++){{if(tcsIsFs(list[i]))return list[i];}}return list[0]||window;}}function tcsEl(name){{var doc;try{{doc=tcsTopGet().document;}}catch(e){{return null;}}try{{var n=doc.getElementsByName(name);if(n&&n[0])return n[0];}}catch(e){{}}try{{var fs=doc.getElementsByTagName("frame");for(var i=0;i<fs.length;i++){{if(fs[i].getAttribute("name")===name)return fs[i];}}}}catch(e){{}}return null;}}function tcsWin(f){{if(!f)return null;try{{if(f.document)return f;}}catch(e){{}}try{{if(f.contentWindow)return f.contentWindow;}}catch(e){{}}return null;}}function tcsFrame(name){{try{{var w=tcsWin(window.parent&&window.parent.frames&&window.parent.frames[name]);if(w)return w;}}catch(e){{}}try{{var r=tcsTopGet();var w=tcsWin(r.frames&&r.frames[name]);if(w)return w;}}catch(e){{}}try{{var w=tcsWin(window.parent&&window.parent[name]);if(w)return w;}}catch(e){{}}return tcsWin(tcsEl(name));}}function tcsAbs(u){{if(typeof u!=="string"||!u)return u;if(u.charAt(0)==='#')return u;if(/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(u)){{try{{var x=new URL(u,location.href);if(x.origin===location.origin&&x.pathname.indexOf(P)!==0){{x.pathname=P+x.pathname;return x.toString();}}}}catch(e){{}}return u;}}if(u.indexOf("//")===0)return u;if(u.charAt(0)==="/")return u.indexOf(P)===0?u:P+u;return P+"/"+u.replace(/^\.\//,"");}}function tcsNav(name,u){{var abs=tcsAbs(u);if(typeof name!=="string"&&name&&name.name)name=name.name;if(!name)return;try{{var el=tcsEl(name);if(el){{el.src=abs;return;}}}}catch(e){{}}try{{tcsTopGet().postMessage({{tcsIdracNav:name,url:abs}},"*");}}catch(e){{}}}}function tcsCall(frame,fn){{var args=Array.prototype.slice.call(arguments,2);try{{var w=tcsFrame(frame);if(w&&typeof w[fn]==="function")return w[fn].apply(w,args);}}catch(e){{}}try{{tcsTopGet().postMessage({{tcsIdracCall:1,frame:frame,fn:fn,args:args}},"*");}}catch(e){{}}}}try{{window.addEventListener("message",function(ev){{var d=ev.data;if(!d||!tcsIsFs(window))return;if(d.tcsIdracNav){{try{{var el=tcsEl(d.tcsIdracNav);if(el)el.src=d.url;}}catch(e){{}}}}if(d.tcsIdracCall){{try{{var w=tcsFrame(d.frame);if(w&&typeof w[d.fn]==="function")w[d.fn].apply(w,d.args||[]);}}catch(e){{}}}}}});}}catch(e){{}}try{{Object.defineProperty(window,"tcsTop",{{get:tcsTopGet}});}}catch(e){{window.tcsTop=tcsTopGet();}}window.tcsAbs=tcsAbs;window.tcsNav=tcsNav;window.tcsFrame=tcsFrame;window.tcsCall=tcsCall;try{{window.bPreviewLoaded=true;}}catch(e){{}}function tcsOpenCat(cat,tab,id){{var list=null;try{{if(window.data)list=window.data;}}catch(e){{}}try{{if(!list){{var tl=tcsFrame("treelist");if(tl&&tl.data)list=tl.data;}}}}catch(e){{}}try{{if(!list&&tcsTopGet().__tcsTreeData)list=tcsTopGet().__tcsTreeData;}}catch(e){{}}if(!list||!cat)return;var url="";for(var i=0;i<list.length;i++){{var r=list[i];if(!r||String(r[0])!==String(cat)||!r[3])continue;if(id&&String(r[2])===String(id)){{url=r[3];break;}}if(!url)url=r[3];}}if(!url)return;url+=url.indexOf("?")<0?"?":"&";url+="cat="+encodeURIComponent(cat);if(tab)url+="&tab="+encodeURIComponent(tab);if(id)url+="&id="+encodeURIComponent(id);tcsNav("da",url);}}window.tcsOpenCat=tcsOpenCat;try{{setInterval(function(){{try{{if(window.data&&window.data.length)tcsTopGet().__tcsTreeData=window.data;}}catch(e){{}}}},1000);}}catch(e){{}}try{{if(tcsIsFs(window)){{var _n=0;var _iv=setInterval(function(){{_n++;try{{var da=tcsEl("da");var snb=tcsFrame("snb");var tl=tcsFrame("treelist");var src=da?(da.getAttribute("src")||da.src||""):"";if(snb&&typeof snb.f_getHTML==="function"&&tl&&tl.data&&tl.data.length){{snb.f_getHTML(tl.data[0][0],"","","");if(src.indexOf("sysSummary")>=0||_n>8)clearInterval(_iv);}}else if(_n===6){{tcsNav("da","sysSummaryData.html");}}}}catch(e){{}}if(_n>40)clearInterval(_iv);}},500);}}}}catch(e){{}}function f(u){{if(typeof u!=="string")return u;if(u.charAt(0)==="/"&&u.indexOf(P)!==0&&u.indexOf("//")!==0)return P+u;return u;}}try{{var OF=window.fetch;window.fetch=function(u,o){{if(typeof u==="string")u=f(u);else if(u&&u.url){{try{{u=new Request(f(u.url),u)}}catch(e){{}}}}return OF.call(this,u,o);}};var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){{arguments[1]=f(u);return xo.apply(this,arguments);}};var OW=window.WebSocket;window.WebSocket=function(u,p){{try{{var x=new URL(u,location.href);x.protocol=location.protocol==="https:"?"wss:":"ws:";if(x.port==="5900"||x.port==="5901"||x.port==="5902"){{x.host=location.host;x.pathname=P+"/__rfb/"+x.port;}}else{{x.host=location.host;if(x.pathname.indexOf(P)!==0)x.pathname=P+x.pathname;}}u=x.toString();}}catch(e){{}}return p!==undefined?new OW(u,p):new OW(u);}};window.WebSocket.prototype=OW.prototype;window.WebSocket.CONNECTING=OW.CONNECTING;window.WebSocket.OPEN=OW.OPEN;window.WebSocket.CLOSING=OW.CLOSING;window.WebSocket.CLOSED=OW.CLOSED;if(window.Worker){{var Wr=window.Worker;window.Worker=function(u,o){{return new Wr(f(u),o);}};}}var sa=HTMLElement.prototype.setAttribute;HTMLElement.prototype.setAttribute=function(n,v){{if((n==="src"||n==="href"||n==="action")&&typeof v==="string")v=f(v);return sa.call(this,n,v);}};}}catch(e){{}}}})();</script>"#
     );
     let base = format!("<base href=\"{pfx}/\">");
     // Stock iDRAC 7 sysSummary writes #progressPage and only hides it for
     // OEM custom GUI. The overlay otherwise covers the summary iframe.
-    let hide_progress = r#"<style id="tcsHideProgress">#progressPage,.progressBackground,.progressContainer,#progressGraphic,#progressScreen{display:none!important;visibility:hidden!important}html,body,#dataarea,#formArea,#contentArea,.data-area,.table_container,.container_content,table.system_summary{display:block!important;visibility:visible!important;color:#111!important}#contentArea,#formArea{min-height:240px;background:#fff}iframe#sysIframe{position:absolute!important;top:0;left:0;width:100%;height:100%}</style>"#;
+    let hide_progress = r#"<style id="tcsHideProgress">#progressPage,.progressBackground,.progressContainer,#progressGraphic,#progressScreen{display:none!important;visibility:hidden!important}html,body,#dataarea,#formArea,#contentArea,.data-area,.table_container,.container_content,table.system_summary{display:block!important;visibility:visible!important;color:#111!important}#contentArea,#formArea{min-height:240px;background:#fff}iframe#sysIframe{position:absolute!important;top:0;left:0;width:100%;height:100%}#canvasParentDiv,#kvmCanvas,canvas#kvmCanvas{display:block!important;width:100%;height:100%;min-height:360px;background:#111}</style>"#;
     let hook = format!("{script}{hide_progress}{base}");
     let lower = html.to_ascii_lowercase();
     if let Some(idx) = lower.find("<head") {
@@ -177,7 +177,7 @@ fn neutralize_idrac_framebust(text: &str) -> String {
     let t = launch
         .replace_all(
             &t,
-            r#"function launchKVM(arg){try{var port="5900";try{var el=document.getElementById("kvmPort");if(el&&el.value)port=el.value;}catch(e){}var u="virtualconsolehtml5.html?ipAddr="+encodeURIComponent(location.hostname)+"&kvmPort="+port+"&vmPriv=true&title=KVM&lang=en&aimSession=&ST2=&TokenName=ST1&TokenKey=";if(typeof tcsNav==="function")tcsNav("da",u);else window.location.href=u;}catch(e){}}"#,
+            r#"function launchKVM(arg){try{var T=(typeof tcsTop!=="undefined"&&tcsTop)?tcsTop:window;var port="5900";try{var el=document.getElementById("kvmPort");if(el&&el.value)port=el.value;}catch(e){}try{if(T.aimGetIntPropObj&&T.aimGetIntPropObj["rp_int_apcp_port"])port=String(T.aimGetIntPropObj["rp_int_apcp_port"]);}catch(e){}var aim="",st2="",tokName="ST1",tokKey="",lang="en";try{if(T.ssnObj&&T.ssnObj["aimSession"]!=null)aim=String(T.ssnObj["aimSession"]);}catch(e){}try{if(T.TOKEN_VALUE)st2=String(T.TOKEN_VALUE);}catch(e){}try{if(T.TOKEN_NAME1)tokName=String(T.TOKEN_NAME1);}catch(e){}try{if(T.TOKEN_VALUE1)tokKey=String(T.TOKEN_VALUE1);}catch(e){}try{if(T.lang)lang=String(T.lang);}catch(e){}var u="virtualconsolehtml5.html?ipAddr="+encodeURIComponent(location.hostname)+"&kvmPort="+encodeURIComponent(port)+"&vmPriv=true&title=KVM&lang="+encodeURIComponent(lang)+"&aimSession="+encodeURIComponent(aim)+"&ST2="+encodeURIComponent(st2)+"&TokenName="+encodeURIComponent(tokName)+"&TokenKey="+encodeURIComponent(tokKey);if(typeof tcsNav==="function")tcsNav("da",u);else window.location.href=u;}catch(e){}}"#,
         )
         .into_owned();
     // sysSummaryData.html top-level `top.aimGetBoolPropObj['x']` throws if
@@ -215,14 +215,43 @@ fn neutralize_idrac_framebust(text: &str) -> String {
         r#"parent.snb.f_getHTML_F(tab, "", "", "");"#,
         r#"tcsCall("snb","f_getHTML_F",tab,"","","");tcsOpenCat(tab,"","");"#,
     );
-    // iDRAC 7 Launch Console: load HTML5 viewer in the da frame.
+    // iDRAC 7 Launch Console: load HTML5 viewer in the da frame. Firmware
+    // indents this assignment with tabs, so a literal replace misses.
+    let open_html = regex::Regex::new(
+        r"top\s*\.\s*htmlViewerWindow\s*=\s*window\.open\s*\(\s*htmlURL\s*,[^;]*\)",
+    )
+    .expect("idrac htmlURL open");
+    let t = open_html
+        .replace_all(
+            &t,
+            r#"try{tcsNav("da", htmlURL);}catch(e){} try{tcsTop.htmlViewerWindow=window;}catch(e){}"#,
+        )
+        .into_owned();
+    // HTML5 viewer is a popup in stock firmware (`window.opener.top`). In the
+    // da frame there is no opener, and `tcsTop` must be the frameset — not this
+    // page's empty `localeObj`.
     let t = t.replace(
-        "top.htmlViewerWindow = window.open(htmlURL,'','toolbar=no,menubar=no,status=no,location=yes,resizable ');",
-        "try{tcsNav(\"da\", htmlURL);}catch(e){} try{tcsTop.htmlViewerWindow=window;}catch(e){}",
+        "localeObj1 = window.opener.top.localeObj;",
+        r#"localeObj1=(function(){try{var t=tcsTop;if(t&&t.localeObj&&t.localeObj["viewer_connectingViewer"])return t.localeObj;}catch(e){}try{var w=window.parent;while(w){if(w.localeObj&&w.localeObj["viewer_connectingViewer"])return w.localeObj;if(!w.parent||w.parent===w)break;w=w.parent;}}catch(e){}return {};})();"#,
     );
     let t = t.replace(
         "localeObj = window.opener.top.localeObj;",
-        "localeObj=(window.opener&&(window.opener.tcsTop||window.opener).localeObj)||(typeof tcsTop!==\"undefined\"&&tcsTop.localeObj)||{};",
+        r#"localeObj=(function(){try{var t=tcsTop;if(t&&t.localeObj&&t.localeObj["btn_ok"])return t.localeObj;}catch(e){}try{var w=window.parent;while(w){if(w.localeObj&&w.localeObj["btn_ok"])return w.localeObj;if(!w.parent||w.parent===w)break;w=w.parent;}}catch(e){}return {};})();"#,
+    );
+    let t = t.replace(
+        "window.opener.top.lang.toLowerCase()",
+        r#"(String((typeof tcsTop!=="undefined"&&tcsTop.lang)||"en").toLowerCase())"#,
+    );
+    let t = t.replace("window.opener.top", "tcsTop");
+    // Avocent cert dialog is window.open of a 700x500 page; in TCS it shows
+    // "undefined" and blocks KVM until dismissed without accepting the cert.
+    let t = t.replace(
+        "//  htmlViewer.disableRPCertPopup();",
+        "htmlViewer.disableRPCertPopup();",
+    );
+    let t = t.replace(
+        "htmlViewer.connectRPViewer();",
+        "try{htmlViewer.disableRPCertPopup();}catch(e){} htmlViewer.connectRPViewer();",
     );
     let t = t.replace(
         r#"parent.document.getElementById("navigationBar")"#,
@@ -792,10 +821,32 @@ mod tests {
         let out3 = neutralize_idrac_framebust(launch);
         assert!(out3.contains("virtualconsolehtml5.html"), "{out3}");
         assert!(out3.contains("tcsNav"), "{out3}");
+        assert!(out3.contains("TOKEN_VALUE"), "{out3}");
+        assert!(out3.contains("aimSession"), "{out3}");
         assert!(!out3.contains("launchConsole(isKVMEnabled"));
         assert!(out.contains(r#"tcsCall("snb","f_getHTML","#), "{out}");
         assert!(!out.contains("parent.da.location"));
         assert!(!out.contains("parent.snb.f_getHTML"));
+    }
+
+    #[test]
+    fn html5_viewer_uses_frameset_locale_and_skips_cert_popup() {
+        let js = concat!(
+            "localeObj1 = window.opener.top.localeObj;\n",
+            "localeObj = window.opener.top.localeObj;\n",
+            "var strLanguage = window.opener.top.lang.toLowerCase();\n",
+            "       //  htmlViewer.disableRPCertPopup();\n",
+            "        htmlViewer.connectRPViewer();\n",
+            "\t\t\t\t\t\ttop.htmlViewerWindow = window.open(htmlURL,'','toolbar=no,menubar=no,status=no,location=yes,resizable ');\n",
+        );
+        let out = neutralize_idrac_framebust(js);
+        assert!(out.contains("viewer_connectingViewer"), "{out}");
+        assert!(out.contains("btn_ok"), "{out}");
+        assert!(!out.contains("window.opener.top"), "{out}");
+        assert!(out.contains("disableRPCertPopup()"), "{out}");
+        assert!(!out.contains("//  htmlViewer.disableRPCertPopup"), "{out}");
+        assert!(out.contains(r#"tcsNav("da", htmlURL)"#), "{out}");
+        assert!(!out.contains("window.open(htmlURL"), "{out}");
     }
 
     #[test]

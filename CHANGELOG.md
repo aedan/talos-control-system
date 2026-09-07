@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.80] — 2026-09-07
+
+### Fixed
+- **iDRAC 7 HTML5 console opened with `undefined` popups and no video.** Launch used an empty session URL, the Avocent viewer treats `window.opener.top` as the iDRAC frameset (it is not, inside TCS), and the cert-accept popup showed `tcs.kronos.cloudmunchers.net undefined`. TCS now copies ST2/aimSession from the frameset, maps `opener.top` to `tcsTop`, and disables the cert popup so KVM can connect.
+
 ## [0.5.79] — 2026-09-07
 
 ### Fixed
