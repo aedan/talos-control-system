@@ -75,14 +75,25 @@ pub fn is_safe_idrac_path(path: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | '$' | '~' | '+'))
 }
 
+/// Patch `WebSocket` in both the page and Worker scripts. Avocent's HTML5
+/// viewer dials `wss://<ip>:5900` from `websockethandler.js` (a Worker),
+/// which does not see the page-level constructor wrap.
+fn websocket_hook_js(prefix: &str) -> String {
+    let pfx = prefix.trim_end_matches('/');
+    format!(
+        r#"(function(){{try{{var P="{pfx}";var g=typeof self!=="undefined"?self:this;if(!g||!g.WebSocket||g.WebSocket.__tcsRfb)return;var OW=g.WebSocket;function wrap(u){{try{{var s=String(u);var x=new URL(s,g.location&&g.location.href);var port=x.port||"";if(!port){{var m=s.match(/:590([0-2])(?:[^\d]|$)/);if(m)port="590"+m[1];}}if(port==="5900"||port==="5901"||port==="5902"){{x.protocol=(g.location&&g.location.protocol==="http:")?"ws:":"wss:";x.host=g.location.host;x.pathname=P+"/__rfb/"+port;x.search="";x.hash="";return x.toString();}}}}catch(e){{}}return u;}}function W(u,p){{u=wrap(u);return p!==undefined?new OW(u,p):new OW(u);}}W.prototype=OW.prototype;W.CONNECTING=OW.CONNECTING;W.OPEN=OW.OPEN;W.CLOSING=OW.CLOSING;W.CLOSED=OW.CLOSED;W.__tcsRfb=1;g.WebSocket=W;}}catch(e){{}}}})();"#
+    )
+}
+
 /// Build the injected rewrite script + `<base>` for a viewer HTML document.
 pub fn inject_prefix_hooks(html: &str, prefix: &str) -> String {
     let pfx = prefix.trim_end_matches('/');
+    let ws_hook = websocket_hook_js(pfx);
     // iDRAC 7 child frames use `top.TOKEN_VALUE` / `top.snb` / `top.treelist`
     // expecting index.html to be the browsing-context top. Inside TCS it is
     // not, so we expose `tcsTop` as the nearest window still on this session.
     let script = format!(
-        r#"<script>(function(){{var P="{pfx}";function tcsIsFs(w){{try{{return !!(w&&w.document&&w.document.getElementsByTagName("frameset").length);}}catch(e){{return false;}}}}function tcsTopGet(){{var list=[];function add(x){{try{{if(x&&list.indexOf(x)<0)list.push(x);}}catch(e){{}}}}add(window);try{{var fe=window.frameElement;if(fe&&fe.ownerDocument)add(fe.ownerDocument.defaultView);}}catch(e){{}}var w=window;try{{while(w){{add(w);if(!w.parent||w.parent===w||w.parent===window.top)break;w=w.parent;}}}}catch(e){{}}function hasLoc(x){{try{{return !!(x&&x.localeObj&&x.localeObj["btn_ok"]);}}catch(e){{return false;}}}}for(var i=0;i<list.length;i++){{try{{if(tcsIsFs(list[i])&&hasLoc(list[i]))return list[i];}}catch(e){{}}}}for(var i=0;i<list.length;i++){{try{{if(list[i].TOKEN_VALUE&&hasLoc(list[i]))return list[i];}}catch(e){{}}}}for(var i=0;i<list.length;i++){{if(hasLoc(list[i]))return list[i];}}for(var i=0;i<list.length;i++){{if(tcsIsFs(list[i]))return list[i];}}return list[0]||window;}}function tcsEl(name){{var doc;try{{doc=tcsTopGet().document;}}catch(e){{return null;}}try{{var n=doc.getElementsByName(name);if(n&&n[0])return n[0];}}catch(e){{}}try{{var fs=doc.getElementsByTagName("frame");for(var i=0;i<fs.length;i++){{if(fs[i].getAttribute("name")===name)return fs[i];}}}}catch(e){{}}return null;}}function tcsWin(f){{if(!f)return null;try{{if(f.document)return f;}}catch(e){{}}try{{if(f.contentWindow)return f.contentWindow;}}catch(e){{}}return null;}}function tcsFrame(name){{try{{var w=tcsWin(window.parent&&window.parent.frames&&window.parent.frames[name]);if(w)return w;}}catch(e){{}}try{{var r=tcsTopGet();var w=tcsWin(r.frames&&r.frames[name]);if(w)return w;}}catch(e){{}}try{{var w=tcsWin(window.parent&&window.parent[name]);if(w)return w;}}catch(e){{}}return tcsWin(tcsEl(name));}}function tcsAbs(u){{if(typeof u!=="string"||!u)return u;if(u.charAt(0)==='#')return u;if(/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(u)){{try{{var x=new URL(u,location.href);if(x.origin===location.origin&&x.pathname.indexOf(P)!==0){{x.pathname=P+x.pathname;return x.toString();}}}}catch(e){{}}return u;}}if(u.indexOf("//")===0)return u;if(u.charAt(0)==="/")return u.indexOf(P)===0?u:P+u;return P+"/"+u.replace(/^\.\//,"");}}function tcsNav(name,u){{var abs=tcsAbs(u);if(typeof name!=="string"&&name&&name.name)name=name.name;if(!name)return;try{{var el=tcsEl(name);if(el){{el.src=abs;return;}}}}catch(e){{}}try{{tcsTopGet().postMessage({{tcsIdracNav:name,url:abs}},"*");}}catch(e){{}}}}function tcsCall(frame,fn){{var args=Array.prototype.slice.call(arguments,2);try{{var w=tcsFrame(frame);if(w&&typeof w[fn]==="function")return w[fn].apply(w,args);}}catch(e){{}}try{{tcsTopGet().postMessage({{tcsIdracCall:1,frame:frame,fn:fn,args:args}},"*");}}catch(e){{}}}}try{{window.addEventListener("message",function(ev){{var d=ev.data;if(!d||!tcsIsFs(window))return;if(d.tcsIdracNav){{try{{var el=tcsEl(d.tcsIdracNav);if(el)el.src=d.url;}}catch(e){{}}}}if(d.tcsIdracCall){{try{{var w=tcsFrame(d.frame);if(w&&typeof w[d.fn]==="function")w[d.fn].apply(w,d.args||[]);}}catch(e){{}}}}}});}}catch(e){{}}try{{Object.defineProperty(window,"tcsTop",{{get:tcsTopGet}});}}catch(e){{window.tcsTop=tcsTopGet();}}window.tcsAbs=tcsAbs;window.tcsNav=tcsNav;window.tcsFrame=tcsFrame;window.tcsCall=tcsCall;try{{window.bPreviewLoaded=true;}}catch(e){{}}function tcsOpenCat(cat,tab,id){{var list=null;try{{if(window.data)list=window.data;}}catch(e){{}}try{{if(!list){{var tl=tcsFrame("treelist");if(tl&&tl.data)list=tl.data;}}}}catch(e){{}}try{{if(!list&&tcsTopGet().__tcsTreeData)list=tcsTopGet().__tcsTreeData;}}catch(e){{}}if(!list||!cat)return;var url="";for(var i=0;i<list.length;i++){{var r=list[i];if(!r||String(r[0])!==String(cat)||!r[3])continue;if(id&&String(r[2])===String(id)){{url=r[3];break;}}if(!url)url=r[3];}}if(!url)return;url+=url.indexOf("?")<0?"?":"&";url+="cat="+encodeURIComponent(cat);if(tab)url+="&tab="+encodeURIComponent(tab);if(id)url+="&id="+encodeURIComponent(id);tcsNav("da",url);}}window.tcsOpenCat=tcsOpenCat;try{{setInterval(function(){{try{{if(window.data&&window.data.length)tcsTopGet().__tcsTreeData=window.data;}}catch(e){{}}}},1000);}}catch(e){{}}try{{if(tcsIsFs(window)){{var _n=0;var _iv=setInterval(function(){{_n++;try{{var da=tcsEl("da");var snb=tcsFrame("snb");var tl=tcsFrame("treelist");var src=da?(da.getAttribute("src")||da.src||""):"";if(snb&&typeof snb.f_getHTML==="function"&&tl&&tl.data&&tl.data.length){{snb.f_getHTML(tl.data[0][0],"","","");if(src.indexOf("sysSummary")>=0||_n>8)clearInterval(_iv);}}else if(_n===6){{tcsNav("da","sysSummaryData.html");}}}}catch(e){{}}if(_n>40)clearInterval(_iv);}},500);}}}}catch(e){{}}function f(u){{if(typeof u!=="string")return u;if(u.charAt(0)==="/"&&u.indexOf(P)!==0&&u.indexOf("//")!==0)return P+u;return u;}}try{{var OF=window.fetch;window.fetch=function(u,o){{if(typeof u==="string")u=f(u);else if(u&&u.url){{try{{u=new Request(f(u.url),u)}}catch(e){{}}}}return OF.call(this,u,o);}};var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){{arguments[1]=f(u);return xo.apply(this,arguments);}};var OW=window.WebSocket;window.WebSocket=function(u,p){{try{{var x=new URL(u,location.href);x.protocol=location.protocol==="https:"?"wss:":"ws:";if(x.port==="5900"||x.port==="5901"||x.port==="5902"){{x.host=location.host;x.pathname=P+"/__rfb/"+x.port;}}else{{x.host=location.host;if(x.pathname.indexOf(P)!==0)x.pathname=P+x.pathname;}}u=x.toString();}}catch(e){{}}return p!==undefined?new OW(u,p):new OW(u);}};window.WebSocket.prototype=OW.prototype;window.WebSocket.CONNECTING=OW.CONNECTING;window.WebSocket.OPEN=OW.OPEN;window.WebSocket.CLOSING=OW.CLOSING;window.WebSocket.CLOSED=OW.CLOSED;if(window.Worker){{var Wr=window.Worker;window.Worker=function(u,o){{return new Wr(f(u),o);}};}}var sa=HTMLElement.prototype.setAttribute;HTMLElement.prototype.setAttribute=function(n,v){{if((n==="src"||n==="href"||n==="action")&&typeof v==="string")v=f(v);return sa.call(this,n,v);}};}}catch(e){{}}}})();</script>"#
+        r#"<script>{ws_hook}(function(){{var P="{pfx}";function tcsIsFs(w){{try{{return !!(w&&w.document&&w.document.getElementsByTagName("frameset").length);}}catch(e){{return false;}}}}function tcsTopGet(){{var list=[];function add(x){{try{{if(x&&list.indexOf(x)<0)list.push(x);}}catch(e){{}}}}add(window);try{{var fe=window.frameElement;if(fe&&fe.ownerDocument)add(fe.ownerDocument.defaultView);}}catch(e){{}}var w=window;try{{while(w){{add(w);if(!w.parent||w.parent===w||w.parent===window.top)break;w=w.parent;}}}}catch(e){{}}function hasLoc(x){{try{{return !!(x&&x.localeObj&&x.localeObj["btn_ok"]);}}catch(e){{return false;}}}}for(var i=0;i<list.length;i++){{try{{if(tcsIsFs(list[i])&&hasLoc(list[i]))return list[i];}}catch(e){{}}}}for(var i=0;i<list.length;i++){{try{{if(list[i].TOKEN_VALUE&&hasLoc(list[i]))return list[i];}}catch(e){{}}}}for(var i=0;i<list.length;i++){{if(hasLoc(list[i]))return list[i];}}for(var i=0;i<list.length;i++){{if(tcsIsFs(list[i]))return list[i];}}return list[0]||window;}}function tcsEl(name){{var doc;try{{doc=tcsTopGet().document;}}catch(e){{return null;}}try{{var n=doc.getElementsByName(name);if(n&&n[0])return n[0];}}catch(e){{}}try{{var fs=doc.getElementsByTagName("frame");for(var i=0;i<fs.length;i++){{if(fs[i].getAttribute("name")===name)return fs[i];}}}}catch(e){{}}return null;}}function tcsWin(f){{if(!f)return null;try{{if(f.document)return f;}}catch(e){{}}try{{if(f.contentWindow)return f.contentWindow;}}catch(e){{}}return null;}}function tcsFrame(name){{try{{var w=tcsWin(window.parent&&window.parent.frames&&window.parent.frames[name]);if(w)return w;}}catch(e){{}}try{{var r=tcsTopGet();var w=tcsWin(r.frames&&r.frames[name]);if(w)return w;}}catch(e){{}}try{{var w=tcsWin(window.parent&&window.parent[name]);if(w)return w;}}catch(e){{}}return tcsWin(tcsEl(name));}}function tcsAbs(u){{if(typeof u!=="string"||!u)return u;if(u.charAt(0)==='#')return u;if(/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(u)){{try{{var x=new URL(u,location.href);if(x.origin===location.origin&&x.pathname.indexOf(P)!==0){{x.pathname=P+x.pathname;return x.toString();}}}}catch(e){{}}return u;}}if(u.indexOf("//")===0)return u;if(u.charAt(0)==="/")return u.indexOf(P)===0?u:P+u;return P+"/"+u.replace(/^\.\//,"");}}function tcsNav(name,u){{var abs=tcsAbs(u);if(typeof name!=="string"&&name&&name.name)name=name.name;if(!name)return;try{{var el=tcsEl(name);if(el){{el.src=abs;return;}}}}catch(e){{}}try{{tcsTopGet().postMessage({{tcsIdracNav:name,url:abs}},"*");}}catch(e){{}}}}function tcsCall(frame,fn){{var args=Array.prototype.slice.call(arguments,2);try{{var w=tcsFrame(frame);if(w&&typeof w[fn]==="function")return w[fn].apply(w,args);}}catch(e){{}}try{{tcsTopGet().postMessage({{tcsIdracCall:1,frame:frame,fn:fn,args:args}},"*");}}catch(e){{}}}}try{{window.addEventListener("message",function(ev){{var d=ev.data;if(!d||!tcsIsFs(window))return;if(d.tcsIdracNav){{try{{var el=tcsEl(d.tcsIdracNav);if(el)el.src=d.url;}}catch(e){{}}}}if(d.tcsIdracCall){{try{{var w=tcsFrame(d.frame);if(w&&typeof w[d.fn]==="function")w[d.fn].apply(w,d.args||[]);}}catch(e){{}}}}}});}}catch(e){{}}try{{Object.defineProperty(window,"tcsTop",{{get:tcsTopGet}});}}catch(e){{window.tcsTop=tcsTopGet();}}window.tcsAbs=tcsAbs;window.tcsNav=tcsNav;window.tcsFrame=tcsFrame;window.tcsCall=tcsCall;try{{window.bPreviewLoaded=true;}}catch(e){{}}function tcsOpenCat(cat,tab,id){{var list=null;try{{if(window.data)list=window.data;}}catch(e){{}}try{{if(!list){{var tl=tcsFrame("treelist");if(tl&&tl.data)list=tl.data;}}}}catch(e){{}}try{{if(!list&&tcsTopGet().__tcsTreeData)list=tcsTopGet().__tcsTreeData;}}catch(e){{}}if(!list||!cat)return;var url="";for(var i=0;i<list.length;i++){{var r=list[i];if(!r||String(r[0])!==String(cat)||!r[3])continue;if(id&&String(r[2])===String(id)){{url=r[3];break;}}if(!url)url=r[3];}}if(!url)return;url+=url.indexOf("?")<0?"?":"&";url+="cat="+encodeURIComponent(cat);if(tab)url+="&tab="+encodeURIComponent(tab);if(id)url+="&id="+encodeURIComponent(id);tcsNav("da",url);}}window.tcsOpenCat=tcsOpenCat;try{{setInterval(function(){{try{{if(window.data&&window.data.length)tcsTopGet().__tcsTreeData=window.data;}}catch(e){{}}}},1000);}}catch(e){{}}try{{if(tcsIsFs(window)){{var _n=0;var _iv=setInterval(function(){{_n++;try{{var da=tcsEl("da");var snb=tcsFrame("snb");var tl=tcsFrame("treelist");var src=da?(da.getAttribute("src")||da.src||""):"";if(snb&&typeof snb.f_getHTML==="function"&&tl&&tl.data&&tl.data.length){{snb.f_getHTML(tl.data[0][0],"","","");if(src.indexOf("sysSummary")>=0||_n>8)clearInterval(_iv);}}else if(_n===6){{tcsNav("da","sysSummaryData.html");}}}}catch(e){{}}if(_n>40)clearInterval(_iv);}},500);}}}}catch(e){{}}function f(u){{if(typeof u!=="string")return u;if(u.charAt(0)==="/"&&u.indexOf(P)!==0&&u.indexOf("//")!==0)return P+u;return u;}}try{{var OF=window.fetch;window.fetch=function(u,o){{if(typeof u==="string")u=f(u);else if(u&&u.url){{try{{u=new Request(f(u.url),u)}}catch(e){{}}}}return OF.call(this,u,o);}};var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){{arguments[1]=f(u);return xo.apply(this,arguments);}};var OW=window.WebSocket;window.WebSocket=function(u,p){{try{{var x=new URL(u,location.href);x.protocol=location.protocol==="https:"?"wss:":"ws:";if(x.port==="5900"||x.port==="5901"||x.port==="5902"){{x.host=location.host;x.pathname=P+"/__rfb/"+x.port;}}else{{x.host=location.host;if(x.pathname.indexOf(P)!==0)x.pathname=P+x.pathname;}}u=x.toString();}}catch(e){{}}return p!==undefined?new OW(u,p):new OW(u);}};window.WebSocket.prototype=OW.prototype;window.WebSocket.CONNECTING=OW.CONNECTING;window.WebSocket.OPEN=OW.OPEN;window.WebSocket.CLOSING=OW.CLOSING;window.WebSocket.CLOSED=OW.CLOSED;if(window.Worker){{var Wr=window.Worker;window.Worker=function(u,o){{return new Wr(f(u),o);}};}}var sa=HTMLElement.prototype.setAttribute;HTMLElement.prototype.setAttribute=function(n,v){{if((n==="src"||n==="href"||n==="action")&&typeof v==="string")v=f(v);return sa.call(this,n,v);}};}}catch(e){{}}}})();</script>"#
     );
     let base = format!("<base href=\"{pfx}/\">");
     // Stock iDRAC 7 sysSummary writes #progressPage and only hides it for
@@ -355,6 +366,9 @@ pub fn apply_rewrites(path: &str, ctype: &str, body: &[u8], prefix: &str, bmc_ho
             || path.starts_with("console?")
             || text.trim_start().to_ascii_lowercase().starts_with("<!doctype")
             || text.trim_start().to_ascii_lowercase().starts_with("<html"));
+    if looks_like_script {
+        text = format!("{}{text}", websocket_hook_js(prefix));
+    }
     if is_html {
         text = inject_prefix_hooks(&text, prefix);
         text = inject_heartbeat(&text);
@@ -568,6 +582,7 @@ pub fn is_websocket_request(headers: &HeaderMap) -> bool {
 }
 
 pub async fn relay_ws(session: IdracSession, socket: WebSocket, rel: String, query: Option<String>, proto: Option<String>) {
+    tracing::info!(rel = %rel, proto = ?proto, "iDRAC websocket relay start");
     let origin = bmc_origin(&session.bmc_host);
     let ws_origin = origin
         .replace("https://", "wss://")
@@ -610,7 +625,18 @@ pub async fn relay_ws(session: IdracSession, socket: WebSocket, rel: String, que
 }
 
 fn host_only(host: &str) -> String {
-    host.split('/').next().unwrap_or(host).to_string()
+    let h = host.split('/').next().unwrap_or(host);
+    if let Some(rest) = h.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            return rest[..end].to_string();
+        }
+    }
+    if let Some((name, port)) = h.rsplit_once(':') {
+        if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
+            return name.to_string();
+        }
+    }
+    h.to_string()
 }
 
 async fn connect_ws(
@@ -864,6 +890,21 @@ mod tests {
         assert!(!s.contains("<script>"));
         assert!(s.contains("tcsTop.ssnObj"));
         assert!(s.contains("tcsTop.localeObj"));
+    }
+
+    #[test]
+    fn worker_js_gets_websocket_rfb_hook() {
+        let out = apply_rewrites(
+            "js/ViewerJS/viewer/websockethandler.js",
+            "application/javascript",
+            b"function createSocket(){return new WebSocket('wss://bmc:5900/');}",
+            "/api/machines/m/console/idrac_abc",
+            "10.0.0.5",
+        );
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("__tcsRfb"), "{s}");
+        assert!(s.contains("/__rfb/"), "{s}");
+        assert!(s.contains("createSocket"), "{s}");
     }
 
     #[test]

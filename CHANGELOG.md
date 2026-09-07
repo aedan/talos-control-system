@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.81] — 2026-09-07
+
+### Fixed
+- **iDRAC 7 HTML5 viewer stayed black after launch.** Avocent opens `wss://<host>:5900` from a Worker (`websockethandler.js`), which never saw the page-level WebSocket remap, so the browser dialed TCS port 5900 instead of `{prefix}/__rfb/5900`. Worker scripts now get the same remap. The BMC KVM port does speak `lws-dvc-protocol`.
+
 ## [0.5.80] — 2026-09-07
 
 ### Fixed
