@@ -81,7 +81,7 @@ pub fn is_safe_idrac_path(path: &str) -> bool {
 fn websocket_hook_js(prefix: &str) -> String {
     let pfx = prefix.trim_end_matches('/');
     format!(
-        r#"(function(){{try{{var P="{pfx}";var g=typeof self!=="undefined"?self:this;if(!g||!g.WebSocket)return;if(g.__tcsWS&&g.__tcsWS.__tcsRfb)return;var OW=g.WebSocket;function wrap(u){{try{{var s=String(u);var x=new URL(s,g.location&&g.location.href);var port=x.port||"";if(!port){{var m=s.match(/:590([0-2])(?:[^\d]|$)/);if(m)port="590"+m[1];}}if(port==="5900"||port==="5901"||port==="5902"){{x.protocol=(g.location&&g.location.protocol==="http:")?"ws:":"wss:";x.host=g.location.host;x.pathname=P+"/__rfb/"+port;x.search="";x.hash="";return x.toString();}}}}catch(e){{}}return u;}}function W(u,p){{u=wrap(u);return p!==undefined?new OW(u,p):new OW(u);}}W.prototype=OW.prototype;W.CONNECTING=OW.CONNECTING;W.OPEN=OW.OPEN;W.CLOSING=OW.CLOSING;W.CLOSED=OW.CLOSED;W.__tcsRfb=1;g.__tcsWS=W;try{{g.WebSocket=W;}}catch(e){{}}try{{Object.defineProperty(g,"WebSocket",{{configurable:true,writable:true,value:W}});}}catch(e){{}}}}catch(e){{}}}})();"#
+        r#"(function(){{try{{var P="{pfx}";var g=typeof self!=="undefined"?self:this;if(!g||!g.WebSocket)return;if(g.__tcsWS&&g.__tcsWS.__tcsRfb)return;var OW=g.WebSocket;function wrap(u){{try{{var s=String(u);var x=new URL(s,"https://dummy.invalid/");var port=x.port||"";if(!port){{var m=s.match(/:590([0-2])(?:[^\d]|$)/);if(m)port="590"+m[1];}}if(port==="5900"||port==="5901"||port==="5902"){{var host=x.hostname||(g.location&&g.location.hostname)||"";if(!host)return u;var y=new URL("https://"+host+P+"/__rfb/"+port);y.protocol="wss:";return y.toString();}}}}catch(e){{}}return u;}}function W(u,p){{u=wrap(u);return p!==undefined?new OW(u,p):new OW(u);}}W.prototype=OW.prototype;W.CONNECTING=OW.CONNECTING;W.OPEN=OW.OPEN;W.CLOSING=OW.CLOSING;W.CLOSED=OW.CLOSED;W.__tcsRfb=1;g.__tcsWS=W;try{{g.WebSocket=W;}}catch(e){{}}try{{Object.defineProperty(g,"WebSocket",{{configurable:true,writable:true,value:W}});}}catch(e){{}}}}catch(e){{}}}})();"#
     )
 }
 
@@ -263,6 +263,12 @@ fn neutralize_idrac_framebust(text: &str) -> String {
     let t = t.replace(
         "htmlViewer.connectRPViewer();",
         "try{htmlViewer.disableRPCertPopup();}catch(e){} htmlViewer.connectRPViewer();",
+    );
+    // Avocent builds wss://ip:kvmPort/. Point host at TCS:443 and the path
+    // at our RFB relay so the browser never dials port 5900.
+    let t = t.replace(
+        "htmlViewer.setRPServerConfiguration(mIPAddress, mPort);",
+        r#"try{mIPAddress=location.hostname;}catch(e){}var _tcsKvmPort=mPort||"5900";var _tcsPath=(typeof tcsAbs==="function"?tcsAbs("__rfb/"+_tcsKvmPort):("__rfb/"+_tcsKvmPort));if(_tcsPath.charAt(0)==="/")_tcsPath=_tcsPath.substring(1);try{htmlViewer.setRPServerPath(_tcsPath);}catch(e){}htmlViewer.setRPServerConfiguration(mIPAddress, (location.port||(location.protocol==="https:"?"443":"80")));"#,
     );
     let t = t.replace(
         r#"parent.document.getElementById("navigationBar")"#,
@@ -876,6 +882,11 @@ mod tests {
         assert!(!out.contains("//  htmlViewer.disableRPCertPopup"), "{out}");
         assert!(out.contains(r#"tcsNav("da", htmlURL)"#), "{out}");
         assert!(!out.contains("window.open(htmlURL"), "{out}");
+        let cfg = neutralize_idrac_framebust(
+            "htmlViewer.setRPServerConfiguration(mIPAddress, mPort);\nhtmlViewer.connectRPViewer();",
+        );
+        assert!(cfg.contains("setRPServerPath"), "{cfg}");
+        assert!(cfg.contains("__rfb/"), "{cfg}");
     }
 
     #[test]

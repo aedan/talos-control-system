@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.83] — 2026-09-07
+
+### Fixed
+- **iDRAC 7 HTML5 showed "Connecting Viewer" then a black pane.** Avocent builds `wss://<host>:5900/` and the Worker wrap used `location.host` (empty in that Worker), so the browser still dialed TCS port 5900. The wrap now builds `{prefix}/__rfb/5900` from the socket hostname, and Launch sets the viewer server path/port onto that TCS URL on 443.
+
 ## [0.5.82] — 2026-09-07
 
 ### Fixed
