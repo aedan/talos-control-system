@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.78] — 2026-09-06
+
+### Fixed
+- **Launch Virtual Console did nothing.** On Safari/Firefox, iDRAC 7 coerces the plugin to Java and `window.open(viewer.jnlp, '_self')`, which modern browsers ignore. This 12G firmware includes `virtualconsolehtml5.html`. TCS now forces the HTML5 plugin and loads that viewer in the center pane (WebSocket still remapped to the TCS `__rfb` relay).
+
 ## [0.5.77] — 2026-09-06
 
 ### Fixed

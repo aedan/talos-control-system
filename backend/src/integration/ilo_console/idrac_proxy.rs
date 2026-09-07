@@ -151,7 +151,11 @@ fn neutralize_idrac_framebust(text: &str) -> String {
         .replace("if(top.frames.length>=1)", "if(false)")
         .replace("if (top != self)", "if (false)")
         .replace("if (top !== self)", "if (false)")
-        .replace("if(top!=self)", "if(false)");
+        .replace("if(top!=self)", "if(false)")
+        .replace(
+            "var pluginType = top.aimGetIntPropObj['gui_kvm_plugin_type'];",
+            "var pluginType = (typeof KVM_HTML_PLUGIN!==\"undefined\"?KVM_HTML_PLUGIN:\"2\");",
+        );
     // sysSummary.html only calls progressBar.hide() when isCustomGui==1.
     // Real firmware uses tabs inside that block, so a literal \n replace misses.
     let hide = regex::Regex::new(
@@ -198,6 +202,15 @@ fn neutralize_idrac_framebust(text: &str) -> String {
     let t = t.replace(
         r#"parent.snb.f_getHTML_F(tab, "", "", "");"#,
         r#"tcsCall("snb","f_getHTML_F",tab,"","","");tcsOpenCat(tab,"","");"#,
+    );
+    // iDRAC 7 Launch Console: load HTML5 viewer in the da frame.
+    let t = t.replace(
+        "top.htmlViewerWindow = window.open(htmlURL,'','toolbar=no,menubar=no,status=no,location=yes,resizable ');",
+        "try{tcsNav(\"da\", htmlURL);}catch(e){} try{tcsTop.htmlViewerWindow=window;}catch(e){}",
+    );
+    let t = t.replace(
+        "localeObj = window.opener.top.localeObj;",
+        "localeObj=(window.opener&&(window.opener.tcsTop||window.opener).localeObj)||(typeof tcsTop!==\"undefined\"&&tcsTop.localeObj)||{};",
     );
     let t = t.replace(
         r#"parent.document.getElementById("navigationBar")"#,
@@ -763,6 +776,11 @@ mod tests {
         let js2 = r#"parent.snb.f_getHTML(newCat, tab, id, flag);"#;
         let out2 = neutralize_idrac_framebust(js2);
         assert!(out2.contains("tcsOpenCat(newCat,tab,id)"), "{out2}");
+        let launch = "var pluginType = top.aimGetIntPropObj['gui_kvm_plugin_type'];\ntop.htmlViewerWindow = window.open(htmlURL,'','toolbar=no,menubar=no,status=no,location=yes,resizable ');";
+        let out3 = neutralize_idrac_framebust(launch);
+        assert!(out3.contains("KVM_HTML_PLUGIN"), "{out3}");
+        assert!(out3.contains("tcsNav"), "{out3}");
+        assert!(!out3.contains("window.open(htmlURL"));
         assert!(out.contains(r#"tcsCall("snb","f_getHTML","#), "{out}");
         assert!(!out.contains("parent.da.location"));
         assert!(!out.contains("parent.snb.f_getHTML"));
