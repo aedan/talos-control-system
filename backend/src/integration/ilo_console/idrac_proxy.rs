@@ -81,7 +81,7 @@ pub fn is_safe_idrac_path(path: &str) -> bool {
 fn websocket_hook_js(prefix: &str) -> String {
     let pfx = prefix.trim_end_matches('/');
     format!(
-        r#"(function(){{try{{var P="{pfx}";var g=typeof self!=="undefined"?self:this;if(!g||!g.WebSocket||g.WebSocket.__tcsRfb)return;var OW=g.WebSocket;function wrap(u){{try{{var s=String(u);var x=new URL(s,g.location&&g.location.href);var port=x.port||"";if(!port){{var m=s.match(/:590([0-2])(?:[^\d]|$)/);if(m)port="590"+m[1];}}if(port==="5900"||port==="5901"||port==="5902"){{x.protocol=(g.location&&g.location.protocol==="http:")?"ws:":"wss:";x.host=g.location.host;x.pathname=P+"/__rfb/"+port;x.search="";x.hash="";return x.toString();}}}}catch(e){{}}return u;}}function W(u,p){{u=wrap(u);return p!==undefined?new OW(u,p):new OW(u);}}W.prototype=OW.prototype;W.CONNECTING=OW.CONNECTING;W.OPEN=OW.OPEN;W.CLOSING=OW.CLOSING;W.CLOSED=OW.CLOSED;W.__tcsRfb=1;g.WebSocket=W;}}catch(e){{}}}})();"#
+        r#"(function(){{try{{var P="{pfx}";var g=typeof self!=="undefined"?self:this;if(!g||!g.WebSocket)return;if(g.__tcsWS&&g.__tcsWS.__tcsRfb)return;var OW=g.WebSocket;function wrap(u){{try{{var s=String(u);var x=new URL(s,g.location&&g.location.href);var port=x.port||"";if(!port){{var m=s.match(/:590([0-2])(?:[^\d]|$)/);if(m)port="590"+m[1];}}if(port==="5900"||port==="5901"||port==="5902"){{x.protocol=(g.location&&g.location.protocol==="http:")?"ws:":"wss:";x.host=g.location.host;x.pathname=P+"/__rfb/"+port;x.search="";x.hash="";return x.toString();}}}}catch(e){{}}return u;}}function W(u,p){{u=wrap(u);return p!==undefined?new OW(u,p):new OW(u);}}W.prototype=OW.prototype;W.CONNECTING=OW.CONNECTING;W.OPEN=OW.OPEN;W.CLOSING=OW.CLOSING;W.CLOSED=OW.CLOSED;W.__tcsRfb=1;g.__tcsWS=W;try{{g.WebSocket=W;}}catch(e){{}}try{{Object.defineProperty(g,"WebSocket",{{configurable:true,writable:true,value:W}});}}catch(e){{}}}}catch(e){{}}}})();"#
     )
 }
 
@@ -368,6 +368,9 @@ pub fn apply_rewrites(path: &str, ctype: &str, body: &[u8], prefix: &str, bmc_ho
             || text.trim_start().to_ascii_lowercase().starts_with("<html"));
     if looks_like_script {
         text = format!("{}{text}", websocket_hook_js(prefix));
+        // Safari workers keep a built-in `WebSocket` binding; assigning
+        // `self.WebSocket` does not change `new WebSocket(...)`.
+        text = text.replace("new WebSocket(", "new (self.__tcsWS||WebSocket)(");
     }
     if is_html {
         text = inject_prefix_hooks(&text, prefix);
@@ -905,6 +908,8 @@ mod tests {
         assert!(s.contains("__tcsRfb"), "{s}");
         assert!(s.contains("/__rfb/"), "{s}");
         assert!(s.contains("createSocket"), "{s}");
+        assert!(s.contains("self.__tcsWS||WebSocket"), "{s}");
+        assert!(!s.contains("new WebSocket("), "{s}");
     }
 
     #[test]

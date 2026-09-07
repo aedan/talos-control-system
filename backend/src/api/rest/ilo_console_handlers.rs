@@ -330,6 +330,17 @@ async fn idrac_asset(
         let ws = WebSocketUpgrade::from_request_parts(&mut parts, &())
             .await
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("websocket upgrade: {e}")))?;
+        // Avocent HTML5 KVM requires `lws-dvc-protocol`. Axum must echo a
+        // requested subprotocol or the viewer stays on a black canvas.
+        let ws = match &proto {
+            Some(p) => ws.protocols(
+                p.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>(),
+            ),
+            None => ws.protocols(["lws-dvc-protocol".to_string()]),
+        };
         let rel_owned = rel.clone();
         return Ok(ws.on_upgrade(move |socket| async move {
             idrac_proxy::relay_ws(sess, socket, rel_owned, query, proto).await;

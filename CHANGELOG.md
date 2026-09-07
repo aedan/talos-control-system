@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.82] — 2026-09-07
+
+### Fixed
+- **iDRAC 7 HTML5 viewer still never opened a KVM socket to TCS.** Safari/Firefox workers ignore `self.WebSocket = wrap`, so Avocent's `new WebSocket(wss://host:5900)` still dialed TCS port 5900. TCS now rewrites those call sites to a wrapper that remaps onto `{prefix}/__rfb/5900`, and the relay accepts Avocent's `lws-dvc-protocol` subprotocol.
+
 ## [0.5.81] — 2026-09-07
 
 ### Fixed
