@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.84] — 2026-09-08
+
+### Fixed
+- **iDRAC 7 HTML5 reached TCS then dropped (`Network connection dropped`).** Avocent requests `{prefix}/__rfb/5900/` (trailing slash). TCS treated that as an invalid path and returned 400 in 0ms. Trailing slashes are now accepted, and Launch falls back to port 5900 if the viewer rejects 443 (Firefox).
+
 ## [0.5.83] — 2026-09-07
 
 ### Fixed

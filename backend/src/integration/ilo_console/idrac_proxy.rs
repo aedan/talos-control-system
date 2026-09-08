@@ -67,9 +67,10 @@ pub fn is_safe_idrac_path(path: &str) -> bool {
     if t.contains('\\') || t.split('/').any(|seg| seg == "..") {
         return false;
     }
-    // `__rfb/5900` is our synthetic KVM-port relay.
+    // `__rfb/5900` is our synthetic KVM-port relay. Avocent appends `/`.
     if let Some(rest) = t.strip_prefix("__rfb/") {
-        return rest.chars().all(|c| c.is_ascii_digit()) && rest.len() <= 5;
+        let rest = rest.trim_end_matches('/');
+        return !rest.is_empty() && rest.len() <= 5 && rest.chars().all(|c| c.is_ascii_digit());
     }
     t.chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | '$' | '~' | '+'))
@@ -268,7 +269,7 @@ fn neutralize_idrac_framebust(text: &str) -> String {
     // at our RFB relay so the browser never dials port 5900.
     let t = t.replace(
         "htmlViewer.setRPServerConfiguration(mIPAddress, mPort);",
-        r#"try{mIPAddress=location.hostname;}catch(e){}var _tcsKvmPort=mPort||"5900";var _tcsPath=(typeof tcsAbs==="function"?tcsAbs("__rfb/"+_tcsKvmPort):("__rfb/"+_tcsKvmPort));if(_tcsPath.charAt(0)==="/")_tcsPath=_tcsPath.substring(1);try{htmlViewer.setRPServerPath(_tcsPath);}catch(e){}htmlViewer.setRPServerConfiguration(mIPAddress, (location.port||(location.protocol==="https:"?"443":"80")));"#,
+        r#"try{mIPAddress=location.hostname;}catch(e){}var _tcsKvmPort=mPort||"5900";var _tcsPath=(typeof tcsAbs==="function"?tcsAbs("__rfb/"+_tcsKvmPort):("__rfb/"+_tcsKvmPort));if(_tcsPath.charAt(0)==="/")_tcsPath=_tcsPath.substring(1);try{htmlViewer.setRPServerPath(_tcsPath);}catch(e){}try{htmlViewer.setRPServerConfiguration(mIPAddress, (location.port||(location.protocol==="https:"?"443":"80")));}catch(e){try{htmlViewer.setRPServerConfiguration(mIPAddress, _tcsKvmPort);}catch(e2){}}"#,
     );
     let t = t.replace(
         r#"parent.document.getElementById("navigationBar")"#,
@@ -576,9 +577,14 @@ pub fn rewrite_set_cookie(raw_name: &str, raw_value: &str, prefix: &str) -> Stri
 }
 
 pub fn parse_rel_from_uri(full_path: &str, sid: &str) -> String {
-    match full_path.rsplit_once(&format!("/console/{sid}")) {
+    let rel = match full_path.rsplit_once(&format!("/console/{sid}")) {
         Some((_, rest)) => rest.trim_start_matches('/').to_string(),
         None => String::new(),
+    };
+    if rel.starts_with("__rfb/") {
+        rel.trim_end_matches('/').to_string()
+    } else {
+        rel
     }
 }
 
@@ -740,6 +746,7 @@ mod tests {
         assert!(is_safe_idrac_path("console"));
         assert!(is_safe_idrac_path("restgui/vue/index.html"));
         assert!(is_safe_idrac_path("__rfb/5900"));
+        assert!(is_safe_idrac_path("__rfb/5900/"));
         assert!(!is_safe_idrac_path("../etc/passwd"));
         assert!(!is_safe_idrac_path("foo/../../bar"));
         assert!(!is_safe_idrac_path("__rfb/nope"));
@@ -808,6 +815,8 @@ mod tests {
         assert_eq!(parse_rel_from_uri(p, "idrac_abc"), "restgui/foo.js");
         let p = "/api/machines/111/console/idrac_abc";
         assert_eq!(parse_rel_from_uri(p, "idrac_abc"), "");
+        let p = "/api/machines/111/console/idrac_abc/__rfb/5900/";
+        assert_eq!(parse_rel_from_uri(p, "idrac_abc"), "__rfb/5900");
     }
 
     #[test]
