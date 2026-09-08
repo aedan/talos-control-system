@@ -28,7 +28,8 @@
     }
 
     const gen = ++authGen;
-    checking = true;
+    // Don't blank the shell on every client-side navigation.
+    if (!authenticated) checking = true;
 
     // Login route: no shell chrome; do not require a token.
     if (window.location.pathname === '/login') {

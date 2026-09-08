@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.87] — 2026-09-08
+
+### Fixed
+- **Opening a machine from the cluster list took ~15 seconds with a spinner in the corner.** The page waited for a live BMC power probe (`connect_timeout_secs` default 15) and config fetches before rendering. Machine details now show immediately; BMC/config load in the background. Client-side navigations no longer flash the full-page auth spinner.
+
 ## [0.5.86] — 2026-09-08
 
 ### Fixed

@@ -107,28 +107,32 @@
       bmcAddress = machine.bmcAddress || '';
       bmcUsername = machine.bmcUsername || '';
       bmcType = machine.bmcType || 'auto';
-      try {
-        const cl = (await client.get('/clusters')) as Array<{ id: string; name: string }>;
-        clusters = cl || [];
-      } catch {
-        clusters = [];
-      }
-      try {
-        bmcStatus = (await client.get(`/machines/${$page.params.id}/bmc`)) as typeof bmcStatus;
-      } catch {
-        /* optional */
-      }
-      await loadDesiredConfig();
-      if (!configYaml.trim()) {
-        await loadLiveConfig(true);
-      }
-      populateHelpersFromConfig();
-      void loadHostname();
-      void loadImageAndModules(true);
-      void loadClusterModules();
+      loading = false;
+      // BMC power probe talks to the iDRAC/iLO (15s timeout) and must not
+      // block the rest of the page. Config/live fetches can also stall on Talos.
+      void (async () => {
+        try {
+          const cl = (await client.get('/clusters')) as Array<{ id: string; name: string }>;
+          clusters = cl || [];
+        } catch {
+          clusters = [];
+        }
+        try {
+          bmcStatus = (await client.get(`/machines/${$page.params.id}/bmc`)) as typeof bmcStatus;
+        } catch {
+          /* optional */
+        }
+        await loadDesiredConfig();
+        if (!configYaml.trim()) {
+          await loadLiveConfig(true);
+        }
+        populateHelpersFromConfig();
+        void loadHostname();
+        void loadImageAndModules(true);
+        void loadClusterModules();
+      })();
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Failed to load machine';
-    } finally {
       loading = false;
     }
   });
