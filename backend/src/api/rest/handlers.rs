@@ -618,6 +618,12 @@ async fn machine_to_json_with_endpoint(
                 serde_json::Value::String(peer.assigned_ip),
             );
         }
+        if let Ok(extra) = crate::db::repos::machine_mac::extra_macs_for(pool, machine.id).await {
+            obj.insert(
+                "extraMacs".to_string(),
+                serde_json::Value::Array(extra.into_iter().map(serde_json::Value::String).collect()),
+            );
+        }
     }
     Ok(v)
 }
@@ -4375,10 +4381,29 @@ pub async fn get_machine_bmc(
                 .map(|p| p.as_str().to_string())
                 .unwrap_or_else(|_| "unknown".into());
             // best-effort persist
+            let mut mac_address = m.mac_address.clone();
+            let mut extra_macs: Vec<String> = Vec::new();
             if let Ok(Some(mut mm)) = repos::machine::get(&state.db_pool, id).await {
                 mm.last_power_state = power.clone();
                 mm.updated_at = chrono::Utc::now();
                 let _ = repos::machine::update(&state.db_pool, &mm).await;
+                let extras_empty = repos::machine_mac::extra_macs_for(&state.db_pool, id)
+                    .await
+                    .map(|v| v.is_empty())
+                    .unwrap_or(true);
+                if mm.mac_address.trim().is_empty() || extras_empty {
+                    let _ = crate::integration::bmc::collect_nics_into_machine(
+                        &state.db_pool,
+                        &sess,
+                        &creds,
+                        &mut mm,
+                    )
+                    .await;
+                }
+                mac_address = mm.mac_address.clone();
+                extra_macs = repos::machine_mac::extra_macs_for(&state.db_pool, id)
+                    .await
+                    .unwrap_or_default();
             }
             Ok(Json(serde_json::json!({
                 "configured": true,
@@ -4386,6 +4411,8 @@ pub async fn get_machine_bmc(
                 "powerState": power,
                 "bmcAddress": m.bmc_address,
                 "bmcType": m.bmc_type,
+                "macAddress": mac_address,
+                "extraMacs": extra_macs,
             })))
         }
         Err(e) => Ok(Json(serde_json::json!({

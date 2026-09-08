@@ -4,6 +4,7 @@ use reqwest::header::CONTENT_TYPE;
 use serde_json::Value;
 use std::time::Duration;
 
+use super::nics::{nic_from_redfish_interface, NicInfo};
 use super::{BootTarget, BmcCredentials, PowerState};
 use crate::AppError;
 
@@ -313,5 +314,82 @@ impl RedfishClient {
         Err(AppError::Network(format!(
             "Redfish set boot HTTP {code}: {text}"
         )))
+    }
+
+    async fn get_json(&self, url: &str) -> Result<Value, AppError> {
+        let resp = self
+            .http
+            .get(url)
+            .basic_auth(&self.username, Some(&self.password))
+            .send()
+            .await
+            .map_err(|e| AppError::Network(format!("Redfish GET {url}: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(AppError::Network(format!(
+                "Redfish GET {url} HTTP {}",
+                resp.status()
+            )));
+        }
+        resp.json()
+            .await
+            .map_err(|e| AppError::Network(format!("Redfish JSON {url}: {e}")))
+    }
+
+    fn abs_url(&self, path: &str) -> String {
+        if path.starts_with("http") {
+            path.to_string()
+        } else {
+            format!("{}{}", self.base, path)
+        }
+    }
+
+    pub async fn list_nics(&self) -> Result<Vec<NicInfo>, AppError> {
+        let mut nics: Vec<NicInfo> = Vec::new();
+        let collection_urls = [
+            format!("{}/EthernetInterfaces", self.system_url()),
+            format!("{}/EthernetInterfaces", self.system_url().trim_end_matches('/')),
+        ];
+        let mut collection: Option<Value> = None;
+        let mut last_err: Option<AppError> = None;
+        for url in &collection_urls {
+            match self.get_json(url).await {
+                Ok(v) => {
+                    collection = Some(v);
+                    break;
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        let Some(body) = collection else {
+            return Err(last_err.unwrap_or_else(|| {
+                AppError::Network("Redfish EthernetInterfaces not found".into())
+            }));
+        };
+        let members = body
+            .get("Members")
+            .and_then(|m| m.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for member in members.into_iter().take(16) {
+            let iface = if nic_from_redfish_interface(&member).is_some() {
+                member
+            } else if let Some(oid) = member.get("@odata.id").and_then(|v| v.as_str()) {
+                match self.get_json(&self.abs_url(oid)).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "Redfish EthernetInterface member failed");
+                        continue;
+                    }
+                }
+            } else {
+                continue;
+            };
+            if let Some(n) = nic_from_redfish_interface(&iface) {
+                if !nics.iter().any(|e| e.mac == n.mac) {
+                    nics.push(n);
+                }
+            }
+        }
+        Ok(nics)
     }
 }

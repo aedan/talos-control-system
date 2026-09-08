@@ -62,6 +62,14 @@ CREATE TABLE IF NOT EXISTS pxe_profiles (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS machine_macs (
+    mac TEXT PRIMARY KEY NOT NULL,
+    machine_id TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'host',
+    name TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS dhcp_leases (
     mac TEXT PRIMARY KEY NOT NULL,
     ip TEXT NOT NULL,

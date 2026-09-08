@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.91] — 2026-09-08
+
+### Added
+- **BMC fills in PXE MAC when inventory has OOB login but no MAC.** TCS reads host NIC addresses from Redfish EthernetInterfaces and Dell `ipmitool delloem mac` (iDRAC 7), stores every host MAC, and uses them for DHCP/iPXE matching. Inventory rows may be BMC-only.
+
 ## [0.5.90] — 2026-09-08
 
 ### Fixed

@@ -21,7 +21,7 @@ machines:
       type: auto
   - hostname: w-1
     role: worker
-    mac: aa:bb:cc:dd:ee:02
+    # MAC can be omitted when BMC is set — TCS collects host NICs from iDRAC/iLO
     bmc:
       address: 10.90.0.12
       username: root

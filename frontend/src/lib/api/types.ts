@@ -31,6 +31,7 @@ export interface Machine {
   address: string;
   installDisk?: string;
   macAddress?: string;
+  extraMacs?: string[];
   hostname?: string;
   bmcAddress?: string;
   bmcUsername?: string;

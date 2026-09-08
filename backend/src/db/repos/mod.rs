@@ -11,4 +11,5 @@ pub mod provision;
 pub mod oidc_state;
 pub mod pxe_profile;
 pub mod dhcp_lease;
+pub mod machine_mac;
 pub mod provision_job;

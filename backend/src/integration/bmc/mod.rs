@@ -1,12 +1,14 @@
 //! BMC power and boot control — Redfish primary, IPMI fallback.
 
 mod ipmi;
+mod nics;
 mod redfish;
 
 use crate::db::models::machine::Machine;
 use crate::AppError;
 
 pub use ipmi::IpmiClient;
+pub use nics::{NicInfo, NicKind, pick_primary_mac};
 pub use redfish::RedfishClient;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,4 +198,52 @@ impl BmcSession {
         }
         Err(AppError::Internal("ISO unmount only supported via Redfish".into()))
     }
+
+    /// Host (and BMC) NIC MACs from Redfish EthernetInterfaces and/or
+    /// `ipmitool delloem mac` (Dell 12G iDRAC 7).
+    pub async fn list_nics(&self, creds: &BmcCredentials) -> Result<Vec<NicInfo>, AppError> {
+        let mut nics: Vec<NicInfo> = Vec::new();
+        if let Some(rf) = &self.redfish {
+            match rf.list_nics().await {
+                Ok(found) => nics::merge_nics(&mut nics, found),
+                Err(e) => tracing::debug!(error = %e, "Redfish EthernetInterfaces failed"),
+            }
+        }
+        let ipmi = if let Some(ip) = &self.ipmi {
+            Some(ip.clone_handle())
+        } else {
+            IpmiClient::new(creds).ok()
+        };
+        if let Some(ip) = ipmi {
+            match ip.list_nics().await {
+                Ok(found) => nics::merge_nics(&mut nics, found),
+                Err(e) => tracing::debug!(error = %e, "IPMI NIC inventory failed"),
+            }
+        }
+        Ok(nics)
+    }
+}
+
+/// Pull NIC MACs from `sess` and persist them on `machine`.
+pub async fn collect_nics_into_machine(
+    pool: &crate::db::pool::DbPool,
+    sess: &BmcSession,
+    creds: &BmcCredentials,
+    machine: &mut Machine,
+) -> Result<bool, AppError> {
+    let nics = sess.list_nics(creds).await?;
+    if nics.is_empty() {
+        return Ok(false);
+    }
+    let wrote = crate::db::repos::machine_mac::apply_discovered_nics(pool, machine, &nics).await?;
+    if wrote {
+        tracing::info!(
+            machine_id = %machine.id,
+            hostname = %machine.hostname,
+            mac = %machine.mac_address,
+            nics = nics.len(),
+            "Collected host MAC addresses from BMC"
+        );
+    }
+    Ok(wrote)
 }

@@ -3,9 +3,11 @@
 use std::process::Stdio;
 use tokio::process::Command;
 
+use super::nics::{parse_delloem_macs, parse_lan_print_macs, NicInfo};
 use super::{BootTarget, BmcCredentials, PowerState};
 use crate::AppError;
 
+#[derive(Clone)]
 pub struct IpmiClient {
     host: String,
     user: String,
@@ -39,6 +41,30 @@ impl IpmiClient {
                 creds.ipmi_interface.clone()
             },
         })
+    }
+
+    pub fn clone_handle(&self) -> Self {
+        self.clone()
+    }
+
+    /// Host NIC MACs via Dell `delloem mac`, plus the BMC MAC from `lan print`.
+    pub async fn list_nics(&self) -> Result<Vec<NicInfo>, AppError> {
+        let mut nics: Vec<NicInfo> = Vec::new();
+        match self.run(&["delloem", "mac"]).await {
+            Ok(out) => nics.extend(parse_delloem_macs(&out)),
+            Err(e) => tracing::debug!(error = %e, "ipmitool delloem mac not available"),
+        }
+        match self.run(&["lan", "print"]).await {
+            Ok(out) => {
+                for n in parse_lan_print_macs(&out) {
+                    if !nics.iter().any(|e| e.mac == n.mac) {
+                        nics.push(n);
+                    }
+                }
+            }
+            Err(e) => tracing::debug!(error = %e, "ipmitool lan print failed"),
+        }
+        Ok(nics)
     }
 
     async fn run(&self, args: &[&str]) -> Result<String, AppError> {

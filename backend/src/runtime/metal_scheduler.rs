@@ -64,12 +64,19 @@ async fn tick(
     metal: &MetalConfig,
 ) -> Result<(), AppError> {
     let jobs = repos::provision_job::list_active(pool).await?;
+    let mut had_jobs = false;
     for job in jobs {
         if job.kind != "metal_provision" {
             continue;
         }
+        had_jobs = true;
         if let Err(e) = run_job(pool, sqlite_path, jwt_secret, metal, job).await {
             warn!(error = %e, "Metal job step failed");
+        }
+    }
+    if !had_jobs {
+        if let Err(e) = collect_missing_macs(pool, jwt_secret, metal).await {
+            warn!(error = %e, "BMC MAC collection failed");
         }
     }
     Ok(())
@@ -130,6 +137,28 @@ async fn run_job(
             if machine.has_bmc() {
                 match open_bmc(pool, jwt_secret, metal, &machine).await {
                     Ok(sess) => {
+                        if machine.mac_address.trim().is_empty() {
+                            if let Ok(creds) = bmc_creds(jwt_secret, metal, &machine) {
+                                match crate::integration::bmc::collect_nics_into_machine(
+                                    pool, &sess, &creds, &mut machine,
+                                )
+                                .await
+                                {
+                                    Ok(true) => log(
+                                        &mut payload,
+                                        &format!("BMC NIC inventory: MAC {}", machine.mac_address),
+                                    ),
+                                    Ok(false) => log(
+                                        &mut payload,
+                                        "BMC NIC inventory returned no host MAC",
+                                    ),
+                                    Err(e) => log(
+                                        &mut payload,
+                                        &format!("BMC NIC inventory failed: {e}"),
+                                    ),
+                                }
+                            }
+                        }
                         if let Err(e) = sess.set_boot(BootTarget::Pxe, true).await {
                             fail_job(pool, job.id, &mut payload, &format!("set PXE boot: {e}"))
                                 .await?;
@@ -418,24 +447,86 @@ async fn run_job(
     Ok(())
 }
 
+fn bmc_creds(
+    jwt_secret: &str,
+    metal: &MetalConfig,
+    machine: &crate::db::models::machine::Machine,
+) -> Result<BmcCredentials, AppError> {
+    let enc = machine
+        .bmc_password_enc
+        .as_ref()
+        .ok_or_else(|| AppError::InvalidInput("no BMC password".into()))?;
+    let plain = secrets::decrypt(jwt_secret, enc)?;
+    BmcCredentials::from_machine(
+        machine,
+        &plain,
+        metal.bmc.connect_timeout_secs,
+        &metal.bmc.ipmi_interface,
+    )
+}
+
 async fn open_bmc(
     _pool: &DbPool,
     jwt_secret: &str,
     metal: &MetalConfig,
     machine: &crate::db::models::machine::Machine,
 ) -> Result<BmcSession, AppError> {
-    let enc = machine
-        .bmc_password_enc
-        .as_ref()
-        .ok_or_else(|| AppError::InvalidInput("no BMC password".into()))?;
-    let plain = secrets::decrypt(jwt_secret, enc)?;
-    let creds = BmcCredentials::from_machine(
-        machine,
-        &plain,
-        metal.bmc.connect_timeout_secs,
-        &metal.bmc.ipmi_interface,
-    )?;
+    let creds = bmc_creds(jwt_secret, metal, machine)?;
     BmcSession::connect(&creds).await
+}
+
+/// One machine per tick: fill PXE MAC from BMC when inventory has OOB creds
+/// but no host MAC.
+async fn collect_missing_macs(
+    pool: &DbPool,
+    jwt_secret: &str,
+    metal: &MetalConfig,
+) -> Result<(), AppError> {
+    let machines = repos::machine::list(pool).await?;
+    for mut m in machines {
+        if !m.has_bmc() || !m.mac_address.trim().is_empty() {
+            continue;
+        }
+        let creds = match bmc_creds(jwt_secret, metal, &m) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        match BmcSession::connect(&creds).await {
+            Ok(sess) => {
+                match crate::integration::bmc::collect_nics_into_machine(pool, &sess, &creds, &mut m)
+                    .await
+                {
+                    Ok(true) => info!(
+                        machine_id = %m.id,
+                        hostname = %m.hostname,
+                        mac = %m.mac_address,
+                        "Filled empty MAC from BMC NIC inventory"
+                    ),
+                    Ok(false) => debug_no_mac(&m),
+                    Err(e) => warn!(
+                        machine_id = %m.id,
+                        error = %e,
+                        "BMC NIC inventory failed"
+                    ),
+                }
+            }
+            Err(e) => tracing::debug!(
+                machine_id = %m.id,
+                error = %e,
+                "BMC unreachable for MAC collection"
+            ),
+        }
+        break;
+    }
+    Ok(())
+}
+
+fn debug_no_mac(m: &crate::db::models::machine::Machine) {
+    tracing::debug!(
+        machine_id = %m.id,
+        hostname = %m.hostname,
+        "BMC NIC inventory found no host MAC"
+    );
 }
 
 async fn load_config_yaml(

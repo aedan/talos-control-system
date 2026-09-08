@@ -238,10 +238,13 @@ pub fn preview_inventory(doc: &InventoryDocument) -> InventoryPreview {
         let hostname = m.hostname.clone().unwrap_or_default();
         let (bmc_address, _, bmc_pw, _) = resolve_bmc(m);
 
-        if mac.is_empty() && m.address.as_ref().map(|a| a.is_empty()).unwrap_or(true) {
+        if mac.is_empty()
+            && m.address.as_ref().map(|a| a.is_empty()).unwrap_or(true)
+            && bmc_address.trim().is_empty()
+        {
             errors.push(InventoryRowError {
                 index,
-                message: "row needs mac and/or address".into(),
+                message: "row needs mac, address, and/or BMC".into(),
             });
         }
         if !mac.is_empty() {
@@ -338,10 +341,10 @@ pub async fn apply_inventory(
         let install_disk = row.install_disk.clone().unwrap_or_default();
         let (bmc_address, bmc_username, bmc_password, bmc_type) = resolve_bmc(row);
 
-        if mac.is_empty() && address.is_empty() {
+        if mac.is_empty() && address.is_empty() && bmc_address.trim().is_empty() {
             errors.push(InventoryRowError {
                 index,
-                message: "skipped: needs mac and/or address".into(),
+                message: "skipped: needs mac, address, and/or BMC".into(),
             });
             continue;
         }
@@ -437,4 +440,64 @@ pub async fn apply_inventory(
         machine_ids,
         cluster_id,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_allows_bmc_without_mac() {
+        let doc = InventoryDocument {
+            cluster: None,
+            machines: vec![InventoryMachine {
+                hostname: Some("node-1".into()),
+                role: Some("worker".into()),
+                machine_type: None,
+                mac: None,
+                mac_address: None,
+                address: None,
+                install_disk: None,
+                system_uuid: None,
+                bmc: Some(InventoryBmc {
+                    address: Some("172.24.16.82".into()),
+                    username: Some("root".into()),
+                    password: Some("secret".into()),
+                    r#type: Some("auto".into()),
+                }),
+                bmc_address: None,
+                bmc_username: None,
+                bmc_password: None,
+                bmc_type: None,
+            }],
+        };
+        let preview = preview_inventory(&doc);
+        assert!(preview.errors.is_empty(), "{:?}", preview.errors);
+        assert_eq!(preview.machines[0].bmc_address, "172.24.16.82");
+        assert!(preview.machines[0].mac.is_empty());
+    }
+
+    #[test]
+    fn preview_rejects_empty_row() {
+        let doc = InventoryDocument {
+            cluster: None,
+            machines: vec![InventoryMachine {
+                hostname: Some("node-1".into()),
+                role: None,
+                machine_type: None,
+                mac: None,
+                mac_address: None,
+                address: None,
+                install_disk: None,
+                system_uuid: None,
+                bmc: None,
+                bmc_address: None,
+                bmc_username: None,
+                bmc_password: None,
+                bmc_type: None,
+            }],
+        };
+        let preview = preview_inventory(&doc);
+        assert!(preview.errors.iter().any(|e| e.message.contains("BMC")));
+    }
 }

@@ -63,6 +63,8 @@
     powerState?: string;
     protocol?: string;
     error?: string;
+    macAddress?: string;
+    extraMacs?: string[];
   } | null>(null);
   let bmcAddress = $state('');
   let bmcUsername = $state('');
@@ -121,6 +123,7 @@
         }
         try {
           bmcStatus = (await client.get(`/machines/${$page.params.id}/bmc`)) as typeof bmcStatus;
+          applyBmcMacs(bmcStatus);
         } catch {
           /* optional */
         }
@@ -740,6 +743,17 @@
     }
   }
 
+  function applyBmcMacs(status: typeof bmcStatus) {
+    const mac = status?.macAddress?.trim() || '';
+    if (mac && !editMac.trim()) {
+      editMac = mac;
+      if (machine) machine.macAddress = mac;
+    }
+    if (status?.extraMacs?.length && machine) {
+      machine.extraMacs = status.extraMacs;
+    }
+  }
+
   async function saveBmc() {
     actionBusy = true;
     try {
@@ -756,6 +770,7 @@
       }
       bmcPassword = '';
       bmcStatus = (await client.get(`/machines/${$page.params.id}/bmc`)) as typeof bmcStatus;
+      applyBmcMacs(bmcStatus);
       success('BMC settings saved');
     } catch (e: unknown) {
       notifyError(e instanceof Error ? e.message : 'Failed to save BMC');
@@ -922,8 +937,14 @@
           </label>
         </div>
         <div class="form-row">
-          <label>MAC<input type="text" title="Primary NIC MAC address (used for PXE/metal matching)" bind:value={editMac} placeholder="aa:bb:cc:dd:ee:ff" /></label>
+          <label>MAC<input type="text" title="Primary NIC MAC for PXE/DHCP. Leave blank and TCS will collect host NICs from the BMC." bind:value={editMac} placeholder="collected from BMC if blank" /></label>
         </div>
+        {#if machine.extraMacs && machine.extraMacs.length}
+          <div class="info-row">
+            <span class="label">Other NICs</span>
+            <span class="value mono">{machine.extraMacs.filter((m) => m !== (editMac || '').toLowerCase()).join(', ') || '—'}</span>
+          </div>
+        {/if}
         <div class="form-row">
           <label>Address<input type="text" title="Node API endpoint, e.g. 10.0.0.2 or host:50000" bind:value={editAddress} placeholder="10.0.0.2 or host:50000" /></label>
         </div>

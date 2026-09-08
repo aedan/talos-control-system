@@ -74,13 +74,24 @@ pub async fn get_by_system_uuid(
     .await
 }
 
-pub async fn get_by_mac(pool: &DbPool, mac: &str) -> Result<Option<Machine>, AppError> {
+pub async fn get_by_mac_primary(pool: &DbPool, mac: &str) -> Result<Option<Machine>, AppError> {
     let normalized = normalize_mac(mac);
     pool.fetch_optional_as(
         &format!("SELECT {COLS} FROM machines WHERE mac_address = ? OR mac_address = ?"),
         &[SqlVal::text(&normalized), SqlVal::text(mac)],
     )
     .await
+}
+
+pub async fn get_by_mac(pool: &DbPool, mac: &str) -> Result<Option<Machine>, AppError> {
+    if let Some(m) = get_by_mac_primary(pool, mac).await? {
+        return Ok(Some(m));
+    }
+    let normalized = normalize_mac(mac);
+    if let Some(id) = super::machine_mac::machine_id_for_mac(pool, &normalized).await? {
+        return get(pool, id).await;
+    }
+    Ok(None)
 }
 
 /// Set the siderolink_connected flag for the machine that matches the given
