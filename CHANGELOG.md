@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.89] — 2026-09-08
+
+### Fixed
+- **Image & modules showed `no route to host` on SideroLink IPv6.** Live `talosctl` preferred a fresh overlay IP even when this host cannot route it (`fd28:…:50000`). Probes (and other node ops) now retry the inventory LAN address when the tunnel fails.
+
 ## [0.5.88] — 2026-09-08
 
 ### Fixed

@@ -238,23 +238,18 @@ async fn probe_and_update(
         None => None,
     };
 
-    // Resolve a working endpoint: prefer the SideroLink tunnel IP, fall back to
-    // the LAN address. The IPv6 tunnel can flap momentarily (all of a cluster's
-    // nodes drop at once), which would mass-flap their status. A node is only
-    // counted as a failed probe if it's unreachable via BOTH paths.
+    // Prefer the SideroLink tunnel IP, then the LAN address. The IPv6 overlay
+    // can be unroutable from this host even when the peer looks fresh. A node
+    // is only counted as a failed probe if it's unreachable via BOTH paths.
     let (version, working_endpoint) = {
-        let endpoint = crate::controllers::cluster::effective_endpoint(pool, &machine)
-            .await
-            .unwrap_or_else(|_| machine.address.clone());
-        match TalosctlClient::get_version(&endpoint, talosconfig.as_deref()).await {
-            Ok(v) => (Ok(v), endpoint),
-            Err(_) if endpoint != machine.address => {
-                // Tunnel endpoint failed; try the LAN address.
-                let lan = machine.address.clone();
-                let res = TalosctlClient::get_version(&lan, talosconfig.as_deref()).await;
-                (res, lan)
-            }
-            Err(e) => (Err(e), endpoint),
+        match crate::controllers::cluster::with_reachable_endpoint(pool, &machine, |endpoint| {
+            let tc = talosconfig.clone();
+            async move { TalosctlClient::get_version(&endpoint, tc.as_deref()).await }
+        })
+        .await
+        {
+            Ok((v, endpoint)) => (Ok(v), endpoint),
+            Err(e) => (Err(e), machine.address.clone()),
         }
     };
 
