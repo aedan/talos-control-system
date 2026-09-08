@@ -1165,7 +1165,20 @@ pub async fn get_machine_versions(
     let controller = controller_for(&state);
     match controller.machine_versions(id).await {
         Ok(versions) => Ok(Json(versions)),
-        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+        Err(e) => match controller.machine_version(id).await {
+            Ok(v) => Ok(Json(serde_json::json!({
+                "version": v,
+                "installed": "",
+                "upgradable": null,
+                "probeError": e.to_string(),
+            }))),
+            Err(e2) => Ok(Json(serde_json::json!({
+                "version": "",
+                "installed": "",
+                "upgradable": null,
+                "error": e2.to_string(),
+            }))),
+        },
     }
 }
 
@@ -1177,7 +1190,10 @@ pub async fn get_machine_extensions(
     let controller = controller_for(&state);
     match controller.machine_extensions(id).await {
         Ok(extensions) => Ok(Json(serde_json::json!({ "extensions": extensions }))),
-        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+        Err(e) => Ok(Json(serde_json::json!({
+            "extensions": [],
+            "error": e.to_string(),
+        }))),
     }
 }
 

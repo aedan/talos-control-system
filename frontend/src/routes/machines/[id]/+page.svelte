@@ -457,31 +457,46 @@
     return i >= 0 ? full.slice(i + 1) : full;
   }
 
-  async function loadImageAndModules(silent = false) {    extError = '';
+  async function loadImageAndModules(silent = false) {
+    extError = '';
     extBusy = true;
-    try {
-      const [vRes, eRes, mRes] = await Promise.all([
-        client.get(`/machines/${$page.params.id}/versions`),
-        client.get(`/machines/${$page.params.id}/extensions`),
-        client.get(`/machines/${$page.params.id}/modules`),
-      ]);
-      versions = (vRes as MachineVersions) || null;
-      extensions = ((eRes as { extensions: MachineExtension[] }).extensions) || [];
-      effectiveModules = ((mRes as { modules: string[] }).modules) || [];
-      // Prefill the picker from the effective modules.
+    const id = $page.params.id;
+    const settled = await Promise.allSettled([
+      client.get(`/machines/${id}/versions`),
+      client.get(`/machines/${id}/extensions`),
+      client.get(`/machines/${id}/modules`),
+    ]);
+    const [vRes, eRes, mRes] = settled;
+    const probeFails: string[] = [];
+    if (vRes.status === 'fulfilled') {
+      versions = (vRes.value as MachineVersions) || null;
+      const ve = (versions as { error?: string; probeError?: string } | null)?.error
+        || (versions as { error?: string; probeError?: string } | null)?.probeError;
+      if (ve) probeFails.push(ve);
+    } else {
+      versions = null;
+      probeFails.push(vRes.reason instanceof Error ? vRes.reason.message : String(vRes.reason));
+    }
+    if (eRes.status === 'fulfilled') {
+      const ev = eRes.value as { extensions?: MachineExtension[]; error?: string };
+      extensions = ev.extensions || [];
+      if (ev.error) probeFails.push(ev.error);
+    } else {
+      extensions = [];
+      probeFails.push(eRes.reason instanceof Error ? eRes.reason.message : String(eRes.reason));
+    }
+    if (mRes.status === 'fulfilled') {
+      effectiveModules = ((mRes.value as { modules: string[] }).modules) || [];
       editModules = new Set(effectiveModules);
       modulesDirty = false;
-      // Load the factory module catalog for the running version (best-effort).
-      const ver = versions?.version || machine?.talosVersion || '';
-      if (ver) void loadFactoryCatalog(ver, silent);
-    } catch (e: unknown) {
-      extError = e instanceof Error ? e.message : 'Failed to probe image & modules';
-      versions = null;
-      extensions = [];
-    } finally {
-      extBusy = false;
-      if (!silent) success('Probed image & modules');
     }
+    if (probeFails.length) {
+      extError = probeFails.join('; ');
+    }
+    const ver = versions?.version || machine?.talosVersion || '';
+    if (ver) void loadFactoryCatalog(ver, silent);
+    extBusy = false;
+    if (!silent) success('Probed image & modules');
   }
 
   async function loadFactoryCatalog(version: string, silent = false) {

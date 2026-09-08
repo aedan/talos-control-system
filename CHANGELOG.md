@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.88] — 2026-09-08
+
+### Fixed
+- **Machine "Image & modules" pane showed `API error: 400 Bad Request` and no modules.** Live `talosctl get versions/extensions` probes fail on some nodes and were mapped to HTTP 400; `Promise.all` then discarded the successful `/modules` (configured factory modules) and skipped the Image Factory catalog. Probes are now independent, live failures are non-fatal, and `/versions` falls back to `talosctl version`.
+
 ## [0.5.87] — 2026-09-08
 
 ### Fixed
