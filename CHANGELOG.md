@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.85] — 2026-09-08
+
+### Changed
+- **iDRAC 7 Console in TCS now opens the HTML5 KVM viewer directly.** After login the frameset only waits for session tokens/locale, then replaces itself with `virtualconsolehtml5.html` (no tree, no Virtual Console page, no Launch click). Locale is kept in `sessionStorage` so the viewer still has strings.
+
 ## [0.5.84] — 2026-09-08
 
 ### Fixed
