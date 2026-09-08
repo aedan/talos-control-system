@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.86] — 2026-09-08
+
+### Fixed
+- **iDRAC 7 Console still required walking the tree to Launch Virtual Console.** Auto-launch looked up tokens via `tcsTop` (often a child frame without `TOKEN_VALUE`/`ssnObj`). It now finds the frameset window itself and, once `aimSession` and locale are loaded, replaces that document with the HTML5 viewer.
+
 ## [0.5.85] — 2026-09-08
 
 ### Changed
