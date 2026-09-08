@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.90] — 2026-09-08
+
+### Fixed
+- **Console click looked idle for several seconds.** The overlay only appeared after the BMC session was minted, so operators clicked again. The overlay and spinner now open immediately, the button disables, and extra clicks are ignored.
+
 ## [0.5.89] — 2026-09-08
 
 ### Fixed

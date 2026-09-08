@@ -34,6 +34,8 @@
   let consoleEmbed = $state('');
   let consoleSid = $state('');
   let consoleError = $state('');
+  let consoleFrameLoaded = $state(false);
+  let consoleGen = 0;
   let versions = $state<MachineVersions | null>(null);
   let extensions = $state<MachineExtension[]>([]);
   let extBusy = $state(false);
@@ -381,35 +383,45 @@
   }
 
   async function openConsole() {
-    if (!machine) return;
+    if (!machine || consoleBusy || consoleOpen) return;
+    const gen = ++consoleGen;
+    consoleOpen = true;
     consoleBusy = true;
     consoleError = '';
     consoleMode = 'none';
+    consoleEmbed = '';
+    consoleSid = '';
+    consoleFrameLoaded = false;
     try {
       const res: ConsoleSession = await openConsoleSession($page.params.id!);
+      if (gen !== consoleGen) return;
       consoleMode = res.mode;
       consoleSid = res.sessionId || '';
       consoleEmbed = res.embedUrl || '';
-      consoleOpen = true;
       if (res.error || !res.ok) consoleError = res.error || 'Console unavailable';
+      if (consoleMode === 'sol' || consoleError) consoleFrameLoaded = true;
     } catch (e: unknown) {
+      if (gen !== consoleGen) return;
       consoleError = e instanceof Error ? e.message : 'Failed to open console';
-      consoleOpen = true;
+      consoleFrameLoaded = true;
     } finally {
-      consoleBusy = false;
+      if (gen === consoleGen) consoleBusy = false;
     }
   }
 
   function closeConsole() {
+    consoleGen++;
     stopSol();
     if ((consoleMode === 'ilo' || consoleMode === 'idrac') && consoleSid) {
       void closeConsoleSession($page.params.id!, consoleSid);
     }
     consoleOpen = false;
+    consoleBusy = false;
     consoleMode = 'none';
     consoleEmbed = '';
     consoleSid = '';
     consoleError = '';
+    consoleFrameLoaded = false;
   }
 
   function startSol() {
@@ -1120,7 +1132,7 @@
           <Button variant="secondary" size="sm" title="Save BMC connection settings" onclick={saveBmc} disabled={actionBusy}>Save BMC</Button>
         </div>
         <div class="header-actions" style="margin-top:0.5rem">
-          <Button variant="secondary" size="sm" title="Open the out-of-band console (iLO HTML5 for HPE, iDRAC HTML5 virtual console for Dell)" onclick={openConsole} disabled={actionBusy}>Console</Button>
+          <Button variant="secondary" size="sm" title="Open the out-of-band console (iLO HTML5 for HPE, iDRAC HTML5 virtual console for Dell)" onclick={openConsole} disabled={actionBusy || consoleBusy || consoleOpen}>{consoleBusy ? 'Opening…' : 'Console'}</Button>
           <Button variant="secondary" size="sm" title="Power on the machine via BMC" onclick={() => powerAction('on')} disabled={actionBusy}>On</Button>
           <Button variant="secondary" size="sm" title="Power off the machine via BMC" onclick={() => powerAction('off')} disabled={actionBusy}>Off</Button>
           <Button variant="secondary" size="sm" title="Power-cycle the machine via BMC" onclick={() => powerAction('cycle')} disabled={actionBusy}>Cycle</Button>
@@ -1482,12 +1494,12 @@ cluster:
   {/if}
 
   {#if consoleOpen}
-    <div class="console-overlay" role="dialog" aria-modal="true"
+    <div class="console-overlay" role="dialog" aria-modal="true" tabindex="-1" aria-busy={consoleBusy || !consoleFrameLoaded}
          onkeydown={(e) => { if (e.key === 'Escape') closeConsole(); }}>
       <div class="console-bar">
         <span class="console-title">
-          {#if consoleBusy}
-            <Spinner size="sm" /> Opening…
+          {#if consoleBusy || !consoleFrameLoaded}
+            <Spinner size="sm" /> Opening console…
           {:else}
             OOB console — {machine?.hostname || 'machine'}
           {/if}
@@ -1503,13 +1515,17 @@ cluster:
         {#if consoleError}
           <div class="console-error">{consoleError}</div>
         {/if}
-        {#if consoleMode === 'ilo'}
-          <iframe class="ilo-frame" src={consoleEmbed} title="iLO remote console"></iframe>
-        {:else if consoleMode === 'idrac'}
-          <iframe class="ilo-frame" src={consoleEmbed} title="iDRAC virtual console"></iframe>
+        {#if consoleBusy || ((consoleMode === 'ilo' || consoleMode === 'idrac') && !consoleFrameLoaded)}
+          <div class="console-loading">
+            <Spinner />
+            <p>{consoleBusy ? 'Signing in to the BMC…' : 'Loading viewer…'}</p>
+          </div>
+        {/if}
+        {#if consoleMode === 'ilo' || consoleMode === 'idrac'}
+          <iframe class="ilo-frame" src={consoleEmbed} title={consoleMode === 'idrac' ? 'iDRAC virtual console' : 'iLO remote console'} onload={() => { consoleFrameLoaded = true; }}></iframe>
         {:else if consoleMode === 'sol'}
           <div class="sol-term" use:solContainer></div>
-        {:else}
+        {:else if !consoleBusy}
           <div class="console-empty">Console unavailable.</div>
         {/if}
       </div>
@@ -1938,4 +1954,13 @@ cluster:
   .ilo-frame { width: 100%; flex: 1 1 auto; min-height: 480px; border: 0; background: #fff; display: block; }
   .sol-term { width: 100%; flex: 1 1 auto; min-height: 0; padding: 0.25rem; background: #0b0e14; }
   .console-empty { color: var(--tcs-text-muted); padding: 2rem; text-align: center; }
+  .console-loading {
+    position: absolute; inset: 0; z-index: 3;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 0.85rem;
+    background: #05070b;
+    color: #e6e8ee;
+    pointer-events: none;
+  }
+  .console-loading p { margin: 0; color: var(--tcs-text-muted); font-size: 0.9rem; }
 </style>
