@@ -60,22 +60,27 @@ pub async fn run(client: &Client, cluster: &str, args: &GetArgs) -> super::super
 
 /// Build a `{"columns": [...], "rows": [[...]]}` value from a raw K8s list/get.
 fn to_table(raw: &Value, wide: bool) -> Value {
-    // K8s lists come back as typed objects (`NodeList`, `PodList`, …) or the
-    // generic `List`; both carry an `items` array. Anything else is a single object.
-    let is_list = raw
-        .get("kind")
-        .and_then(|k| k.as_str())
-        .map(|k| k == "List" || k.ends_with("List"))
-        .unwrap_or(false)
-        || raw.get("items").map(|i| i.is_array()).unwrap_or(false);
-
-    let items: Vec<&Value> = if is_list {
-        raw.get("items")
-            .and_then(|i| i.as_array())
-            .map(|a| a.iter().collect())
-            .unwrap_or_default()
+    // The API returns list endpoints as a bare JSON array. K8s lists that come
+    // back as typed objects (`NodeList`, `PodList`, …) or the generic `List`
+    // carry an `items` array instead. Anything else is a single object.
+    let items: Vec<&Value> = if let Some(arr) = raw.as_array() {
+        arr.iter().collect()
     } else {
-        vec![raw]
+        let is_list = raw
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .map(|k| k == "List" || k.ends_with("List"))
+            .unwrap_or(false)
+            || raw.get("items").map(|i| i.is_array()).unwrap_or(false);
+
+        if is_list {
+            raw.get("items")
+                .and_then(|i| i.as_array())
+                .map(|a| a.iter().collect())
+                .unwrap_or_default()
+        } else {
+            vec![raw]
+        }
     };
 
     let mut columns = vec!["NAME".to_string()];
