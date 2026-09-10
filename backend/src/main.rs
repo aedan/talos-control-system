@@ -26,6 +26,13 @@ type AcmeChallengeStore = Arc<DashMap<String, String>>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Install ring as the rustls CryptoProvider before any TLS operation, on
+    // BOTH the CLI and the server path. Multiple crypto backends (ring,
+    // aws-lc-rs) are in the dependency tree, so rustls cannot auto-select a
+    // provider; the CLI's exec/attach websockets (tokio_tungstenite) need a
+    // default one set before they connect. Idempotent if run_server() also sets it.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let argv: Vec<String> = std::env::args().collect();
 
     // One-shot tools before server boot
@@ -104,25 +111,42 @@ async fn run_tool_passthrough(
     let mut tool_args: Vec<String> = Vec::new();
     let mut i = 1usize;
     while i < argv.len() {
-        if i == tool_pos {
-            // Everything from here on (after the tool verb) is the tool's argv.
-            tool_args = argv[i + 1..].to_vec();
-            break;
-        }
+        let after_verb = i > tool_pos;
         match argv[i].as_str() {
-            "--server" | "-s" => {
+            // Long-form TCS globals are consumed wherever they appear so they
+            // never leak into the child tool — kubectl's own `--server` would
+            // otherwise silently re-target the API endpoint.
+            "--server" => {
                 i += 1;
                 server = argv.get(i).cloned();
             }
-            "--token" | "-t" => {
+            "--token" => {
                 i += 1;
                 token = argv.get(i).cloned();
             }
-            "--cluster" | "-c" => {
+            "--cluster" => {
                 i += 1;
                 cluster = argv.get(i).cloned();
             }
-            _ => {}
+            // Short forms only before the verb (unambiguous there); after the
+            // verb they belong to the tool itself (e.g. kubectl -c <context>).
+            "-s" if !after_verb => {
+                i += 1;
+                server = argv.get(i).cloned();
+            }
+            "-t" if !after_verb => {
+                i += 1;
+                token = argv.get(i).cloned();
+            }
+            "-c" if !after_verb => {
+                i += 1;
+                cluster = argv.get(i).cloned();
+            }
+            _ => {
+                if after_verb {
+                    tool_args.push(argv[i].clone());
+                }
+            }
         }
         i += 1;
     }
