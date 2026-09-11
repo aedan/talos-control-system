@@ -202,7 +202,7 @@ impl ConvertController {
                     nodes.push(PreviewNode {
                         name: m.hostname.clone(),
                         role: m.machine_type.clone(),
-                        os_type: m.os_type.clone().unwrap_or_else(|| "baremetal".into()),
+                        os_type: m.os_type.clone().unwrap_or_else(|| "talos".into()),
                         os_image: os_image_for(m),
                         ssh_ok: true,
                         ssh_error: String::new(),
@@ -216,7 +216,7 @@ impl ConvertController {
                     nodes.push(PreviewNode {
                         name: m.hostname.clone(),
                         role: m.machine_type.clone(),
-                        os_type: m.os_type.clone().unwrap_or_else(|| "baremetal".into()),
+                        os_type: m.os_type.clone().unwrap_or_else(|| "talos".into()),
                         os_image: os_image_for(m),
                         ssh_ok: false,
                         ssh_error: e.to_string(),
