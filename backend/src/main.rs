@@ -374,6 +374,14 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config.auth.jwt_secret.clone(),
         metal_merged,
     );
+    let _convert_sched = talos_control_system::runtime::spawn_convert_scheduler(
+        db_pool.clone(),
+        config.database.sqlite_path.clone(),
+        config.auth.jwt_secret.clone(),
+        config.ssh.clone(),
+        config.factory.clone(),
+        config.metal.pxe.clone(),
+    );
     let _status_sched = talos_control_system::runtime::spawn_status_reconciler(
         db_pool.clone(),
         config.auth.jwt_secret.clone(),

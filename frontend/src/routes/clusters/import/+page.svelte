@@ -5,6 +5,7 @@
   import { success, error as notifyError } from '$lib/stores/notifications';
   import Spinner from '$lib/components/Spinner.svelte';
   import Button from '$lib/components/Button.svelte';
+  import OsBadge from '$lib/components/OsBadge.svelte';
 
   let name = $state('');
   let kubeconfig = $state('');
@@ -70,6 +71,16 @@
   function nodeCount() {
     if (!preview) return 0;
     return preview.controlPlaneNodes.length + preview.workerNodes.length;
+  }
+
+  function nodeIsTalos(osImage: string): boolean {
+    return isTalos || /talos/i.test(osImage ?? '');
+  }
+
+  function clusterOsImage(): string {
+    if (!preview) return '';
+    const first = preview.controlPlaneNodes[0] ?? preview.workerNodes[0];
+    return first?.osImage ?? '';
   }
 </script>
 
@@ -187,9 +198,7 @@ contexts:
           <div class="result-row">
             <span class="label">OS</span>
             <span class="value">
-              <span class={isTalos ? 'badge talos' : 'badge non-talos'}>
-                {isTalos ? 'Talos Linux ✓' : 'Not Talos'}
-              </span>
+              <OsBadge osImage={clusterOsImage()} isTalos={isTalos} title={clusterOsImage()} />
             </span>
           </div>
           <div class="result-row">
@@ -220,20 +229,20 @@ contexts:
                 <tr>
                   <td>{node.name}</td>
                   <td>{node.internalIp || '—'}</td>
-                  <td><span class="role-tag control-plane">control-plane</span></td>
-                  <td>{node.kubernetesVersion}</td>
-                  <td>{node.talosVersion || '—'}</td>
-                  <td>{node.osImage}</td>
+                    <td><span class="role-tag control-plane">control-plane</span></td>
+                    <td>{node.kubernetesVersion}</td>
+                    <td>{node.talosVersion || '—'}</td>
+                    <td><OsBadge osImage={node.osImage} isTalos={nodeIsTalos(node.osImage)} /></td>
                 </tr>
               {/each}
               {#each preview.workerNodes as node}
                 <tr>
                   <td>{node.name}</td>
                   <td>{node.internalIp || '—'}</td>
-                  <td><span class="role-tag worker">worker</span></td>
-                  <td>{node.kubernetesVersion}</td>
-                  <td>{node.talosVersion || '—'}</td>
-                  <td>{node.osImage}</td>
+                    <td><span class="role-tag worker">worker</span></td>
+                    <td>{node.kubernetesVersion}</td>
+                    <td>{node.talosVersion || '—'}</td>
+                    <td><OsBadge osImage={node.osImage} isTalos={nodeIsTalos(node.osImage)} /></td>
                 </tr>
               {/each}
             </tbody>
@@ -242,9 +251,9 @@ contexts:
 
         {#if !isTalos}
           <div class="warning">
-            <strong>Warning:</strong> This cluster does not appear to be running Talos Linux.
-            You can still import it, but Talos-specific features (config patches, upgrades, backups)
-            will not be available.
+            <strong>Note:</strong> This cluster is not running Talos Linux.
+            TCS will import it for management — the k8s explorer, kubectl/helm, and cluster backups work immediately.
+            You can then convert it to Talos in-place (preserving cluster state) from the cluster page.
           </div>
         {/if}
 
@@ -392,14 +401,6 @@ contexts:
   .result-row:last-child { border-bottom: none; }
   .result-row .label { color: var(--tcs-text-muted); font-size: 0.85rem; }
   .result-row .value { font-weight: 500; }
-
-  .badge {
-    font-size: 0.75rem;
-    padding: 0.15rem 0.5rem;
-    border-radius: 4px;
-  }
-  .badge.talos { background: rgba(16, 185, 129, 0.2); color: var(--tcs-success); }
-  .badge.non-talos { background: rgba(245, 158, 11, 0.2); color: var(--tcs-warning); }
 
   .warning {
     background: rgba(245, 158, 11, 0.1);

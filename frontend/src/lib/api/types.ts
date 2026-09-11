@@ -26,6 +26,7 @@ export interface Machine {
   clusterId: string | null;
   status: string;
   talosVersion: string;
+  osType?: string;
   secureBoot: boolean;
   siderolinkConnected: boolean;
   address: string;

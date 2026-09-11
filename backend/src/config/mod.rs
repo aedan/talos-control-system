@@ -6,6 +6,7 @@ pub mod auth;
 pub mod tls;
 pub mod metal;
 pub mod factory;
+pub mod ssh;
 
 pub use server::ServerConfig;
 pub use database::{DatabaseBackend, DatabaseConfig};
@@ -16,6 +17,7 @@ pub use auth::OidcConfig;
 pub use tls::{SelfSignedConfig, TlsConfig, TlsMode};
 pub use metal::{MetalBmcConfig, MetalConfig, MetalDhcpConfig, MetalPxeConfig};
 pub use factory::FactoryConfig;
+pub use ssh::SshConfig;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -31,6 +33,8 @@ pub struct Config {
     pub metal: MetalConfig,
     #[serde(default)]
     pub factory: FactoryConfig,
+    #[serde(default)]
+    pub ssh: SshConfig,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -122,6 +126,7 @@ impl Config {
             tls: TlsConfig::default(),
             metal: MetalConfig::default(),
             factory: FactoryConfig::default(),
+            ssh: SshConfig::default(),
         }
     }
 }

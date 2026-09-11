@@ -5259,3 +5259,76 @@ pub async fn import_machines(
         .map(Json)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
+
+// ── Convert to Talos (in-place, non-Talos -> Talos) ───────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConvertPreviewRequest {
+    pub talos_version: String,
+    #[serde(default)]
+    pub modules: Vec<String>,
+}
+
+pub async fn convert_preview(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<Uuid>,
+    Json(body): Json<ConvertPreviewRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let c = crate::controllers::ConvertController::new(state.db_pool.clone(), &state.config);
+    match c.preview(cluster_id, body.talos_version, body.modules).await {
+        Ok(p) => serde_json::to_value(p)
+            .map(Json)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+pub async fn convert_start(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(body): Json<crate::controllers::convert::StartBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    let c = crate::controllers::ConvertController::new(state.db_pool.clone(), &state.config);
+    match c.start(&claims.sub, cluster_id, body).await {
+        Ok(id) => Ok((
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "jobId": id, "status": "running" })),
+        )),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+pub async fn convert_status(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let c = crate::controllers::ConvertController::new(state.db_pool.clone(), &state.config);
+    match c.status(cluster_id).await {
+        Ok(s) => serde_json::to_value(s)
+            .map(Json)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        Err(e) if matches!(e, crate::AppError::NotFound(_)) => {
+            Err((StatusCode::NOT_FOUND, e.to_string()))
+        }
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+pub async fn convert_cancel(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    let c = crate::controllers::ConvertController::new(state.db_pool.clone(), &state.config);
+    match c.cancel(&claims.sub, cluster_id).await {
+        Ok(()) => Ok(Json(serde_json::json!({ "ok": true }))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}

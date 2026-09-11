@@ -1,5 +1,6 @@
 <script lang="ts">
   import { page } from '$app/stores';
+  import { goto } from '$app/navigation';
   import { client } from '$lib/api/client';
   import { onMount, onDestroy } from 'svelte';
   import { success, error as notifyError } from '$lib/stores/notifications';
@@ -689,6 +690,7 @@
   }
 
   const controlPlanes = $derived(machines.filter(isControlPlane));
+  const hasNonTalos = $derived(machines.some((m) => m.osType === 'baremetal'));
   const cpCount = $derived(machines.filter(isControlPlane).length);
   const workerCount = $derived(machines.length - cpCount);
   const hasKubeconfig = $derived(!!(cluster && (cluster.hasKubeconfig || cluster.has_kubeconfig)));
@@ -705,6 +707,9 @@
       <div class="actions">
         <Button variant="secondary" size="sm" title="Re-read node inventory and versions from the cluster's stored kubeconfig" onclick={refresh} disabled={busy}>Refresh from K8s</Button>
         <Button variant="secondary" size="sm" title="Spread Deployment replicas evenly across schedulable nodes (post-maintenance re-balance)" onclick={doRebalance} disabled={busy || rebalanceBusy}>{rebalanceBusy ? 'Rebalancing…' : 'Rebalance'}</Button>
+        {#if hasNonTalos}
+          <Button variant="primary" size="sm" title="Convert this cluster's non-Talos nodes to Talos Linux in-place (preserving cluster state)" onclick={() => goto(`/clusters/${cid}/convert`)}>Convert to Talos</Button>
+        {/if}
       </div>
     </div>
 
@@ -1003,6 +1008,7 @@
                 <th>MAC</th>
                 <th>Address</th>
                 <th>BMC</th>
+                <th>OS</th>
                 <th>Talos</th>
               </tr>
             </thead>
@@ -1030,6 +1036,13 @@
                   <td class="mono">{m.macAddress || '—'}</td>
                   <td class="mono">{m.address || '—'}</td>
                   <td>{machineHasBmc(m) ? 'yes' : '—'}</td>
+                  <td>
+                    {#if m.osType === 'talos'}
+                      <span class="os-badge os-talos" title="Running Talos Linux">Talos</span>
+                    {:else}
+                      <span class="os-badge os-nontalos" title="Not running Talos (convertible)">Non-Talos</span>
+                    {/if}
+                  </td>
                   <td>{m.talosVersion || '—'}</td>
                 </tr>
               {/each}
@@ -1323,6 +1336,17 @@
   .rebalance-errors { color: var(--tcs-error, #ef4444); }
   .rebalance-note { color: var(--tcs-text-muted); font-size: 0.78rem; }
   .rebalance-close { display: flex; justify-content: flex-end; }
+
+  .os-badge {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    padding: 0.1rem 0.45rem;
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+  .os-badge.os-talos { background: rgba(16, 185, 129, 0.18); color: var(--tcs-success); }
+  .os-badge.os-nontalos { background: rgba(245, 158, 11, 0.18); color: var(--tcs-warning); }
 
   .hint { color: var(--tcs-text-muted); font-size: 0.85rem; margin: 0 0 0.75rem; }
   .sl-toggle-row {

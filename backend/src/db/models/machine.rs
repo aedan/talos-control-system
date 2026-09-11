@@ -26,6 +26,11 @@ pub struct Machine {
     pub status: String,
     #[sqlx(rename = "talos_version")]
     pub talos_version: String,
+    /// OS type from node discovery: "talos" or "baremetal" (any non-Talos OS).
+    /// `None` for machines created before migration 023 (treated as unknown,
+    /// assumed Talos for legacy clusters).
+    #[sqlx(rename = "os_type")]
+    pub os_type: Option<String>,
     #[sqlx(rename = "secure_boot")]
     pub secure_boot: bool,
     #[sqlx(rename = "siderolink_connected")]
@@ -91,6 +96,7 @@ impl Machine {
             cluster_id: None,
             status: "pending".to_string(),
             talos_version: String::new(),
+            os_type: None,
             secure_boot: false,
             siderolink_connected: false,
             address: String::new(),

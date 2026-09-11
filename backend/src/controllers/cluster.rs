@@ -229,12 +229,12 @@ impl ClusterController {
     ) -> Result<Cluster, AppError> {
         let discovered = discover_cluster_from_kubeconfig(&kubeconfig_yaml).await?;
 
+        // Non-Talos clusters are importable for management (kubectl, k8s
+        // explorer, backups) and as a staging ground for the in-place
+        // "Convert to Talos" flow. Talos-specific ops simply no-op until
+        // converted.
         if !discovered.is_talos {
-            return Err(AppError::InvalidInput(
-                "Cluster does not appear to be running Talos Linux. \
-                 Only Talos Linux clusters can be imported."
-                    .to_string(),
-            ));
+            tracing::info!(cluster = %name, "importing a non-Talos cluster (convert-to-Talos enabled)");
         }
 
         let existing = crate::db::repos::cluster::list(&self.pool).await?;
@@ -329,6 +329,9 @@ impl ClusterController {
             } else {
                 "worker"
             };
+            let is_talos_node = node.os_image.to_lowercase().contains("talos");
+            let os_type = if is_talos_node { "talos" } else { "baremetal" };
+            let state = if is_talos_node { "running" } else { "running-non-talos" };
             let system_uuid = format!("k8s-{}-{}", cluster_id, node.name);
 
             // Match an existing machine by synthetic uuid, then by address,
@@ -353,15 +356,17 @@ impl ClusterController {
                 let mut m = existing[idx].clone();
                 m.address = node.internal_ip.clone();
                 m.talos_version = node.talos_version.clone();
+                m.os_type = Some(os_type.to_string());
                 m.machine_type = mtype.to_string();
-                m.status = "running".to_string();
+                m.status = state.to_string();
                 m.updated_at = now;
                 crate::db::repos::machine::update(&self.pool, &m).await?;
             } else {
                 let mut machine = Machine::new(system_uuid, mtype.to_string());
                 machine.cluster_id = Some(cluster_id);
-                machine.status = "running".to_string();
+                machine.status = state.to_string();
                 machine.talos_version = node.talos_version.clone();
+                machine.os_type = Some(os_type.to_string());
                 machine.address = node.internal_ip.clone();
                 machine.created_at = now;
                 machine.updated_at = now;

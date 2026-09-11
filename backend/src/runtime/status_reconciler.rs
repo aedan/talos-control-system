@@ -119,6 +119,9 @@ async fn tick(pool: &DbPool, jwt_secret: &str) -> Result<(), AppError> {
         .into_iter()
         .filter(|m| m.cluster_id.is_some())
         .filter(|m| !m.address.trim().is_empty())
+        // Non-Talos nodes can't be probed via the Talos API; leave them in
+        // their discovered state instead of flapping them to `offline`.
+        .filter(|m| m.os_type.as_deref() != Some("baremetal"))
         .filter(|m| RECONCILABLE.contains(&m.status.as_str()))
         .filter(|m| !in_flight.contains(&m.id))
         .collect();
