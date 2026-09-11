@@ -354,6 +354,11 @@ impl ClusterController {
 
             if let Some(idx) = match_idx {
                 let mut m = existing[idx].clone();
+                if node.name.trim().is_empty() {
+                    m.hostname = m.address.clone();
+                } else {
+                    m.hostname = node.name.clone();
+                }
                 m.address = node.internal_ip.clone();
                 m.talos_version = node.talos_version.clone();
                 m.os_type = Some(os_type.to_string());
@@ -368,6 +373,11 @@ impl ClusterController {
                 machine.talos_version = node.talos_version.clone();
                 machine.os_type = Some(os_type.to_string());
                 machine.address = node.internal_ip.clone();
+                machine.hostname = if node.name.trim().is_empty() {
+                    node.internal_ip.clone()
+                } else {
+                    node.name.clone()
+                };
                 machine.created_at = now;
                 machine.updated_at = now;
                 crate::db::repos::machine::create(&self.pool, &machine).await?;

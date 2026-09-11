@@ -153,14 +153,26 @@ async fn step_snapshot(
 
     let remote = "/tmp/tcs-convert-etcd.db";
     payload.set_state(&cp.name, "snapshot", "etcdctl snapshot save", "");
-    let cmd = format!(
-        "ETCDCTL_API=3 etcdctl snapshot save {remote} \
-         --endpoints=https://127.0.0.1:2379 \
-         --cacert=/etc/kubernetes/pki/etcd/ca.crt \
-         --cert=/etc/kubernetes/pki/etcd/server.crt \
-         --key=/etc/kubernetes/pki/etcd/server.key --write-out=table"
-    );
-    match sshc.run_capture(&cp.address, &cmd).await {
+    // Detect the etcd layout: kubeadm (/etc/kubernetes/pki/etcd) vs
+    // Calico/kubespray (/etc/ssl/etcd/ssl, per-node certs). Use a 127.0.0.1
+    // endpoint — a local etcd is always present on a control-plane node.
+    let probe = r#"
+CA=""; CERT=""; KEY=""
+if [ -f /etc/kubernetes/pki/etcd/ca.crt ]; then
+  CA=/etc/kubernetes/pki/etcd/ca.crt
+  CERT=/etc/kubernetes/pki/etcd/server.crt
+  KEY=/etc/kubernetes/pki/etcd/server.key
+elif [ -f /etc/ssl/etcd/ssl/ca.pem ] && [ -f "/etc/ssl/etcd/ssl/node-$(hostname).pem" ]; then
+  CA=/etc/ssl/etcd/ssl/ca.pem
+  CERT=/etc/ssl/etcd/ssl/node-$(hostname).pem
+  KEY=/etc/ssl/etcd/ssl/node-$(hostname)-key.pem
+fi
+if [ -z "$CA" ]; then echo "ERROR: no etcd cert layout found (tried kubeadm + calico)"; exit 1; fi
+ETCDCTL_API=3 etcdctl snapshot save /tmp/tcs-convert-etcd.db \
+  --endpoints=https://127.0.0.1:2379 \
+  --cacert="$CA" --cert="$CERT" --key="$KEY" --write-out=table
+"#;
+    match sshc.run_capture(&cp.address, probe).await {
         Ok(o) if o.ok => {}
         Ok(o) => {
             fail_node(payload, &cp.name, "etcd snapshot", &o.stderr);
