@@ -191,3 +191,47 @@ pub async fn apply_manifest(
     .await;
     Ok(Json(serde_json::json!({ "ok": true, "results": results })))
 }
+
+#[derive(Deserialize)]
+pub struct RebalanceBody {
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default)]
+    node: Option<String>,
+    #[serde(default)]
+    include_statefulsets: bool,
+}
+
+/// POST /clusters/:id/k8s/rebalance
+/// Spread surplus Deployment replicas across schedulable nodes so the pool is
+/// even. PDB-aware; respects node selector/affinity, taints and capacity.
+pub async fn rebalance_cluster(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<RebalanceBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let user = require_admin(&headers).await?;
+    let client = k8s_common::client_for(&state, id).await?;
+    let result = client
+        .rebalance(body.dry_run, body.node.as_deref(), body.include_statefulsets)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    k8s_common::audit(
+        &state,
+        &user,
+        "k8s_rebalance",
+        &id.to_string(),
+        &format!(
+            "dry_run={} moves={} skipped={} errors={} workloads={} nodes={}",
+            body.dry_run,
+            result.moves.len(),
+            result.skipped.len(),
+            result.errors.len(),
+            result.considered_workloads,
+            result.eligible_nodes
+        ),
+    )
+    .await;
+    Ok(Json(serde_json::to_value(&result).unwrap_or_default()))
+}

@@ -317,6 +317,7 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route("/clusters/:id/k8s/uncordon", post(k8s_action_handlers::uncordon_node))
         .route("/clusters/:id/k8s/drain", post(k8s_action_handlers::drain_node))
         .route("/clusters/:id/k8s/apply", post(k8s_action_handlers::apply_manifest))
+        .route("/clusters/:id/k8s/rebalance", post(k8s_action_handlers::rebalance_cluster))
         // Real kubectl / helm / talosctl passthrough (run server-side; creds never leave)
         .route("/clusters/:id/tool", post(k8s_tool_handlers::run_tool))
         .route("/clusters/:id/tool/tty", get(k8s_tool_handlers::tool_tty))

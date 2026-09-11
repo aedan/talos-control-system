@@ -23,6 +23,26 @@
   let error = $state('');
   let busy = $state(false);
   let tab = $state<Tab>('machines');
+
+  // ── rebalance (post-maintenance re-spread) ──────────────────────────
+  type RebalanceMove = {
+    namespace: string;
+    pod: string;
+    workload: string;
+    from_node: string;
+    to_node: string;
+    reason: string;
+  };
+  type RebalanceResult = {
+    dry_run: boolean;
+    eligible_nodes: number;
+    considered_workloads: number;
+    moves: RebalanceMove[];
+    skipped: string[];
+    errors: string[];
+  };
+  let rebalanceBusy = $state(false);
+  let rebalanceResult = $state<RebalanceResult | null>(null);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
   // ── cluster default modules (Image Factory) ────────────────────────
@@ -348,6 +368,34 @@
     }
   }
 
+  async function doRebalance() {
+    rebalanceResult = null;
+    if (
+      !confirm(
+        'Rebalance the cluster?\n\nSurplus Deployment replicas on over-loaded nodes will be evicted so they re-spread evenly across schedulable nodes. Node affinity, taints, capacity and PDBs are respected. DaemonSets and StatefulSets are left untouched.'
+      )
+    )
+      return;
+    rebalanceBusy = true;
+    try {
+      const res = (await client.post(`/clusters/${cid}/k8s/rebalance`, {
+        dry_run: false,
+      })) as RebalanceResult;
+      rebalanceResult = res;
+      if (res.moves.length) {
+        success(`Rebalanced: ${res.moves.length} replica(s) re-spread, ${res.errors.length} error(s)`);
+      } else {
+        success(`Rebalance complete — already balanced (${res.considered_workloads} workload(s) checked)`);
+      }
+      await loadCluster();
+      await loadMachines();
+    } catch (e: unknown) {
+      notifyError(e instanceof Error ? e.message : 'Rebalance failed (need stored kubeconfig)');
+    } finally {
+      rebalanceBusy = false;
+    }
+  }
+
   async function loadUpgradeTargets() {
     targetsBusy = true;
     targetsError = '';
@@ -656,8 +704,47 @@
       <h1>{cluster.name}</h1>
       <div class="actions">
         <Button variant="secondary" size="sm" title="Re-read node inventory and versions from the cluster's stored kubeconfig" onclick={refresh} disabled={busy}>Refresh from K8s</Button>
+        <Button variant="secondary" size="sm" title="Spread Deployment replicas evenly across schedulable nodes (post-maintenance re-balance)" onclick={doRebalance} disabled={busy || rebalanceBusy}>{rebalanceBusy ? 'Rebalancing…' : 'Rebalance'}</Button>
       </div>
     </div>
+
+    {#if rebalanceResult}
+      <div class="rebalance-panel">
+        <div class="rebalance-summary">
+          {#if rebalanceResult.moves.length}
+            {rebalanceResult.moves.length} replica(s) re-spread across {rebalanceResult.eligible_nodes} node(s)
+          {:else}
+            Already balanced — nothing to move
+          {/if}
+          · {rebalanceResult.considered_workloads} workload(s) checked
+          {#if rebalanceResult.errors.length} · <span class="hint error">{rebalanceResult.errors.length} error(s)</span>{/if}
+        </div>
+        {#if rebalanceResult.moves.length}
+          <table class="rebalance-table">
+            <thead>
+              <tr><th>Workload</th><th>Pod</th><th>From node</th><th>To node</th></tr>
+            </thead>
+            <tbody>
+              {#each rebalanceResult.moves as m (m.namespace + '/' + m.pod)}
+                <tr>
+                  <td>{m.workload}</td>
+                  <td class="mono">{m.namespace}/{m.pod}</td>
+                  <td class="mono">{m.from_node}</td>
+                  <td class="mono">{m.to_node}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+        {#if rebalanceResult.errors.length}
+          <div class="rebalance-errors">{rebalanceResult.errors.join(' · ')}</div>
+        {/if}
+        <div class="rebalance-note">Replicas are evicted and re-placed by the scheduler; re-run if the spread needs to converge further.</div>
+        <div class="rebalance-close">
+          <Button variant="ghost" size="sm" title="Dismiss the rebalance result" onclick={() => (rebalanceResult = null)}>Dismiss</Button>
+        </div>
+      </div>
+    {/if}
 
     <div class="info-grid">
       <div class="info-item">
@@ -1214,6 +1301,28 @@
     font-size: 0.875rem;
     margin-bottom: 1.5rem;
   }
+
+  .rebalance-panel {
+    border: 1px solid var(--tcs-border);
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    margin-bottom: 1.5rem;
+    font-size: 0.875rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .rebalance-summary { font-weight: 600; color: var(--tcs-text); }
+  .rebalance-table { width: 100%; border-collapse: collapse; }
+  .rebalance-table th, .rebalance-table td {
+    text-align: left;
+    padding: 0.25rem 0.6rem;
+    border-bottom: 1px solid var(--tcs-border);
+  }
+  .rebalance-table th { color: var(--tcs-text-muted); font-weight: 600; font-size: 0.78rem; }
+  .rebalance-errors { color: var(--tcs-error, #ef4444); }
+  .rebalance-note { color: var(--tcs-text-muted); font-size: 0.78rem; }
+  .rebalance-close { display: flex; justify-content: flex-end; }
 
   .hint { color: var(--tcs-text-muted); font-size: 0.85rem; margin: 0 0 0.75rem; }
   .sl-toggle-row {

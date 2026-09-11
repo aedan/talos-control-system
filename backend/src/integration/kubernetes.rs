@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::AppError;
+use k8s_openapi::api::core::v1::{Node, Pod};
 
 /// Parsed kubeconfig data for cluster discovery
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1049,6 +1050,469 @@ impl K8sClient {
         }
         seen.into_values().collect()
     }
+
+    // ---- rebalance --------------------------------------------------------
+
+    /// Rebalance a cluster: spread surplus Deployment replicas so every
+    /// schedulable (Ready, not cordoned) node holds an even share, respecting
+    /// the pod's node selector/affinity, taint tolerations, node capacity and
+    /// PDBs. DaemonSets, StatefulSets and workloads with required pod
+    /// anti-affinity are left untouched (ceph/osd-style pinning lives there).
+    ///
+    /// Only *surplus* replicas on over-represented nodes are evicted; the
+    /// Deployment controller recreates them and kube-scheduler places the
+    /// replacements (which enforces affinity/anti-affinity for real). This is a
+    /// best-effort nudge — re-running converges further.
+    pub async fn rebalance(
+        &self,
+        dry_run: bool,
+        focus_node: Option<&str>,
+        include_statefulsets: bool,
+    ) -> Result<RebalanceResult, AppError> {
+        let _ = (focus_node, include_statefulsets);
+        let mut result = RebalanceResult {
+            dry_run,
+            eligible_nodes: 0,
+            considered_workloads: 0,
+            moves: Vec::new(),
+            skipped: Vec::new(),
+            errors: Vec::new(),
+        };
+
+        let nodes = self.list_nodes().await?;
+        let pods = self.list_pods(None).await?;
+        let deployments = self.list_deployments(None).await?;
+
+        let eligible_set: std::collections::HashSet<String> = nodes
+            .iter()
+            .filter(|n| node_is_eligible(n))
+            .map(|n| n.metadata.name.clone().unwrap_or_default())
+            .filter(|n| !n.is_empty())
+            .collect();
+        result.eligible_nodes = eligible_set.len();
+        if eligible_set.len() < 2 {
+            result
+                .skipped
+                .push(format!("only {} eligible node(s); need >=2 to spread", eligible_set.len()));
+            return Ok(result);
+        }
+
+        // Index running pods for O(1) lookup by (ns, name).
+        let mut pod_index: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+        for (i, p) in pods.iter().enumerate() {
+            if pod_running(p) {
+                if let (Some(ns), Some(name)) = (p.metadata.namespace.clone(), p.metadata.name.clone()) {
+                    pod_index.entry((ns, name)).or_insert(i);
+                }
+            }
+        }
+
+        // Free capacity per eligible node = allocatable - sum(running pods' requests).
+        let mut used: std::collections::HashMap<String, (i64, i64)> = std::collections::HashMap::new();
+        for p in pods.iter().filter(|p| pod_running(p)) {
+            if let Some(node) = p
+                .spec
+                .as_ref()
+                .and_then(|s| s.node_name.clone())
+                .filter(|n| eligible_set.contains(n))
+            {
+                let (cpu, mem) = pod_requests(p);
+                let e = used.entry(node).or_insert((0, 0));
+                e.0 += cpu;
+                e.1 += mem;
+            }
+        }
+        let mut free: std::collections::HashMap<String, (i64, i64)> = nodes
+            .iter()
+            .filter(|n| node_is_eligible(n))
+            .filter_map(|n| {
+                let name = n.metadata.name.clone().unwrap_or_default();
+                let (a_cpu, a_mem) = node_allocatable(n);
+                let (u_cpu, u_mem) = used.get(&name).copied().unwrap_or((0, 0));
+                Some((name, (a_cpu.saturating_sub(u_cpu), a_mem.saturating_sub(u_mem))))
+            })
+            .collect();
+
+        for dep in deployments.iter() {
+            let desired = dep.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
+            if desired < 2 {
+                continue;
+            }
+            let ns = dep.metadata.namespace.clone().unwrap_or_default();
+            let dep_name = dep.metadata.name.clone().unwrap_or_default();
+            let selector = dep
+                .spec
+                .as_ref()
+                .and_then(|s| s.selector.match_labels.clone())
+                .unwrap_or_default();
+            if selector.is_empty() {
+                continue;
+            }
+            // Skip workloads enforcing required pod anti-affinity — we can't
+            // safely predict their placement; ceph/osd pinning lives here.
+            if has_required_anti_affinity(dep) {
+                result
+                    .skipped
+                    .push(format!("{ns}/{dep_name} (required pod anti-affinity)"));
+                continue;
+            }
+            result.considered_workloads += 1;
+
+            // Current per-node replica counts + removable candidates (on eligible nodes).
+            let mut cnt: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            let mut cands: std::collections::HashMap<String, Vec<(String, String)>> = std::collections::HashMap::new();
+            for p in pods.iter().filter(|p| pod_running(p)) {
+                if p.metadata.namespace.as_deref() != Some(ns.as_str()) {
+                    continue;
+                }
+                if !pod_matches_selector(p, &selector) {
+                    continue;
+                }
+                if let Some(node) = p.spec.as_ref().and_then(|s| s.node_name.clone()) {
+                    if eligible_set.contains(&node) {
+                        *cnt.entry(node.clone()).or_insert(0) += 1;
+                        if let Some(name) = p.metadata.name.clone() {
+                            cands.entry(node).or_default().push((ns.clone(), name));
+                        }
+                    }
+                }
+            }
+
+            // Level counts: while some node hosts more than another by >1, evict a
+            // surplus replica from the busiest node onto a feasible, under-count node.
+            let max_guard = (desired as usize).saturating_mul(eligible_set.len()).saturating_add(8);
+            let mut guard = 0usize;
+            loop {
+                guard += 1;
+                if guard > max_guard {
+                    break;
+                }
+                let high = match cnt
+                    .iter()
+                    .filter(|(_, c)| **c > 0)
+                    .max_by(|a, b| a.1.cmp(b.1))
+                    .map(|(n, _)| n.clone())
+                {
+                    Some(h) => h,
+                    None => break,
+                };
+                let high_cnt = *cnt.get(&high).unwrap_or(&0);
+                // Lowest replica count among eligible nodes (0 for empty ones).
+                let low_cnt = eligible_set
+                    .iter()
+                    .map(|n| cnt.get(n).copied().unwrap_or(0))
+                    .min()
+                    .unwrap_or(0);
+                if high_cnt <= low_cnt + 1 {
+                    break; // already evenly spread
+                }
+                let (pod_ns, pod_name) = match cands.get_mut(&high).and_then(|v| v.pop()) {
+                    Some(x) => x,
+                    None => {
+                        cnt.insert(high.clone(), 0);
+                        continue;
+                    }
+                };
+                let Some(&pod_idx) = pod_index.get(&(pod_ns.clone(), pod_name.clone())) else {
+                    continue;
+                };
+                let pod = &pods[pod_idx];
+                let req = pod_requests(pod);
+                let target_name = nodes
+                    .iter()
+                    .filter(|n| node_is_eligible(n))
+                    .filter(|n| {
+                        let name = n.metadata.name.clone().unwrap_or_default();
+                        name != high
+                            && cnt.get(&name).copied().unwrap_or(0) <= low_cnt
+                            && pod_schedulable_on(pod, n)
+                            && free.get(&name).map(|f| f.0 >= req.0 && f.1 >= req.1).unwrap_or(false)
+                    })
+                    .max_by_key(|n| free.get(&n.metadata.name.clone().unwrap_or_default()).copied().unwrap_or((0, 0)))
+                    .and_then(|n| n.metadata.name.clone());
+                let Some(target_name) = target_name else {
+                    result.skipped
+                        .push(format!("{ns}/{dep_name}: {pod_ns}/{pod_name} (no feasible target for spread)"));
+                    break;
+                };
+                if let Some(f) = free.get_mut(&target_name) {
+                    f.0 = f.0.saturating_sub(req.0);
+                    f.1 = f.1.saturating_sub(req.1);
+                }
+                if let Some(c) = cnt.get_mut(&high) {
+                    *c = c.saturating_sub(1);
+                }
+                *cnt.entry(target_name.clone()).or_insert(0) += 1;
+                result.moves.push(RebalanceMove {
+                    namespace: pod_ns,
+                    pod: pod_name,
+                    workload: format!("{ns}/{dep_name}"),
+                    from_node: high,
+                    to_node: target_name,
+                    reason: "spread surplus replica to an under-loaded node".to_string(),
+                });
+            }
+        }
+
+        // Evict the planned moves (PDB-aware). Dry-run returns the plan untouched.
+        if !dry_run {
+            for mv in result.moves.iter() {
+                let pod_api = kube::Api::<Pod>::namespaced(self.client.clone(), &mv.namespace);
+                let ep = kube::api::EvictParams {
+                    delete_options: Some(kube::api::DeleteParams {
+                        grace_period_seconds: None,
+                        ..Default::default()
+                    }),
+                    post_options: kube::api::PostParams::default(),
+                };
+                if let Err(e) = pod_api.evict(&mv.pod, &ep).await {
+                    result.errors.push(format!("{}/{}: {e}", mv.namespace, mv.pod));
+                }
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+// ---- rebalance result + helpers --------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RebalanceMove {
+    pub namespace: String,
+    pub pod: String,
+    pub workload: String,
+    pub from_node: String,
+    pub to_node: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RebalanceResult {
+    pub dry_run: bool,
+    pub eligible_nodes: usize,
+    pub considered_workloads: usize,
+    pub moves: Vec<RebalanceMove>,
+    pub skipped: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+/// A node is an eligible spread target: Ready, not cordoned, not terminating.
+fn node_is_eligible(node: &Node) -> bool {
+    if node.spec.as_ref().and_then(|s| s.unschedulable) == Some(true) {
+        return false;
+    }
+    if node.metadata.deletion_timestamp.is_some() {
+        return false;
+    }
+    node.status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .and_then(|conds| conds.iter().find(|c| c.type_ == "Ready"))
+        .map(|c| c.status == "True")
+        .unwrap_or(false)
+}
+
+fn pod_running(pod: &Pod) -> bool {
+    pod.metadata.deletion_timestamp.is_none()
+        && pod.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running")
+}
+
+/// Does the pod's nodeSelector + required nodeAffinity match this node?
+fn node_affinity_ok(pod: &Pod, node: &Node) -> bool {
+    let spec = match pod.spec.as_ref() {
+        Some(s) => s,
+        None => return false,
+    };
+    if let Some(sel) = &spec.node_selector {
+        let labels = node.metadata.labels.as_ref();
+        for (k, v) in sel {
+            let hit = labels.and_then(|l| l.get(k)).map(|lv| lv == v).unwrap_or(false);
+            if !hit {
+                return false;
+            }
+        }
+    }
+    if let Some(ns) = spec
+        .affinity
+        .as_ref()
+        .and_then(|a| a.node_affinity.as_ref())
+        .and_then(|a| a.required_during_scheduling_ignored_during_execution.as_ref())
+    {
+        let terms = ns.node_selector_terms.as_slice();
+        if !terms.is_empty() && !terms.iter().any(|t| node_affinity_term_matches(t, node)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn node_affinity_term_matches(
+    term: &k8s_openapi::api::core::v1::NodeSelectorTerm,
+    node: &Node,
+) -> bool {
+    for expr in term.match_expressions.iter().flatten() {
+        let val = node
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|m| m.get(&expr.key))
+            .map(|s| s.as_str());
+        let ok = match expr.operator.as_str() {
+            "In" => expr.values.iter().flatten().any(|v| val == Some(v.as_str())),
+            "NotIn" => expr.values.iter().flatten().all(|v| val != Some(v.as_str())),
+            "Exists" => val.is_some(),
+            "DoesNotExist" => val.is_none(),
+            // Gt/Lt and anything unknown: conservative — treat as unsatisfied.
+            _ => false,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+/// Every blocking (NoSchedule/NoExecute) taint on the node is tolerated by the pod.
+fn pod_tolerates(node_taints: &[k8s_openapi::api::core::v1::Taint], pod: &Pod) -> bool {
+    let spec = match pod.spec.as_ref() {
+        Some(s) => s,
+        None => return false,
+    };
+    for taint in node_taints {
+        let blocking = taint.effect == "NoSchedule" || taint.effect == "NoExecute";
+        if !blocking {
+            continue;
+        }
+        let tolerated = spec.tolerations.iter().flatten().any(|tol| {
+            let effect_ok = match &tol.effect {
+                Some(e) => e == &taint.effect,
+                None => true,
+            };
+            if !effect_ok {
+                return false;
+            }
+            let key_ok = match &tol.key {
+                Some(k) => k == &taint.key,
+                None => tol.operator.as_deref() == Some("Exists"),
+            };
+            if !key_ok {
+                return false;
+            }
+            match tol.operator.as_deref() {
+                Some("Exists") => true,
+                _ => match &tol.value {
+                    Some(v) => v.as_str() == taint.value.as_deref().unwrap_or(""),
+                    None => true,
+                },
+            }
+        });
+        if !tolerated {
+            return false;
+        }
+    }
+    true
+}
+
+/// Can this pod be scheduled onto this node (taints + selector/affinity)?
+fn pod_schedulable_on(pod: &Pod, node: &Node) -> bool {
+    if let Some(taints) = node.spec.as_ref().and_then(|s| s.taints.as_ref()) {
+        if !pod_tolerates(taints, pod) {
+            return false;
+        }
+    }
+    node_affinity_ok(pod, node)
+}
+
+fn pod_matches_selector(pod: &Pod, selector: &std::collections::BTreeMap<String, String>) -> bool {
+    let labels = pod.metadata.labels.as_ref();
+    for (k, v) in selector {
+        let hit = labels.and_then(|l| l.get(k)).map(|lv| lv == v).unwrap_or(false);
+        if !hit {
+            return false;
+        }
+    }
+    true
+}
+
+fn has_required_anti_affinity(dep: &k8s_openapi::api::apps::v1::Deployment) -> bool {
+    dep.spec
+        .as_ref()
+        .and_then(|s| s.template.spec.as_ref())
+        .and_then(|s| s.affinity.as_ref())
+        .and_then(|a| a.pod_anti_affinity.as_ref())
+        .and_then(|a| a.required_during_scheduling_ignored_during_execution.as_ref())
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+}
+
+fn pod_requests(pod: &Pod) -> (i64, i64) {
+    let mut cpu = 0;
+    let mut mem = 0;
+    if let Some(spec) = pod.spec.as_ref() {
+        for c in spec.containers.iter() {
+            if let Some(req) = c.resources.as_ref().and_then(|r| r.requests.as_ref()) {
+                if let Some(v) = req.get("cpu") {
+                    cpu += parse_cpu_milli(&v.0);
+                }
+                if let Some(v) = req.get("memory") {
+                    mem += parse_mem_bytes(&v.0);
+                }
+            }
+        }
+    }
+    (cpu, mem)
+}
+
+fn node_allocatable(node: &Node) -> (i64, i64) {
+    let alloc = node.status.as_ref().and_then(|s| s.allocatable.as_ref());
+    let cpu = alloc
+        .and_then(|a| a.get("cpu"))
+        .map(|q| parse_cpu_milli(&q.0))
+        .unwrap_or(0);
+    let mem = alloc
+        .and_then(|a| a.get("memory"))
+        .map(|q| parse_mem_bytes(&q.0))
+        .unwrap_or(0);
+    (cpu, mem)
+}
+
+fn parse_cpu_milli(s: &str) -> i64 {
+    let s = s.trim();
+    if let Some(m) = s.strip_suffix('m') {
+        m.parse::<i64>().unwrap_or(0)
+    } else {
+        s.parse::<f64>().map(|v| (v * 1000.0) as i64).unwrap_or(0)
+    }
+}
+
+fn parse_mem_bytes(s: &str) -> i64 {
+    let s = s.trim();
+    if s.is_empty() {
+        return 0;
+    }
+    let num_end = s
+        .chars()
+        .position(|c| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(s.len());
+    let num: f64 = s[..num_end].parse().unwrap_or(0.0);
+    let mult: f64 = match &s[num_end..] {
+        "" | "B" => 1.0,
+        "k" => 1e3,
+        "M" => 1e6,
+        "G" => 1e9,
+        "T" => 1e12,
+        "P" => 1e15,
+        "E" => 1e18,
+        "Ki" => 1024.0,
+        "Mi" => 1024.0 * 1024.0,
+        "Gi" => 1024.0 * 1024.0 * 1024.0,
+        "Ti" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        "Pi" => 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        "Ei" => 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => 1.0,
+    };
+    (num * mult) as i64
 }
 
 /// A pool of `K8sClient`s keyed by cluster id, built lazily from the stored
