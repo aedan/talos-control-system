@@ -354,7 +354,10 @@ fn looks_like_kexec_error(stderr: &str) -> bool {
         || s.contains("kexec: command not found")
         || s.contains("cannot open")
         || s.contains("no such file")
+        || s.contains("cannot determine the file type")
         || s.contains("kexec_load")
+        || s.contains("failed to load")
+        || s.contains("invalid kernel")
 }
 
 fn norm_version(v: &str) -> String {

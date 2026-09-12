@@ -313,18 +313,27 @@ fn do_kexec<'a>(
 ) -> impl std::future::Future<Output = ()> + 'a {
     async move {
         let arch = "amd64"; // TODO: detect per node
+        // The kexec BOOT vehicle is always the standard installer: its
+        // vmlinuz-amd64 is a loadable bzImage. The factory image ships only a
+        // UEFI vmlinuz.efi (PE binary) which `kexec -l` cannot load
+        // ("Cannot determine the file type"), so kexec'ing it silently never
+        // reboots the node. The factory image (with the operator's kernel
+        // modules) is still what gets *installed* to disk in do_install — the
+        // standard installer is just the vehicle that runs `talosctl install`.
         let image = kexec::installer_image(factory, &payload.talos_version, &payload.modules, payload.schematic.as_deref());
-        let assets = if image.has_modules {
-            kexec::resolve_factory_assets(&image.ref_, &std::path::PathBuf::from(&metal_pxe.asset_dir)).await
-        } else {
-            kexec::resolve_standard_assets(&metal_pxe.mirror_base, &payload.talos_version, arch, &std::path::PathBuf::from(&metal_pxe.asset_dir)).await
-        };
+        let assets = kexec::resolve_standard_assets(
+            &metal_pxe.mirror_base,
+            &payload.talos_version,
+            arch,
+            &std::path::PathBuf::from(&metal_pxe.asset_dir),
+        )
+        .await;
         let append = kexec::kexec_append(&node.network, &node.name, "");
         match assets {
             Ok(a) => match kexec::kexec_node(sshc, &node.address, &a, &append).await {
                 Ok(()) => {
                     payload.set_state(&node.name, "kexec", "kexec issued; node rebooting", "");
-                    payload.log(&format!("{} kexec issued into {}", node.name, image.ref_));
+                    payload.log(&format!("{} kexec issued (standard installer; install target {})", node.name, image.ref_));
                 }
                 Err(e) => fail_node(payload, &node.name, "kexec", &e.to_string()),
             },
@@ -334,8 +343,13 @@ fn do_kexec<'a>(
 }
 
 /// Probe: is the node's installer/machined reachable (TCP connect)?
+/// Probe whether a node is running Talos with its API up. The Talos API
+/// listens on port 5000 on the node's address; a bare `connect(address)` with
+/// no port targets TCP/80, which the installer never opens, so the probe would
+/// report "not up" forever even once Talos is live.
 async fn probe_talos_up(address: &str) -> Result<bool, AppError> {
-    match tokio::net::TcpStream::connect(address).await {
+    let host = if address.contains(':') { address.to_string() } else { format!("{address}:5000") };
+    match tokio::net::TcpStream::connect(&host).await {
         Ok(_) => Ok(true),
         Err(_) => Ok(false),
     }
