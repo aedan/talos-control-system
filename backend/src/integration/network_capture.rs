@@ -104,21 +104,53 @@ pub fn parse_capture(text: &str) -> CaptureResult {
         stop.trim().to_string()
     };
 
-    // Interfaces: merge `ip -j -o addr show` (name, mac, mtu, address) with the
-    // first address per interface.
-    let ifaces_json = section(text, "INTERFACES");
-    if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&ifaces_json) {
+    // LINKS: `ip -j -o link show` provides per-interface name + MAC + MTU
+    // (the addr show output lacks top-level ifname/mac/mtu). Build a lookup.
+    let links_json = section(text, "LINKS");
+    let mut link_info: std::collections::HashMap<String, (String, u32)> =
+        std::collections::HashMap::new();
+    if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&links_json) {
         for v in arr {
-            let name = v.get("ifname").and_then(|x| x.as_str()).unwrap_or("");
-            if name.is_empty() || name == "lo" {
+            let name = v.get("ifname").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            if name.is_empty() {
                 continue;
             }
             let mac = v.get("address").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let mtu = v.get("mtu").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            link_info.insert(name, (mac, mtu));
+        }
+    }
+
+    // INTERFACES: `ip -j -o addr show`. Each entry's device name lives in
+    // addr_info[].dev (modern iproute2) or addr_info[].label, or top-level
+    // ifname (some fixtures). The first global-scope inet address is the
+    // interface IP.
+    let ifaces_json = section(text, "INTERFACES");
+    if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&ifaces_json) {
+        for v in arr {
+            let info = v.get("addr_info").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+            // Resolve the interface name: addr_info[].dev -> addr_info[].label
+            // -> top-level ifname.
+            let name = info
+                .iter()
+                .find_map(|a| a.get("dev").and_then(|x| x.as_str()).filter(|s| !s.is_empty()))
+                .or_else(|| {
+                    info.iter().find_map(|a| a.get("label").and_then(|x| x.as_str()).filter(|s| !s.is_empty()))
+                })
+                .or_else(|| v.get("ifname").and_then(|x| x.as_str()))
+                .unwrap_or("")
+                .to_string();
+            if name.is_empty() || name == "lo" {
+                continue;
+            }
+            // First global inet address.
             let mut ip = String::new();
             let mut cidr = String::new();
-            if let Some(info) = v.get("addr_info").and_then(|x| x.as_array()) {
-                for a in info {
+            for a in &info {
+                if a.get("family").and_then(|x| x.as_str()) == Some("inet") {
+                    if a.get("scope").and_then(|x| x.as_str()) == Some("link") {
+                        continue;
+                    }
                     let local = a.get("local").and_then(|x| x.as_str()).unwrap_or("");
                     let pref = a.get("prefixlen").and_then(|x| x.as_u64()).unwrap_or(0);
                     if !local.is_empty() && pref > 0 {
@@ -128,24 +160,35 @@ pub fn parse_capture(text: &str) -> CaptureResult {
                     }
                 }
             }
+            // MAC + MTU: prefer the LINKS section (which always has them), fall
+            // back to whatever top-level fields this entry carries.
+            let (mac, mtu) = match link_info.get(&name) {
+                Some((m, t)) => (m.clone(), *t),
+                None => (
+                    v.get("address").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    v.get("mtu").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                ),
+            };
             // VLANs are encoded in the name as <parent>.<id> (e.g. bond0.207).
-            if let Some((parent, vid)) = parse_vlan_name(name) {
+            if let Some((parent, vid)) = parse_vlan_name(&name) {
                 if !net.vlans.iter().any(|x| x.name == name) {
                     net.vlans.push(NodeNetworkVlan {
-                        name: name.to_string(),
+                        name,
                         id: vid,
                         parent,
                     });
                 }
                 continue; // don't list VLAN sub-interfaces as top-level interfaces
             }
-            net.interfaces.push(NodeNetworkInterface {
-                name: name.to_string(),
-                mtu,
-                ip,
-                cidr,
-                mac,
-            });
+            if !net.interfaces.iter().any(|i| i.name == name) {
+                net.interfaces.push(NodeNetworkInterface {
+                    name,
+                    mtu,
+                    ip,
+                    cidr,
+                    mac,
+                });
+            }
         }
     }
 
@@ -412,6 +455,45 @@ openvswitch
         assert!(r.network.interfaces.is_empty());
         assert!(r.drivers.is_empty());
         assert_eq!(r.network.gateway, "");
+    }
+
+    #[test]
+    fn parses_real_addr_show_format_with_name_in_dev_and_mac_in_links() {
+        // Regression: real `ip -j -o addr show` entries have NO top-level
+        // `ifname` (device is `addr_info[].dev`) and no MAC/MTU (those come
+        // from `ip -j -o link show`). The old parser keyed on `ifname` and
+        // silently returned an empty interface list, dropping the bond IP.
+        let text = "==INTERFACES==\n\
+            [{\"addr_info\":[{\"dev\":\"lo\",\"family\":\"inet\",\"local\":\"127.0.0.1\",\"prefixlen\":8}]},\
+            {\"addr_info\":[]},\
+            {\"addr_info\":[{\"dev\":\"bond0\",\"family\":\"inet\",\"local\":\"172.20.0.38\",\"prefixlen\":22,\"scope\":\"global\"}]},\
+            {\"addr_info\":[{\"dev\":\"bond0.326\",\"family\":\"inet6\",\"local\":\"fe80::1\",\"prefixlen\":64}]}]\n\
+            ==LINKS==\n\
+            [{\"ifname\":\"eno1\",\"mtu\":1500,\"address\":\"b8:ca:3a:6a:3c:20\"},\
+            {\"ifname\":\"eno2\",\"mtu\":1500,\"address\":\"b8:ca:3a:6a:3c:20\"},\
+            {\"ifname\":\"bond0\",\"mtu\":1500,\"address\":\"b8:ca:3a:6a:3c:20\"}]\n\
+            ==ROUTES==\n\
+            [{\"gateway\":\"172.20.0.1\"}]\n\
+            ==DNS==\n127.0.0.53\n\
+            ==BONDS==\nbond0 mode=802.3ad slaves=eno1 eno2\n\
+            ==OVS==\n\
+            ==LSMOD==\nigb\nbonding\n\
+            ==END==\n";
+        let r = parse_capture(text);
+        // lo skipped, carrier-less skipped, bond0 kept, bond0.326 -> vlan.
+        let bond = r.network.interfaces.iter().find(|i| i.name == "bond0").expect("bond0 interface present");
+        assert_eq!(bond.ip, "172.20.0.38");
+        assert_eq!(bond.cidr, "22");
+        assert_eq!(bond.mtu, 1500, "MTU merged from LINKS section");
+        assert_eq!(bond.mac, "b8:ca:3a:6a:3c:20", "MAC merged from LINKS section");
+        assert_eq!(r.network.vlans.len(), 1);
+        assert_eq!(r.network.vlans[0].name, "bond0.326");
+        assert_eq!(r.network.gateway, "172.20.0.1");
+        assert_eq!(r.network.dns, vec!["127.0.0.53"]);
+        // The bond IP is resolvable for the kexec ip= param.
+        let bondc = &r.network.bonds[0];
+        let got = address_for_bond(&r.network, bondc);
+        assert_eq!(got, Some(("172.20.0.38".to_string(), "22".to_string())));
     }
 
     #[test]
