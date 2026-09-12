@@ -117,10 +117,15 @@ impl SshClient {
     }
 
     /// Copy a remote file back to the deployer. Returns the local byte size.
+    ///
+    /// Streams the file over the SSH command channel (`cat`) into a local
+    /// temp file, then renames it into place. This avoids a separate `scp`
+    /// subprocess, which proved unreliable as a child of the hardened systemd
+    /// unit (PrivateTmp/ProtectSystem) — the copy would fail with
+    /// "No such file or directory" even though the same scp works from an
+    /// interactive shell. `cat` over the exec channel is a single, well-tested
+    /// path and also lets us create the destination atomically.
     pub async fn scp_back(&self, host: &str, remote: &str, local: &Path) -> Result<u64, AppError> {
-        // scp (and sftp) do not create missing destination parent dirs, so the
-        // caller's target directory must exist first — otherwise the copy fails
-        // with "No such file or directory" even though the dir was never made.
         if let Some(parent) = local.parent() {
             if !parent.as_os_str().is_empty() {
                 tokio::fs::create_dir_all(parent)
@@ -128,30 +133,81 @@ impl SshClient {
                     .map_err(AppError::Io)?;
             }
         }
+        let tmp = local.with_extension("partial");
+
         let mut args = self.base_opts();
-        args.push("-q".into()); // quiet
-        args.push(format!("{}:{remote}", self.target(host)));
-        args.push(local.to_string_lossy().to_string());
-        let out = self.run_with_timeout("scp", &args).await?;
-        if !out.status.success() {
+        args.push(self.target(host).to_string());
+        args.push(format!("cat -- {remote}"));
+
+        let out = tokio::process::Command::new("ssh")
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| AppError::Network(format!("ssh cat spawn: {e}")))?;
+        // The file body arrives on stdout (buffered in memory — fine for etcd
+        // snapshots, tens of MB). cat's diagnostics, if any, go to stderr.
+        if !out.stdout.is_empty() {
+            tokio::fs::write(&tmp, &out.stdout)
+                .await
+                .map_err(AppError::Io)?;
+        }
+        let size = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+        if size == 0 || !out.status.success() {
+            let _ = tokio::fs::remove_file(&tmp).await;
             return Err(AppError::Network(format!(
-                "scp back {host}:{remote}: {}",
+                "cat back {host}:{remote}: exit={} stderr={}",
+                out.status.code().unwrap_or(-1),
                 String::from_utf8_lossy(&out.stderr).trim()
             )));
         }
-        Ok(std::fs::metadata(local).map(|m| m.len()).unwrap_or(0))
+        tokio::fs::rename(&tmp, local)
+            .await
+            .map_err(AppError::Io)?;
+        Ok(size)
     }
 
     /// Copy a local file to the host.
+    ///
+    /// Streams the local file over the SSH exec channel (`cat > remote`) rather
+    /// than spawning a separate `scp` process — the same hardened-unit
+    /// (PrivateTmp/ProtectSystem) reliability problem that broke `scp_back`
+    /// applies to `scp` here. Reads the local file into memory (boot assets are
+    /// tens of MB) and pipes it to the remote `cat`.
     pub async fn scp_to(&self, host: &str, local: &Path, remote: &str) -> Result<(), AppError> {
+        let data = tokio::fs::read(local).await.map_err(AppError::Io)?;
         let mut args = self.base_opts();
-        args.push("-q".into());
-        args.push(local.to_string_lossy().to_string());
-        args.push(format!("{}:{remote}", self.target(host)));
-        let out = self.run_with_timeout("scp", &args).await?;
+        args.push(self.target(host).to_string());
+        // Write to a temp then rename so a partial transfer never leaves a
+        // truncated file at the target path.
+        args.push(format!("cat -- > {remote}.partial && mv {remote}.partial {remote}"));
+
+        let fut = async {
+            let mut child = tokio::process::Command::new("ssh")
+                .args(&args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| AppError::Network(format!("ssh cat> spawn: {e}")))?;
+            if let Some(mut stdin) = child.as_mut().stdin.take() {
+                use tokio::io::AsyncWriteExt;
+                stdin.write_all(&data).await.map_err(AppError::Io)?;
+            }
+            child.wait_with_output().await.map_err(AppError::Io)
+        };
+        let out = match tokio::time::timeout(Duration::from_secs(self.cfg.timeout_secs), fut).await {
+            Ok(res) => res?,
+            Err(_) => return Err(AppError::Network(format!(
+                "scp_to {host}:{remote} timed out after {}s",
+                self.cfg.timeout_secs
+            ))),
+        };
         if !out.status.success() {
             return Err(AppError::Network(format!(
-                "scp to {host}:{remote}: {}",
+                "cat > {host}:{remote}: exit={} stderr={}",
+                out.status.code().unwrap_or(-1),
                 String::from_utf8_lossy(&out.stderr).trim()
             )));
         }
