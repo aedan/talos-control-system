@@ -41,7 +41,12 @@ pub fn spawn_convert_scheduler(
     tokio::spawn(async move {
         tracing::info!("Convert scheduler started");
         loop {
-            match crate::runtime::ha::try_acquire(&pool, "convert_scheduler", 20).await {
+            // TTL must exceed the longest atomic step (etcd snapshot: etcdctl
+            // + 59MB scp can take ~40s) so the next tick does not preempt a
+            // step mid-flight. The tick loop is sequential (one `tick` await
+            // before the next acquire), so a long TTL only delays lock hand-off
+            // if this process dies — acceptable for a single-node TCS.
+            match crate::runtime::ha::try_acquire(&pool, "convert_scheduler", 300).await {
                 Ok(true) => {
                     if let Err(e) = tick(&pool, &sqlite_path, &jwt_secret, &ssh, &factory, &metal_pxe).await {
                         tracing::warn!(error = %e, "Convert scheduler tick failed");
