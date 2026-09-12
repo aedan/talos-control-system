@@ -118,6 +118,16 @@ impl SshClient {
 
     /// Copy a remote file back to the deployer. Returns the local byte size.
     pub async fn scp_back(&self, host: &str, remote: &str, local: &Path) -> Result<u64, AppError> {
+        // scp (and sftp) do not create missing destination parent dirs, so the
+        // caller's target directory must exist first — otherwise the copy fails
+        // with "No such file or directory" even though the dir was never made.
+        if let Some(parent) = local.parent() {
+            if !parent.as_os_str().is_empty() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(AppError::Io)?;
+            }
+        }
         let mut args = self.base_opts();
         args.push("-q".into()); // quiet
         args.push(format!("{}:{remote}", self.target(host)));
