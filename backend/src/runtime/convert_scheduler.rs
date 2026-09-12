@@ -319,7 +319,7 @@ fn do_kexec<'a>(
         } else {
             kexec::resolve_standard_assets(&metal_pxe.mirror_base, &payload.talos_version, arch, &std::path::PathBuf::from(&metal_pxe.asset_dir)).await
         };
-        let append = kexec::kexec_append("");
+        let append = kexec::kexec_append(&node.network, &node.name, "");
         match assets {
             Ok(a) => match kexec::kexec_node(sshc, &node.address, &a, &append).await {
                 Ok(()) => {
