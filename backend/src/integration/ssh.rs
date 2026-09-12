@@ -184,6 +184,7 @@ impl SshClient {
         args.push(format!("cat -- > {remote}.partial && mv {remote}.partial {remote}"));
 
         let fut = async {
+            use tokio::io::AsyncWriteExt;
             let mut child = tokio::process::Command::new("ssh")
                 .args(&args)
                 .stdin(Stdio::piped())
@@ -191,9 +192,9 @@ impl SshClient {
                 .stderr(Stdio::piped())
                 .spawn()
                 .map_err(|e| AppError::Network(format!("ssh cat> spawn: {e}")))?;
-            if let Some(mut stdin) = child.as_mut().stdin.take() {
-                use tokio::io::AsyncWriteExt;
+            if let Some(mut stdin) = child.stdin.take() {
                 stdin.write_all(&data).await.map_err(AppError::Io)?;
+                drop(stdin); // close so the remote cat sees EOF and finishes
             }
             child.wait_with_output().await.map_err(AppError::Io)
         };
