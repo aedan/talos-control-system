@@ -151,12 +151,19 @@ async fn step_snapshot(
         .ok_or_else(|| AppError::Internal("no control-plane node with an address".into()))?;
     let cp = cp.clone();
 
-    let remote = "/tmp/tcs-convert-etcd.db";
+    // Use a unique per-tick remote path so a re-run (if scp failed) does not
+    // clobber a file an in-flight scp is still reading (etcdctl snapshot save
+    // truncates the target first). The remote name is derived from the local
+    // dest so the two sides always agree.
+    let root = backup_root(sqlite_path);
+    let local = root.join(cluster_id.to_string()).join(format!("convert-{}.db", Utc::now().format("%Y%m%d%H%M%S")));
+    let remote = format!("/tmp/tcs-convert-etcd-{}.db", Utc::now().format("%Y%m%d%H%M%S%f"));
     payload.set_state(&cp.name, "snapshot", "etcdctl snapshot save", "");
     // Detect the etcd layout: kubeadm (/etc/kubernetes/pki/etcd) vs
     // Calico/kubespray (/etc/ssl/etcd/ssl, per-node certs). Use a 127.0.0.1
     // endpoint — a local etcd is always present on a control-plane node.
-    let probe = r#"
+    let probe = format!(
+        r#"
 CA=""; CERT=""; KEY=""
 if [ -f /etc/kubernetes/pki/etcd/ca.crt ]; then
   CA=/etc/kubernetes/pki/etcd/ca.crt
@@ -168,11 +175,14 @@ elif [ -f /etc/ssl/etcd/ssl/ca.pem ] && [ -f "/etc/ssl/etcd/ssl/node-$(hostname)
   KEY=/etc/ssl/etcd/ssl/node-$(hostname)-key.pem
 fi
 if [ -z "$CA" ]; then echo "ERROR: no etcd cert layout found (tried kubeadm + calico)"; exit 1; fi
-ETCDCTL_API=3 etcdctl snapshot save /tmp/tcs-convert-etcd.db \
+ETCDCTL_API=3 etcdctl snapshot save {remote} \
   --endpoints=https://127.0.0.1:2379 \
   --cacert="$CA" --cert="$CERT" --key="$KEY" --write-out=table
-"#;
-    match sshc.run_capture(&cp.address, probe).await {
+ls -l {remote}
+"#,
+        remote = remote
+    );
+    match sshc.run_capture(&cp.address, &probe).await {
         Ok(o) if o.ok => {}
         Ok(o) => {
             fail_node(payload, &cp.name, "etcd snapshot", &o.stderr);
@@ -184,9 +194,7 @@ ETCDCTL_API=3 etcdctl snapshot save /tmp/tcs-convert-etcd.db \
         }
     }
 
-    let root = backup_root(sqlite_path);
-    let local = root.join(cluster_id.to_string()).join(format!("convert-{}.db", Utc::now().format("%Y%m%d%H%M%S")));
-    let size = sshc.scp_back(&cp.address, remote, &local).await?;
+    let size = sshc.scp_back(&cp.address, &remote, &local).await?;
     payload.etcd_snapshot_path = Some(local.to_string_lossy().to_string());
     payload.etcd_snapshot_size = size as i64;
     // Register as a ClusterBackup row (reuses the backup machinery + retention).
