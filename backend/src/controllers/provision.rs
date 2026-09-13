@@ -835,7 +835,7 @@ fn build_talosconfig_yaml(
 }
 
 /// Base64 encode a PEM string (what Talos YAML fields expect).
-fn b64_le(pem: &str) -> String {
+pub(crate) fn b64_le(pem: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(pem.as_bytes())
 }
 

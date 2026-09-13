@@ -466,27 +466,24 @@ fn build_install_config(
     cfg.push_str("persist: true\n");
     cfg.push_str("machine:\n");
     cfg.push_str(&format!("  type: {machine_type}\n"));
-    // Network: render_node_network_yaml emits 4-space-indented lines intended
-    // to sit directly under `machine:`. Under `machine:\n  network:` we need
-    // those lines re-indented to be children of the 2-space `network:` key.
     cfg.push_str("  network:\n");
-    cfg.push_str(&indent_block(network_yaml, 2));
+    // render_node_network_yaml emits a 4-space base (`    hostname:` /
+    // `    interfaces:`) which is already correct for being the children of a
+    // 2-space `network:` key under `machine:`. Do NOT add indentation (the
+    // earlier +2 over-indented and broke the YAML block mapping).
+    cfg.push_str(network_yaml);
+    // CA fields are base64-of-PEM on a single line (matches the proven
+    // greenfield provision format and what the v1.13 installer decoder accepts;
+    // a raw PEM block scalar fails with "illegal base64 data").
+    let ca_crt_b64 = crate::controllers::provision::b64_le(&ident.machine_ca_crt);
+    let ca_key_b64 = crate::controllers::provision::b64_le(&ident.machine_ca_key);
     if is_cp {
         cfg.push_str("  ca:\n");
-        cfg.push_str(&format!(
-            "    crt: |-\n{}",
-            ident.machine_ca_crt.lines().map(|l| format!("      {l}")).collect::<Vec<_>>().join("\n")
-        ));
-        cfg.push_str(&format!(
-            "    key: |-\n{}",
-            ident.machine_ca_key.lines().map(|l| format!("      {l}")).collect::<Vec<_>>().join("\n")
-        ));
+        cfg.push_str(&format!("    crt: {ca_crt_b64}\n"));
+        cfg.push_str(&format!("    key: {ca_key_b64}\n"));
     } else {
         cfg.push_str("  acceptedCAs:\n");
-        cfg.push_str(&format!(
-            "    crt: |-\n{}",
-            ident.machine_ca_crt.lines().map(|l| format!("      {l}")).collect::<Vec<_>>().join("\n")
-        ));
+        cfg.push_str(&format!("    crt: {ca_crt_b64}\n"));
     }
     cfg.push_str(&format!("  token: {}\n", ident.machine_token));
     cfg.push_str("  install:\n");
@@ -504,23 +501,10 @@ fn build_install_config(
     cfg.push_str(&format!("  token: {}\n", ident.kube_token));
     if !k8s_ca.is_empty() {
         cfg.push_str("  ca:\n");
-        cfg.push_str(&format!(
-            "    crt: |-\n{}",
-            k8s_ca.lines().map(|l| format!("      {l}")).collect::<Vec<_>>().join("\n")
-        ));
+        cfg.push_str(&format!("    crt: {}\n", crate::controllers::provision::b64_le(k8s_ca)));
     }
     cfg.push_str("\n");
     cfg
-}
-
-/// Add `indent` spaces to the front of every non-empty line of `block`.
-fn indent_block(block: &str, indent: usize) -> String {
-    let pad = " ".repeat(indent);
-    block
-        .lines()
-        .map(|l| if l.trim().is_empty() { String::new() } else { format!("{pad}{l}") })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// Ensure the job has a shared cluster identity, generating it once and
@@ -730,10 +714,12 @@ mod tests {
         assert!(!cfg.contains("apiVersion:"));
         assert!(!cfg.contains("kind: "));
         assert!(!cfg.contains("metadata:"));
-        // machine.type + control-plane ca (crt AND key) + token.
+        // machine.type + control-plane ca (crt AND key, base64-of-PEM single
+        // line) + token.
         assert!(cfg.contains("  type: controlplane\n"));
-        assert!(cfg.contains("  ca:\n    crt: |-\n      -----BEGIN CERTIFICATE-----\n      MIIBxx"));
-        assert!(cfg.contains("    key: |-\n      -----BEGIN PRIVATE KEY-----\n      MC4CAx"));
+        let crt_b64 = crate::controllers::provision::b64_le(&fake_ident().machine_ca_crt);
+        let key_b64 = crate::controllers::provision::b64_le(&fake_ident().machine_ca_key);
+        assert!(cfg.contains(&format!("  ca:\n    crt: {crt_b64}\n    key: {key_b64}\n")));
         assert!(cfg.contains("  token: aabbcc.1111112222223333\n"));
         // install to sda, wipe, image ref.
         assert!(cfg.contains("  install:\n    disk: /dev/sda\n    wipe: true\n"));
@@ -741,10 +727,23 @@ mod tests {
         // cluster block required.
         assert!(cfg.contains("cluster:\n  id: Y2x1c3Rlci1pZA==\n  secret: Y2x1c3Rlci1zZWNyZXQ=\n"));
         assert!(cfg.contains("  controlPlane:\n    endpoint: https://10.0.0.1:6443\n"));
-        // network block re-indented under machine.network.
-        assert!(cfg.contains("  network:\n      hostname: cp1"));
+        // network block emitted verbatim (its 4-space base is already correct
+        // under the 2-space `network:` key).
+        assert!(cfg.contains("  network:\n    hostname: cp1"));
         // NO systemExtensions key anywhere (invalid in this schema).
         assert!(!cfg.contains("systemExtensions"));
+        // The generated config must be VALID YAML (catches indentation bugs that
+        // surface server-side as "go-yaml ... did not find expected key").
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&cfg).expect("install config must be valid YAML");
+        // Spot-check the parsed structure.
+        let doc = parsed.as_mapping().expect("mapping");
+        assert_eq!(doc.get(&serde_yaml::Value::String("version".into())).unwrap().as_str(), Some("v1alpha1"));
+        let machine = doc.get(&serde_yaml::Value::String("machine".into())).unwrap();
+        assert_eq!(machine.get("type").and_then(|t| t.as_str()), Some("controlplane"));
+        assert!(machine.get("network").is_some());
+        assert!(machine.get("ca").is_some());
+        assert!(doc.get(&serde_yaml::Value::String("cluster".into())).is_some());
     }
 
     #[test]
@@ -752,11 +751,12 @@ mod tests {
         let net = "    interfaces:\n      - interface: bond0\n";
         let cfg = build_install_config("worker", false, net, "/dev/sda", "img:v1", &fake_ident(), "");
         assert!(cfg.contains("  type: worker\n"));
-        // Worker: acceptedCAs (crt only), NO machine.ca / NO key.
-        assert!(cfg.contains("  acceptedCAs:\n    crt: |-\n"));
-        assert!(!cfg.contains("  ca:\n    key:"));
+        // Worker: acceptedCAs (crt only, base64-of-PEM), NO machine.ca / NO key.
+        let crt_b64 = crate::controllers::provision::b64_le(&fake_ident().machine_ca_crt);
+        assert!(cfg.contains(&format!("  acceptedCAs:\n    crt: {crt_b64}\n")));
+        assert!(!cfg.contains("    key:"));
         assert!(!cfg.contains("PRIVATE KEY"));
         // Empty k8s_ca -> no cluster.ca block.
-        assert!(!cfg.contains("  ca:\n    crt: |-\n      K8s"));
+        assert!(!cfg.contains("  ca:\n    crt:"));
     }
 }
