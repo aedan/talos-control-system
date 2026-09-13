@@ -83,11 +83,9 @@ pub fn standard_asset_urls(mirror_base: &str, version: &str, arch: &str) -> (Str
 /// Builds the full parameter set the Talos installer needs to come up with
 /// network on a statically-configured node:
 ///   - required: `talos.platform=metal`, `slab_nomerge`, `pti=on`, consoles
-///   - kernel-level `bond=` + `ip=` so LACP forms at kernel time (switch may
-///     suspend ports that don't speak LACP)
-///   - `talos.config.early=<zstd|b64>` — a minimal machine config carrying the
-///     node's static network (bond/IP/gw/mtu/dns) so it is applied post-boot
-///     and persisted into STATE.
+///   - kernel-level `bond=` + `ip=...:off` so LACP forms at kernel time and the
+///     node keeps its static IP (no DHCP). The installer parks in maintenance
+///     mode on :50000 and TCS pushes the full config via `apply-config`.
 ///
 /// `extra` allows the caller to append further params.
 pub fn kexec_append(network: &NodeNetworkCapture, hostname: &str, extra: &str) -> String {
@@ -124,10 +122,16 @@ pub fn kexec_append(network: &NodeNetworkCapture, hostname: &str, extra: &str) -
         }
     }
 
-    // talos.config.early: minimal machine config (zstd|b64) with the network.
-    if let Some(early) = build_talos_config_early(network, hostname) {
-        a.push_str(&format!(" talos.config.early={early}"));
-    }
+    // NOTE: we deliberately do NOT pass `talos.config.early`. The `ip=`/`bond=`
+    // kernel params already bring the network up at kernel time (verified: the
+    // installer answers ping on its static IP). Passing an early config that is
+    // in the `apiVersion/kind: Config` form is rejected by v1.13's strict
+    // configloader (same "not registered" failure as apply-config), which leaves
+    // the installer unable to reach maintenance mode -> no apid on :50000. With
+    // no early config the installer parks in maintenance mode and TCS pushes the
+    // full (root-form) config via `talosctl apply-config -i` in the install
+    // phase. This is the empirically-working path (stock initramfs + no early
+    // config + static ip= opened :50000 in ~4 min).
 
     if !extra.trim().is_empty() {
         a.push(' ');
@@ -138,6 +142,13 @@ pub fn kexec_append(network: &NodeNetworkCapture, hostname: &str, extra: &str) -
 
 /// Render a minimal Talos machine config (network only) and encode it as
 /// `zstd | base64` for the `talos.config.early=` kernel param.
+///
+/// Retained for the future, but NOT currently emitted by `kexec_append`:
+/// v1.13's strict configloader rejects the `kind: Config` form used here, which
+/// left the installer unable to reach maintenance mode. The installer network
+/// is provided by the kernel `ip=`/`bond=` params instead, and the full config
+/// is pushed via `talosctl apply-config` (root v1alpha1 form).
+#[allow(dead_code)]
 fn build_talos_config_early(network: &NodeNetworkCapture, hostname: &str) -> Option<String> {
     let yaml = minimal_machine_config_yaml(network, hostname);
     let out = std::process::Command::new("sh")
@@ -159,7 +170,9 @@ fn build_talos_config_early(network: &NodeNetworkCapture, hostname: &str) -> Opt
 }
 
 /// A minimal MachineConfig YAML carrying just the network section. Kept small
-/// so it fits the 4096-byte kernel cmdline budget after zstd|b64.
+/// so it fits the 4096-byte kernel cmdline budget after zstd|b64. Only used by
+/// `build_talos_config_early` (itself currently not emitted by kexec_append).
+#[allow(dead_code)]
 fn minimal_machine_config_yaml(network: &NodeNetworkCapture, hostname: &str) -> String {
     let mut y = String::new();
     y.push_str("apiVersion: v1alpha1\nkind: Config\nmetadata:\n  name: talos.yaml\nmachine:\n  network:\n");
@@ -709,7 +722,11 @@ mod tests {
         let a = kexec_append(&net, "host1", "");
         assert!(a.contains("bond=bond0:eno1,eno2:mode=802.3ad"));
         assert!(a.contains("ip=172.20.0.38::172.20.0.1:255.255.255.0:host1:bond0:off"));
-        assert!(a.contains("talos.config.early="));
+        // No talos.config.early: the kernel ip=/bond= params carry the network,
+        // and the full config is pushed via apply-config in the install phase.
+        // (An early config in the old kind: Config form made the v1.13 installer
+        // fail to reach maintenance mode.)
+        assert!(!a.contains("talos.config.early="));
     }
 
     #[test]
