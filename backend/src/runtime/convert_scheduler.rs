@@ -313,27 +313,43 @@ fn do_kexec<'a>(
 ) -> impl std::future::Future<Output = ()> + 'a {
     async move {
         let arch = "amd64"; // TODO: detect per node
-        // The kexec BOOT vehicle is always the standard installer: its
-        // vmlinuz-amd64 is a loadable bzImage. The factory image ships only a
-        // UEFI vmlinuz.efi (PE binary) which `kexec -l` cannot load
-        // ("Cannot determine the file type"), so kexec'ing it silently never
-        // reboots the node. The factory image (with the operator's kernel
-        // modules) is still what gets *installed* to disk in do_install — the
-        // standard installer is just the vehicle that runs `talosctl install`.
+        // Kexec BOOT vehicle selection:
+        //   1. CUSTOM asset (preferred for bnx2x fleets): stock release
+        //      vmlinuz-amd64 + a rebuilt initramfs whose rootfs carries the
+        //      bnx2x *firmware*. The stock initramfs has the signed bnx2x.ko
+        //      but an EMPTY /usr/lib/firmware/bnx2x, so the NIC loads but never
+        //      gets link. Grafting only firmware sidesteps the vermagic
+        //      (6.18.48-talos) + module.sig_enforce=1 wall that blocks
+        //      grafted .ko files.
+        //   2. STANDARD asset: straight from the release mirror. Fine for NICs
+        //      whose firmware ships in stock; not for bnx2x.
+        // The factory image (UEFI vmlinuz.efi) is NEVER the kexec vehicle —
+        // `kexec -l` can't load a PE32+ image. It remains the install *target*
+        // in do_install.
         let image = kexec::installer_image(factory, &payload.talos_version, &payload.modules, payload.schematic.as_deref());
-        let assets = kexec::resolve_standard_assets(
-            &metal_pxe.mirror_base,
-            &payload.talos_version,
-            arch,
-            &std::path::PathBuf::from(&metal_pxe.asset_dir),
-        )
-        .await;
+        let asset_dir = std::path::PathBuf::from(&metal_pxe.asset_dir);
+        let assets = match kexec::resolve_custom_assets(&asset_dir, &payload.talos_version) {
+            Ok(a) => {
+                payload.log(&format!("{} using custom installer assets (bnx2x firmware grafted)", node.name));
+                Ok(a)
+            }
+            Err(_) => {
+                payload.log(&format!("{} custom assets absent; using standard installer assets", node.name));
+                kexec::resolve_standard_assets(
+                    &metal_pxe.mirror_base,
+                    &payload.talos_version,
+                    arch,
+                    &asset_dir,
+                )
+                .await
+            }
+        };
         let append = kexec::kexec_append(&node.network, &node.name, "");
         match assets {
             Ok(a) => match kexec::kexec_node(sshc, &node.address, &a, &append).await {
                 Ok(()) => {
                     payload.set_state(&node.name, "kexec", "kexec issued; node rebooting", "");
-                    payload.log(&format!("{} kexec issued (standard installer; install target {})", node.name, image.ref_));
+                    payload.log(&format!("{} kexec issued (install target {})", node.name, image.ref_));
                 }
                 Err(e) => fail_node(payload, &node.name, "kexec", &e.to_string()),
             },

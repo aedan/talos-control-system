@@ -100,11 +100,13 @@ pub fn kexec_append(network: &NodeNetworkCapture, hostname: &str, extra: &str) -
         let mode = talos_bond_mode(&bond.mode);
         let slaves = bond.slaves.join(",");
         a.push_str(&format!(" bond={}:{}:mode={}", bond.name, slaves, mode));
-        // ip=<client>::<gw>:<netmask>::<dev>:<dns>:
+        // ip=<client>:<server>:<gw>:<netmask>:<hostname>:<dev>:<autoconf>
+        // autoconf=off disables DHCP so the machine stays on its static IP.
         if let Some((ip, cidr)) = address_for_bond(network, bond) {
             let mask = prefix_to_mask(&cidr).unwrap_or_else(|| "255.255.255.0".into());
             a.push_str(&format!(
-                " ip={ip}::{gw}:{mask}::{dev}:none",
+                " ip={ip}::{gw}:{mask}:{name}:{dev}:off",
+                name = hostname,
                 gw = network.gateway,
                 dev = bond.name,
             ));
@@ -113,9 +115,10 @@ pub fn kexec_append(network: &NodeNetworkCapture, hostname: &str, extra: &str) -
         if !first.ip.is_empty() {
             let mask = prefix_to_mask(first.cidr.as_str()).unwrap_or_else(|| "255.255.255.0".into());
             a.push_str(&format!(
-                " ip={ip}::{gw}:{mask}::{dev}:none",
+                " ip={ip}::{gw}:{mask}:{name}:{dev}:off",
                 ip = first.ip,
                 gw = network.gateway,
+                name = hostname,
                 dev = first.name,
             ));
         }
@@ -319,7 +322,7 @@ pub fn kexec_command(kernel_remote: &str, initramfs_remote: &str, append: &str) 
 }
 
 const KERNEL_REMOTE: &str = "/tmp/tcs-kexec-vmlinuz";
-const INITRAMFS_REMOTE: &str = "/tmp/tcs-kexec-initramfs.xz";
+const INITRAMFS_REMOTE: &str = "/tmp/tcs-kexec-initramfs";
 
 /// Transfer the boot assets to the node and kexec into the installer.
 ///
@@ -409,6 +412,39 @@ pub async fn resolve_standard_assets(
     let initramfs = dir.join(format!("initramfs-{arch}.xz"));
     download_file(&kurl, &kernel).await?;
     download_file(&iurl, &initramfs).await?;
+    Ok(KexecAssets {
+        kernel_path: kernel.to_string_lossy().to_string(),
+        initramfs_path: initramfs.to_string_lossy().to_string(),
+    })
+}
+
+/// Resolve a locally-provisioned **custom** installer asset pair.
+///
+/// The stock v1.13.10 installer kernel (`6.18.48-talos`) carries `bnx2x.ko`
+/// (signed, vermagic-matched) in its rootfs squashfs, but its
+/// `/usr/lib/firmware/bnx2x/` directory is EMPTY — so the 10Gb NIC driver
+/// loads but the chip never gets link. A custom asset dir (see
+/// `build_custom_installer` in the convert tooling) holds a `vmlinuz-amd64`
+/// (byte-identical to the stock release kernel) plus a rebuilt
+/// `initramfs.zst` whose rootfs has the bnx2x firmware grafted in.
+///
+/// This is the preferred kexec boot vehicle for a legacy (non-UEFI) overtake
+/// of a bnx2x fleet: kexec-loadable bzImage + correct NIC firmware, no UEFI
+/// `vmlinuz.efi`, no custom kernel build, no module re-signing.
+///
+/// Returns `Err` when the custom dir is absent so the caller can fall back to
+/// the standard assets.
+pub fn resolve_custom_assets(asset_dir: &Path, version: &str) -> Result<KexecAssets, AppError> {
+    let v = norm_version(version);
+    let dir = asset_dir.join(format!("custom-{v}-bnx2x"));
+    let kernel = dir.join("vmlinuz-amd64");
+    let initramfs = dir.join("initramfs.zst");
+    if !kernel.is_file() || !initramfs.is_file() {
+        return Err(AppError::Network(format!(
+            "custom installer assets missing under {} (need vmlinuz-amd64 + initramfs.zst)",
+            dir.display()
+        )));
+    }
     Ok(KexecAssets {
         kernel_path: kernel.to_string_lossy().to_string(),
         initramfs_path: initramfs.to_string_lossy().to_string(),
@@ -672,8 +708,34 @@ mod tests {
         };
         let a = kexec_append(&net, "host1", "");
         assert!(a.contains("bond=bond0:eno1,eno2:mode=802.3ad"));
-        assert!(a.contains("ip=172.20.0.38::172.20.0.1:255.255.255.0::bond0:none"));
+        assert!(a.contains("ip=172.20.0.38::172.20.0.1:255.255.255.0:host1:bond0:off"));
         assert!(a.contains("talos.config.early="));
+    }
+
+    #[test]
+    fn kexec_append_disables_dhcp_with_off() {
+        // autoconf field must be "off" (not "none") so the installer does not
+        // fall back to DHCP and drift off the node's static IP.
+        let net = NodeNetworkCapture {
+            interfaces: vec![
+                NodeNetworkInterface { name: "bond0".into(), mtu: 1500, ip: "172.20.0.38".into(), cidr: "22".into(), mac: String::new() },
+            ],
+            bonds: vec![NodeNetworkBond { name: "bond0".into(), mode: "4".into(), slaves: vec!["eno1".into(), "eno2".into()] }],
+            vlans: vec![],
+            gateway: "172.20.0.1".into(),
+            dns: vec![],
+            ovs_bridges: vec![],
+        };
+        let a = kexec_append(&net, "infra01", "");
+        assert!(a.contains("ip=172.20.0.38::172.20.0.1:255.255.252.0:infra01:bond0:off"));
+        assert!(!a.contains(":none"));
+    }
+
+    #[test]
+    fn resolve_custom_assets_missing_dir_errors() {
+        let dir = std::env::temp_dir().join("tcs-custom-asset-test-nonexistent");
+        let r = resolve_custom_assets(&dir, "v1.13.10");
+        assert!(r.is_err(), "expected Err when custom asset dir is absent");
     }
 
     #[test]
