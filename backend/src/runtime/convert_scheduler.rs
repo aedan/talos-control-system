@@ -382,7 +382,7 @@ async fn do_install(
     payload: &ConvertJobPayload,
     cluster_id: Uuid,
     node: &ConvertNodePlan,
-    is_first_cp: bool,
+    _is_first_cp: bool,
 ) -> Result<(), AppError> {
     let image = kexec::installer_image(factory, &payload.talos_version, &payload.modules, payload.schematic.as_deref());
     let disk = if node.network.interfaces.is_empty() { "/dev/sda" } else { "/dev/sda" };
@@ -390,20 +390,39 @@ async fn do_install(
     let k8s_ca = stored_kubeconfig_ca(pool, jwt_secret, cluster_id).await.unwrap_or_default();
 
     let network_yaml = render_node_network_yaml(&node.network, &node.name);
+    // `talosctl apply-config` (maintenance mode) expects kind: Config
+    // (apiVersion v1alpha1). `kind: MachineConfig` is a separate resource and
+    // is rejected here.
     let mut cfg = String::new();
-    cfg.push_str("apiVersion: v1alpha1\nkind: MachineConfig\nmachine:\n");
+    cfg.push_str("apiVersion: v1alpha1\nkind: Config\nmetadata:\n  name: talos.yaml\nmachine:\n");
     cfg.push_str(&network_yaml);
     cfg.push_str("    install:\n");
     cfg.push_str(&format!("      disk: {disk}\n"));
+    // Wipe only the install disk (/dev/sda). Talos does not touch the other
+    // disks (sdb..sdk hold ceph OSDs), so this is safe for the overtake.
     cfg.push_str("      wipe: true\n");
     cfg.push_str(&format!("      image: {}\n", image.ref_));
+    // System extensions: REQUIRED for bnx2x fleets. The installed Talos pulls
+    // these at first boot; siderolabs/bnx2-bnx2x is what delivers the bnx2x
+    // firmware (/usr/lib/firmware/bnx2x/*.fw) that the built-in bnx2x driver
+    // needs. Without this block the NIC driver loads but the chip has no link
+    // after install+reboot. Requires node egress to ghcr.io at first boot.
+    if !payload.modules.is_empty() {
+        cfg.push_str("    systemExtensions:\n");
+        cfg.push_str("      officialExtensions:\n");
+        for m in &payload.modules {
+            cfg.push_str(&format!("        - {m}\n"));
+        }
+    }
     if !k8s_ca.is_empty() {
+        // Identity carry-over for the overtaken cluster: the k8s CA so the
+        // installed control plane keeps the same API-server CA. etcd recovery
+        // itself is done out-of-band via `talosctl etcd ... recover` +
+        // `bootstrap --recover-etcd` (see do_first_cp_recover), NOT via this
+        // config — so we do not emit a placeholder etcd block here.
         cfg.push_str("cluster:\n");
         cfg.push_str("  certificates:\n");
         cfg.push_str(&format!("    - caCert:\n{}", indent_pem(&k8s_ca)));
-        if is_first_cp {
-            cfg.push_str("  etcd:\n    ca:\n      crt: __FROM_RECOVERED_SNAPSHOT__\n");
-        }
     }
     cfg.push_str("\n");
 
