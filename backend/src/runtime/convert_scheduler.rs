@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::config::{FactoryConfig, MetalPxeConfig, SshConfig};
 use crate::controllers::convert::{
-    ConvertController, ConvertJobPayload, ConvertNodePlan, JOB_KIND,
+    ConvertClusterIdentity, ConvertController, ConvertJobPayload, ConvertNodePlan, JOB_KIND,
 };
 use crate::db::pool::DbPool;
 use crate::db::repos::{self, provision_job::ProvisionJob};
@@ -358,16 +358,30 @@ fn do_kexec<'a>(
     }
 }
 
-/// Probe: is the node's installer/machined reachable (TCP connect)?
-/// Probe whether a node is running Talos with its API up. The Talos API
-/// listens on port 5000 on the node's address; a bare `connect(address)` with
-/// no port targets TCP/80, which the installer never opens, so the probe would
-/// report "not up" forever even once Talos is live.
+/// Probe: is the node's Talos API reachable (TCP connect)?
+/// The Talos apid listens on port 50000 (constants.ApidPort) in BOTH the
+/// installer/maintenance phase and once the system is installed. Ports 5000/
+/// 5006 are pre-1.10 legacy and are NOT open in v1.13 — probing them made a
+/// healthy maintenance-mode installer look dead forever. A bare
+/// `connect(address)` targets TCP/80, which Talos never opens, so we must
+/// append the explicit port.
 async fn probe_talos_up(address: &str) -> Result<bool, AppError> {
-    let host = if address.contains(':') { address.to_string() } else { format!("{address}:5000") };
+    let host = talos_endpoint(address);
     match tokio::net::TcpStream::connect(&host).await {
         Ok(_) => Ok(true),
         Err(_) => Ok(false),
+    }
+}
+
+/// The Talos apid endpoint for a node address. apid listens on port 50000
+/// (constants.ApidPort) in both the installer/maintenance phase and once the
+/// system is installed. 5000/5006 are pre-1.10 legacy and never open in v1.13.
+/// If the address already carries a port, it is preserved as-is.
+fn talos_endpoint(address: &str) -> String {
+    if address.contains(':') {
+        address.to_string()
+    } else {
+        format!("{address}:50000")
     }
 }
 
@@ -379,7 +393,7 @@ async fn do_install(
     jwt_secret: &str,
     factory: &FactoryConfig,
     metal_pxe: &MetalPxeConfig,
-    payload: &ConvertJobPayload,
+    payload: &mut ConvertJobPayload,
     cluster_id: Uuid,
     node: &ConvertNodePlan,
     _is_first_cp: bool,
@@ -389,44 +403,168 @@ async fn do_install(
     // k8s CA from the stored kubeconfig (best-effort identity carry-over).
     let k8s_ca = stored_kubeconfig_ca(pool, jwt_secret, cluster_id).await.unwrap_or_default();
 
+    let is_cp = node.role == "control-plane" || node.role == "controlplane";
+    let machine_type = if is_cp { "controlplane" } else { "worker" };
+
+    // Shared Talos identity (machine CA + cluster secrets). Generated once per
+    // job and persisted in the payload so every CP/worker joins the SAME
+    // control plane. Must be available before we build the config.
+    let ident = ensure_cluster_identity(payload).await?;
+
+    // `talosctl apply-config` (installer maintenance mode) decodes via
+    // configloader, which only recognises the BARE ROOT v1alpha1 document:
+    // top-level `version:` / `machine:` / `cluster:` with NO `apiVersion`, NO
+    // `kind`, NO `metadata.name`. An explicit `kind:` (Config, MachineConfig,
+    // ...) is rejected with "not registered". `systemExtensions` is NOT a valid
+    // key in this schema (extensions are carried by the factory install image,
+    // not the machine config). Validated against the live v1.13.10 installer
+    // with `talosctl apply-config --dry-run`.
+    //
+    // machine.ca (issuing CA key) is only allowed on control-plane nodes;
+    // workers must use machine.acceptedCAs (cert only, no key).
     let network_yaml = render_node_network_yaml(&node.network, &node.name);
-    // `talosctl apply-config` (maintenance mode) expects kind: Config
-    // (apiVersion v1alpha1). `kind: MachineConfig` is a separate resource and
-    // is rejected here.
-    let mut cfg = String::new();
-    cfg.push_str("apiVersion: v1alpha1\nkind: Config\nmetadata:\n  name: talos.yaml\nmachine:\n");
-    cfg.push_str(&network_yaml);
-    cfg.push_str("    install:\n");
-    cfg.push_str(&format!("      disk: {disk}\n"));
-    // Wipe only the install disk (/dev/sda). Talos does not touch the other
-    // disks (sdb..sdk hold ceph OSDs), so this is safe for the overtake.
-    cfg.push_str("      wipe: true\n");
-    cfg.push_str(&format!("      image: {}\n", image.ref_));
-    // System extensions: REQUIRED for bnx2x fleets. The installed Talos pulls
-    // these at first boot; siderolabs/bnx2-bnx2x is what delivers the bnx2x
-    // firmware (/usr/lib/firmware/bnx2x/*.fw) that the built-in bnx2x driver
-    // needs. Without this block the NIC driver loads but the chip has no link
-    // after install+reboot. Requires node egress to ghcr.io at first boot.
-    if !payload.modules.is_empty() {
-        cfg.push_str("    systemExtensions:\n");
-        cfg.push_str("      officialExtensions:\n");
-        for m in &payload.modules {
-            cfg.push_str(&format!("        - {m}\n"));
-        }
-    }
-    if !k8s_ca.is_empty() {
-        // Identity carry-over for the overtaken cluster: the k8s CA so the
-        // installed control plane keeps the same API-server CA. etcd recovery
-        // itself is done out-of-band via `talosctl etcd ... recover` +
-        // `bootstrap --recover-etcd` (see do_first_cp_recover), NOT via this
-        // config — so we do not emit a placeholder etcd block here.
-        cfg.push_str("cluster:\n");
-        cfg.push_str("  certificates:\n");
-        cfg.push_str(&format!("    - caCert:\n{}", indent_pem(&k8s_ca)));
-    }
-    cfg.push_str("\n");
+
+    let cfg = build_install_config(
+        machine_type,
+        is_cp,
+        &network_yaml,
+        disk,
+        &image.ref_,
+        &ident,
+        &k8s_ca,
+    );
 
     TalosctlClient::apply_config_maintenance(&node.address, &cfg, true, None).await
+}
+
+/// Build the installer maintenance-mode machine config (bare root v1alpha1 form)
+/// as a string. Pure + testable: the exact schema was validated against the live
+/// v1.13.10 installer via `talosctl apply-config --dry-run`. Rules:
+/// - NO `apiVersion`/`kind`/`metadata` (configloader rejects any explicit kind
+///   with "not registered");
+/// - `persist: true` (required, else ".persist should be enabled");
+/// - `machine.type` controlplane|worker (required);
+/// - control plane carries `machine.ca` (issuing crt+key); workers carry
+///   `machine.acceptedCAs` (crt only — "issuing CA key not allowed on
+///   non-controlplane nodes");
+/// - a `cluster:` block is required for both ("cluster instructions are
+///   required");
+/// - `systemExtensions` is NOT a valid key (extensions come from the factory
+///   install image).
+#[allow(clippy::too_many_arguments)]
+fn build_install_config(
+    machine_type: &str,
+    is_cp: bool,
+    network_yaml: &str,
+    disk: &str,
+    image_ref: &str,
+    ident: &ConvertClusterIdentity,
+    k8s_ca: &str,
+) -> String {
+    let mut cfg = String::new();
+    cfg.push_str("version: v1alpha1\n");
+    cfg.push_str("persist: true\n");
+    cfg.push_str("machine:\n");
+    cfg.push_str(&format!("  type: {machine_type}\n"));
+    // Network: render_node_network_yaml emits 4-space-indented lines intended
+    // to sit directly under `machine:`. Under `machine:\n  network:` we need
+    // those lines re-indented to be children of the 2-space `network:` key.
+    cfg.push_str("  network:\n");
+    cfg.push_str(&indent_block(network_yaml, 2));
+    if is_cp {
+        cfg.push_str("  ca:\n");
+        cfg.push_str(&format!(
+            "    crt: |-\n{}",
+            ident.machine_ca_crt.lines().map(|l| format!("      {l}")).collect::<Vec<_>>().join("\n")
+        ));
+        cfg.push_str(&format!(
+            "    key: |-\n{}",
+            ident.machine_ca_key.lines().map(|l| format!("      {l}")).collect::<Vec<_>>().join("\n")
+        ));
+    } else {
+        cfg.push_str("  acceptedCAs:\n");
+        cfg.push_str(&format!(
+            "    crt: |-\n{}",
+            ident.machine_ca_crt.lines().map(|l| format!("      {l}")).collect::<Vec<_>>().join("\n")
+        ));
+    }
+    cfg.push_str(&format!("  token: {}\n", ident.machine_token));
+    cfg.push_str("  install:\n");
+    cfg.push_str(&format!("    disk: {disk}\n"));
+    // Wipe only the install disk (/dev/sda). Talos does not touch the other
+    // disks (sdb..sdk hold ceph OSDs), so this is safe for the overtake.
+    cfg.push_str("    wipe: true\n");
+    cfg.push_str(&format!("    image: {image_ref}\n"));
+    cfg.push_str("cluster:\n");
+    cfg.push_str(&format!("  id: {}\n", ident.cluster_id));
+    cfg.push_str(&format!("  secret: {}\n", ident.cluster_secret));
+    cfg.push_str("  controlPlane:\n");
+    cfg.push_str(&format!("    endpoint: {}\n", ident.control_plane_endpoint));
+    cfg.push_str(&format!("  clusterName: {}\n", ident.cluster_name));
+    cfg.push_str(&format!("  token: {}\n", ident.kube_token));
+    if !k8s_ca.is_empty() {
+        cfg.push_str("  ca:\n");
+        cfg.push_str(&format!(
+            "    crt: |-\n{}",
+            k8s_ca.lines().map(|l| format!("      {l}")).collect::<Vec<_>>().join("\n")
+        ));
+    }
+    cfg.push_str("\n");
+    cfg
+}
+
+/// Add `indent` spaces to the front of every non-empty line of `block`.
+fn indent_block(block: &str, indent: usize) -> String {
+    let pad = " ".repeat(indent);
+    block
+        .lines()
+        .map(|l| if l.trim().is_empty() { String::new() } else { format!("{pad}{l}") })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Ensure the job has a shared cluster identity, generating it once and
+/// persisting it in the payload. The machine CA + cluster id/secret are shared
+/// by ALL nodes so they form one Talos control plane. The control-plane
+/// endpoint is the FIRST control-plane node's address:6443 (the VIP for the
+/// overtaken cluster's API server).
+async fn ensure_cluster_identity(
+    payload: &mut ConvertJobPayload,
+) -> Result<ConvertClusterIdentity, AppError> {
+    if let Some(ident) = &payload.cluster_identity {
+        return Ok(ident.clone());
+    }
+    use crate::controllers::provision::{b64_random, bootstrap_token, generate_ca_issuer};
+    // Overtake keeps a stable cluster name; the API-server identity (k8s CA)
+    // is carried over separately in the cluster block. TODO: derive from the
+    // cluster record rather than hardcoding.
+    let cluster_name = "phobos";
+    let machine_ca = generate_ca_issuer(&format!("{cluster_name}-talos-ca"), 3650)?;
+    // Control-plane endpoint = first CP's address:6443 (the overtaken cluster's
+    // API server VIP). All nodes point here.
+    let cp_addr = payload
+        .nodes
+        .iter()
+        .find(|n| n.role == "control-plane" || n.role == "controlplane")
+        .map(|n| n.address.clone())
+        .unwrap_or_default();
+    let endpoint = if cp_addr.is_empty() {
+        "https://127.0.0.1:6443".into()
+    } else {
+        format!("https://{cp_addr}:6443")
+    };
+    let ident = ConvertClusterIdentity {
+        machine_ca_crt: machine_ca.pem().to_string(),
+        machine_ca_key: machine_ca.key().serialize_pem().to_string(),
+        cluster_id: b64_random(32),
+        cluster_secret: b64_random(32),
+        machine_token: bootstrap_token(),
+        kube_token: bootstrap_token(),
+        cluster_name: cluster_name.to_string(),
+        control_plane_endpoint: endpoint,
+    };
+    payload.cluster_identity = Some(ident.clone());
+    Ok(ident)
 }
 
 /// First CP: upload the etcd snapshot + `bootstrap --recover-etcd`.
@@ -465,10 +603,6 @@ async fn stored_talosconfig_or_empty(pool: &DbPool, jwt_secret: &str, cluster_id
     let c = repos::cluster::get(pool, cluster_id).await.ok().flatten()?;
     let enc = c.talosconfig.as_deref()?;
     secrets::decrypt(jwt_secret, enc).ok()
-}
-
-fn indent_pem(pem: &str) -> String {
-    pem.lines().map(|l| format!("        {l}")).collect::<Vec<_>>().join("\n")
 }
 
 fn base64_decode(s: &str) -> Vec<u8> {
@@ -558,5 +692,71 @@ mod tests {
         p.node_states[0].status = "failed".into();
         p.node_states[0].error = "boom".into();
         assert_eq!(p.last_error().as_deref(), Some("node cp1 failed: boom"));
+    }
+
+    #[test]
+    fn talos_endpoint_appends_50000() {
+        // apid is on 50000 in v1.13 (installer/maintenance AND installed).
+        assert_eq!(talos_endpoint("172.20.0.38"), "172.20.0.38:50000");
+        // explicit port preserved
+        assert_eq!(talos_endpoint("172.20.0.38:50000"), "172.20.0.38:50000");
+        // must NOT default to the legacy 5000/5006
+        assert!(!talos_endpoint("10.0.0.1").ends_with(":5000"));
+        assert!(!talos_endpoint("10.0.0.1").ends_with(":5006"));
+    }
+
+    fn fake_ident() -> ConvertClusterIdentity {
+        ConvertClusterIdentity {
+            machine_ca_crt: "-----BEGIN CERTIFICATE-----\nMIIBxx\n-----END CERTIFICATE-----".into(),
+            machine_ca_key: "-----BEGIN PRIVATE KEY-----\nMC4CAx\n-----END PRIVATE KEY-----".into(),
+            cluster_id: "Y2x1c3Rlci1pZA==".into(),
+            cluster_secret: "Y2x1c3Rlci1zZWNyZXQ=".into(),
+            machine_token: "aabbcc.1111112222223333".into(),
+            kube_token: "ddeeff.4444445555556666".into(),
+            cluster_name: "phobos".into(),
+            control_plane_endpoint: "https://10.0.0.1:6443".into(),
+        }
+    }
+
+    #[test]
+    fn build_install_config_controlplane_root_form() {
+        // Mirrors the schema validated against the live v1.13.10 installer via
+        // `talosctl apply-config --dry-run`.
+        let net = "    hostname: cp1\n    interfaces:\n      - interface: bond0\n        mtu: 1500\n";
+        let k8s_ca = "-----BEGIN CERTIFICATE-----\nK8s\n-----END CERTIFICATE-----";
+        let cfg = build_install_config("controlplane", true, net, "/dev/sda", "factory.talos.dev/metal-installer/x:v1.13.10", &fake_ident(), k8s_ca);
+        // Root form: version + persist, NO apiVersion/kind/metadata.
+        assert!(cfg.starts_with("version: v1alpha1\npersist: true\nmachine:\n"));
+        assert!(!cfg.contains("apiVersion:"));
+        assert!(!cfg.contains("kind: "));
+        assert!(!cfg.contains("metadata:"));
+        // machine.type + control-plane ca (crt AND key) + token.
+        assert!(cfg.contains("  type: controlplane\n"));
+        assert!(cfg.contains("  ca:\n    crt: |-\n      -----BEGIN CERTIFICATE-----\n      MIIBxx"));
+        assert!(cfg.contains("    key: |-\n      -----BEGIN PRIVATE KEY-----\n      MC4CAx"));
+        assert!(cfg.contains("  token: aabbcc.1111112222223333\n"));
+        // install to sda, wipe, image ref.
+        assert!(cfg.contains("  install:\n    disk: /dev/sda\n    wipe: true\n"));
+        assert!(cfg.contains("    image: factory.talos.dev/metal-installer/x:v1.13.10\n"));
+        // cluster block required.
+        assert!(cfg.contains("cluster:\n  id: Y2x1c3Rlci1pZA==\n  secret: Y2x1c3Rlci1zZWNyZXQ=\n"));
+        assert!(cfg.contains("  controlPlane:\n    endpoint: https://10.0.0.1:6443\n"));
+        // network block re-indented under machine.network.
+        assert!(cfg.contains("  network:\n      hostname: cp1"));
+        // NO systemExtensions key anywhere (invalid in this schema).
+        assert!(!cfg.contains("systemExtensions"));
+    }
+
+    #[test]
+    fn build_install_config_worker_uses_accepted_cas() {
+        let net = "    interfaces:\n      - interface: bond0\n";
+        let cfg = build_install_config("worker", false, net, "/dev/sda", "img:v1", &fake_ident(), "");
+        assert!(cfg.contains("  type: worker\n"));
+        // Worker: acceptedCAs (crt only), NO machine.ca / NO key.
+        assert!(cfg.contains("  acceptedCAs:\n    crt: |-\n"));
+        assert!(!cfg.contains("  ca:\n    key:"));
+        assert!(!cfg.contains("PRIVATE KEY"));
+        // Empty k8s_ca -> no cluster.ca block.
+        assert!(!cfg.contains("  ca:\n    crt: |-\n      K8s"));
     }
 }

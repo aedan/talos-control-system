@@ -56,7 +56,35 @@ pub struct ConvertJobPayload {
     pub node_states: Vec<ConvertNodeState>,
     pub etcd_snapshot_path: Option<String>,
     pub etcd_snapshot_size: i64,
+    /// Talos cluster identity generated ONCE at job start and shared by every
+    /// node (the machine CA + cluster secrets must be identical across all CPs
+    /// and workers so they join the same Talos control plane). Populated lazily
+    /// on the first tick that needs it, then persisted in the payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_identity: Option<ConvertClusterIdentity>,
     pub steps_log: Vec<String>,
+}
+
+/// Shared Talos identity for an overtake. Generated once per convert job.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ConvertClusterIdentity {
+    /// Machine CA cert (PEM, base64 lines ready for YAML block scalar).
+    pub machine_ca_crt: String,
+    /// Machine CA key (PEM).
+    pub machine_ca_key: String,
+    /// cluster.id (b64).
+    pub cluster_id: String,
+    /// cluster.secret (b64).
+    pub cluster_secret: String,
+    /// Machine join/bootstrap token.
+    pub machine_token: String,
+    /// Kubecontrolplane join token (cluster.token).
+    pub kube_token: String,
+    /// Cluster name.
+    pub cluster_name: String,
+    /// controlPlane.endpoint (https://<first-cp-ip>:6443).
+    pub control_plane_endpoint: String,
 }
 
 impl ConvertJobPayload {
@@ -306,6 +334,7 @@ impl ConvertController {
                 .collect(),
             etcd_snapshot_path: None,
             etcd_snapshot_size: 0,
+            cluster_identity: None,
             steps_log: vec![format!("{now} convert job created ({} nodes)", body.nodes.len())],
         };
 

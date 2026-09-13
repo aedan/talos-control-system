@@ -312,7 +312,7 @@ fn ca_params(cn: &str, days: i64) -> Result<CertificateParams, AppError> {
     Ok(params)
 }
 
-fn generate_ca_issuer(cn: &str, days: i64) -> Result<CertifiedIssuer<'static, KeyPair>, AppError> {
+pub(crate) fn generate_ca_issuer(cn: &str, days: i64) -> Result<CertifiedIssuer<'static, KeyPair>, AppError> {
     let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
         .map_err(|e| AppError::Internal(format!("CA key generation: {e}")))?;
     let params = ca_params(cn, days)?;
@@ -397,7 +397,7 @@ fn parse_dhcp_range(subnet: &str) -> Option<Vec<String>> {
     Some(ips)
 }
 
-fn b64_random(n: usize) -> String {
+pub(crate) fn b64_random(n: usize) -> String {
     let mut rng = rand::thread_rng();
     let mut buf = vec![0u8; n];
     rng.fill_bytes(&mut buf);
@@ -406,7 +406,7 @@ fn b64_random(n: usize) -> String {
     base64::engine::general_purpose::STANDARD.encode(&hasher.finalize())
 }
 
-fn bootstrap_token() -> String {
+pub(crate) fn bootstrap_token() -> String {
     let mut rng = rand::thread_rng();
     let mut b = [0u8; 6 + 16];
     rng.fill_bytes(&mut b);
