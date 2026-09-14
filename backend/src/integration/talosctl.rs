@@ -397,11 +397,15 @@ impl TalosctlClient {
 
         let mode = if reboot { "reboot" } else { "no-reboot" };
 
-        let mut args: Vec<String> = vec![
-            "apply-config".into(), "-f".into(), tmpfile.clone(),
-            "-e".into(), endpoint.into(), "-n".into(), endpoint.into(),
-            "-m".into(), mode.into(),
-        ];
+        // When a talosconfig is supplied it already carries the endpoint +
+        // nodes; passing -e/-n too makes talosctl reject the target
+        // ("invalid target"). So the -e/-n flags are only used in the no-tc
+        // (maintenance / direct) path.
+        let mut args: Vec<String> = vec!["apply-config".into(), "-f".into(), tmpfile.clone()];
+        if talosconfig.is_none() {
+            args.extend(["-e".into(), endpoint.into(), "-n".into(), endpoint.into()]);
+        }
+        args.extend(["-m".into(), mode.into()]);
         if dry_run {
             args.push("--dry-run".into());
         }
@@ -471,10 +475,13 @@ impl TalosctlClient {
     ) -> Result<(), AppError> {
         Self::ensure_installed().await?;
 
-        let mut args: Vec<String> = vec![
-            "bootstrap".into(), "-e".into(), endpoint.into(), "-n".into(), endpoint.into(),
-            "--recover-from".into(), snapshot_node_path.into(),
-        ];
+        // -e/-n only in the no-talosconfig path; a talosconfig already carries
+        // endpoint + nodes (passing both -> "invalid target").
+        let mut args: Vec<String> = vec!["bootstrap".into()];
+        if talosconfig.is_none() {
+            args.extend(["-e".into(), endpoint.into(), "-n".into(), endpoint.into()]);
+        }
+        args.extend(["--recover-from".into(), snapshot_node_path.into()]);
         args.extend(Self::talosconfig_args(talosconfig));
 
         Self::run(&args).await?;

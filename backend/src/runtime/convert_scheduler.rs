@@ -89,15 +89,11 @@ async fn run_one(
         .cluster_id
         .ok_or_else(|| AppError::Internal("convert job has no cluster".into()))?;
     let sshc = SshClient::new(ssh.clone());
-    // Public key to authorize on installed Talos nodes (sshd enabled in the
-    // install config). Needed for the etcd-recover snapshot upload (v1.13
-    // talosctl has no file-upload command, so we scp via the node's sshd).
-    let ssh_pub_key = read_ssh_public_key(ssh);
 
     match payload.phase.as_str() {
         "snapshot" => step_snapshot(pool, sqlite_path, jwt_secret, &sshc, &mut payload, cluster_id).await?,
-        "control-plane" => step_node_phase(pool, jwt_secret, &sshc, &ssh_pub_key, factory, metal_pxe, &mut payload, cluster_id, "control-plane").await?,
-        "workers" => step_node_phase(pool, jwt_secret, &sshc, &ssh_pub_key, factory, metal_pxe, &mut payload, cluster_id, "workers").await?,
+        "control-plane" => step_node_phase(pool, jwt_secret, &sshc, factory, metal_pxe, &mut payload, cluster_id, "control-plane").await?,
+        "workers" => step_node_phase(pool, jwt_secret, &sshc, factory, metal_pxe, &mut payload, cluster_id, "workers").await?,
         "adopt" => step_adopt(pool, &mut payload, cluster_id).await?,
         "done" => {
             finish(pool, job.id, &payload, "complete", None).await?;
@@ -219,17 +215,6 @@ fn fail_node(payload: &mut ConvertJobPayload, name: &str, step: &str, error: &st
     payload.log(&format!("PHASE FAILED: {name} at {step}: {error}"));
 }
 
-/// Read the OpenSSH public key corresponding to the configured private key
-/// (`key_path` + ".pub"), if present. Used to authorize TCS on installed Talos
-/// nodes (sshd enabled in the install config). Empty string if unavailable.
-fn read_ssh_public_key(ssh: &SshConfig) -> String {
-    if ssh.key_path.is_empty() {
-        return String::new();
-    }
-    let pub_path = format!("{}.pub", ssh.key_path);
-    std::fs::read_to_string(&pub_path).unwrap_or_default().trim().to_string()
-}
-
 fn backup_root(sqlite_path: &str) -> std::path::PathBuf {
     let p = std::path::Path::new(sqlite_path);
     let base = p.parent().unwrap_or(std::path::Path::new("/var/lib/tcs")).to_path_buf();
@@ -242,7 +227,6 @@ async fn step_node_phase(
     pool: &DbPool,
     jwt_secret: &str,
     sshc: &SshClient,
-    ssh_pub_key: &str,
     factory: &FactoryConfig,
     metal_pxe: &MetalPxeConfig,
     payload: &mut ConvertJobPayload,
@@ -286,7 +270,7 @@ async fn step_node_phase(
             Err(e) => payload.log(&format!("{} probe: {e} (waiting for reboot)", node.name)),
         },
         "install" => {
-            match do_install(pool, jwt_secret, factory, metal_pxe, payload, cluster_id, &node, is_first_cp, ssh_pub_key).await {
+            match do_install(pool, jwt_secret, factory, metal_pxe, payload, cluster_id, &node, is_first_cp).await {
                 Ok(()) => {
                     payload.set_state(&node.name, "reboot", "waiting for Talos on disk", "");
                     payload.log(&format!("{} install issued; waiting for boot", node.name));
@@ -307,7 +291,7 @@ async fn step_node_phase(
             Ok(false) => payload.log(&format!("{} still rebooting into Talos", node.name)),
             Err(e) => payload.log(&format!("{} probe: {e}", node.name)),
         },
-        "recover" => match do_first_cp_recover(pool, jwt_secret, sshc, factory, payload, cluster_id, &node, ssh_pub_key).await {
+        "recover" => match do_first_cp_recover(pool, jwt_secret, payload, cluster_id, &node).await {
             Ok(()) => {
                 payload.set_state(&node.name, "done", "control plane up", "");
                 payload.log(&format!("{} control plane up (etcd recovered + bootstrapped)", node.name));
@@ -413,17 +397,12 @@ async fn do_install(
     cluster_id: Uuid,
     node: &ConvertNodePlan,
     _is_first_cp: bool,
-    ssh_pub_key: &str,
 ) -> Result<(), AppError> {
-    // Installer (maintenance) schema rejects machine.features.ssh, so install
-    // with enable_ssh=false; sshd is enabled post-install in do_first_cp_recover.
-    let cfg = node_install_config(pool, jwt_secret, factory, payload, cluster_id, node, ssh_pub_key, false).await?;
+    let cfg = node_install_config(pool, jwt_secret, factory, payload, cluster_id, node).await?;
     TalosctlClient::apply_config_maintenance(&node.address, &cfg, true, None).await
 }
 
-/// Build the install machine config for a node (shared by the installer
-/// maintenance apply and the post-install sshd enable). `enable_ssh` adds
-/// machine.features.ssh (only valid on the installed system, not the installer).
+/// Build the install machine config for a node (installer maintenance apply).
 #[allow(clippy::too_many_arguments)]
 async fn node_install_config(
     pool: &DbPool,
@@ -432,8 +411,6 @@ async fn node_install_config(
     payload: &mut ConvertJobPayload,
     cluster_id: Uuid,
     node: &ConvertNodePlan,
-    ssh_pub_key: &str,
-    enable_ssh: bool,
 ) -> Result<String, AppError> {
     let image = kexec::installer_image(factory, &payload.talos_version, &payload.modules, payload.schematic.as_deref());
     let disk = "/dev/sda"; // overtake: install to the boot disk; ceph OSDs are sdb+
@@ -451,8 +428,6 @@ async fn node_install_config(
         &image.ref_,
         &ident,
         &k8s_ca,
-        ssh_pub_key,
-        enable_ssh,
     ))
 }
 
@@ -479,27 +454,12 @@ fn build_install_config(
     image_ref: &str,
     ident: &ConvertClusterIdentity,
     k8s_ca: &str,
-    ssh_pub_key: &str,
-    enable_ssh: bool,
 ) -> String {
     let mut cfg = String::new();
     cfg.push_str("version: v1alpha1\n");
     cfg.push_str("persist: true\n");
     cfg.push_str("machine:\n");
     cfg.push_str(&format!("  type: {machine_type}\n"));
-    // Enable sshd on the INSTALLED node (post-install apply-config), authorizing
-    // the TCS deployer key. v1.13 talosctl has NO file-upload command, so the
-    // etcd-recover snapshot is scp'd to the node over SSH. NOTE: the INSTALLER
-    // (maintenance-mode) apply-config schema REJECTS machine.features.ssh
-    // ("unknown keys"), so ssh is enabled in a separate post-install
-    // apply-config, not here. `enable_ssh` gates the block.
-    if enable_ssh && !ssh_pub_key.is_empty() {
-        cfg.push_str("  features:\n");
-        cfg.push_str("    ssh:\n");
-        cfg.push_str("      server: true\n");
-        cfg.push_str("      allowedPublicKeys:\n");
-        cfg.push_str(&format!("        - \"{ssh_pub_key}\"\n"));
-    }
     cfg.push_str("  network:\n");
     // render_node_network_yaml emits a 4-space base (`    hostname:` /
     // `    interfaces:`) which is already correct for being the children of a
@@ -598,62 +558,34 @@ async fn ensure_cluster_identity(
     Ok(ident)
 }
 
-/// First CP: enable sshd on the freshly-installed node, upload the etcd
-/// snapshot, and `talosctl bootstrap --recover-from <node-path>`.
+/// First CP: `talosctl bootstrap --recover-from <snapshot>` to form its etcd
+/// from the overtaken cluster's snapshot.
 ///
-/// The node just installed Talos and its etcd is in the join loop (no cluster
-/// yet). Steps:
-///   1. Build a talosconfig from the job's generated identity (machine CA +
-///      an os:admin client cert) to authenticate to the node's apid :50000.
-///   2. `talosctl apply-config` (authenticated, NOT maintenance) the full
-///      config WITH machine.features.ssh -> starts sshd. (The installer
-///      maintenance schema rejects features.ssh, so this is a separate
-///      post-install step on the installed system, which accepts it.)
-///   3. Wait for :22, then scp the etcd snapshot to the node (v1.13 talosctl
-///      has NO file-upload command, so SSH is the transport).
-///   4. `talosctl bootstrap --recover-from /tmp/<snapshot>` to form etcd.
+/// The node just installed Talos and its etcd is in the join loop (Preparing).
+/// `talosctl bootstrap --recover-from <path>` resolves `<path>` on the CLIENT
+/// (deployer) and streams the snapshot to the node over gRPC (EtcdRecover) —
+/// NO file upload / sshd is needed (and SSH was removed from Talos entirely,
+/// so machine.features.ssh does not exist in v1.13). The snapshot already
+/// lives on the deployer from the snapshot phase, so we point straight at it.
+///
+/// Only the FIRST CP is bootstrapped; the other CPs join automatically once
+/// this one's control-plane endpoint is up (via controlPlane.endpoint).
 async fn do_first_cp_recover(
-    pool: &DbPool,
-    jwt_secret: &str,
-    sshc: &SshClient,
-    factory: &FactoryConfig,
+    _pool: &DbPool,
+    _jwt_secret: &str,
     payload: &mut ConvertJobPayload,
-    cluster_id: Uuid,
+    _cluster_id: Uuid,
     node: &ConvertNodePlan,
-    ssh_pub_key: &str,
 ) -> Result<(), AppError> {
     let path = payload.etcd_snapshot_path.clone().ok_or_else(|| AppError::Internal("no etcd snapshot path".into()))?;
-    let endpoint = talos_endpoint(&node.address);
+    // talosconfig from the generated identity (the node is a brand-new Talos
+    // control plane with no stored talosconfig).
     let tc = build_node_talosconfig(&ensure_cluster_identity(payload).await?, &node.address);
-
-    // 2. Enable sshd on the installed node (authenticated apply-config, which
-    //    accepts machine.features.ssh unlike the installer maintenance schema).
-    let cfg = node_install_config(pool, jwt_secret, factory, payload, cluster_id, node, ssh_pub_key, true).await?;
-    payload.set_state(&node.name, "recover", "enabling sshd (post-install apply-config)", "");
-    TalosctlClient::apply_config(&endpoint, &cfg, true, false, Some(&tc)).await?;
-    payload.log(&format!("{} sshd enabled via post-install apply-config; waiting for :22", node.name));
-
-    // 3. Wait for sshd, then scp the snapshot.
-    wait_ssh_up(ssh_pub_key, &node.address).await?;
-    sshc.scp_to(&node.address, std::path::Path::new(&path), "/tmp/tcs-etcd-recover.db").await?;
-    payload.log(&format!("{} etcd snapshot uploaded to node; bootstrapping", node.name));
-
-    // 4. Bootstrap etcd from the snapshot.
-    TalosctlClient::bootstrap_recover_etcd(&endpoint, "/tmp/tcs-etcd-recover.db", Some(&tc)).await?;
-    Ok(())
-}
-
-/// Poll until the node's sshd (port 22) accepts a TCP connect. sshd comes up a
-/// few seconds after the post-install apply-config; bounded wait.
-async fn wait_ssh_up(_ssh_pub_key: &str, address: &str) -> Result<(), AppError> {
-    let host = if address.contains(':') { address.to_string() } else { format!("{address}:22") };
-    for _ in 0..60 {
-        if tokio::net::TcpStream::connect(&host).await.is_ok() {
-            return Ok(());
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    }
-    Err(AppError::Network(format!("node {address} sshd (:22) did not come up in 3m")))
+    let endpoint = talos_endpoint(&node.address);
+    payload.set_state(&node.name, "recover", "bootstrap --recover-from (streaming snapshot)", "");
+    payload.log(&format!("{} bootstrapping etcd from snapshot {}", node.name, path));
+    // --recover-from points at the LOCAL deployer path; the client streams it.
+    TalosctlClient::bootstrap_recover_etcd(&endpoint, &path, Some(&tc)).await
 }
 
 /// Build a talosconfig YAML for a freshly-installed node's apid (:50000) from
@@ -814,7 +746,7 @@ mod tests {
         // `talosctl apply-config --dry-run`.
         let net = "    hostname: cp1\n    interfaces:\n      - interface: bond0\n        mtu: 1500\n";
         let k8s_ca = "-----BEGIN CERTIFICATE-----\nK8s\n-----END CERTIFICATE-----";
-        let cfg = build_install_config("controlplane", true, net, "/dev/sda", "factory.talos.dev/metal-installer/x:v1.13.10", &fake_ident(), k8s_ca, "ssh-ed25519 AAAATestKey tcs", true);
+        let cfg = build_install_config("controlplane", true, net, "/dev/sda", "factory.talos.dev/metal-installer/x:v1.13.10", &fake_ident(), k8s_ca);
         // Root form: version + persist, NO apiVersion/kind/metadata.
         assert!(cfg.starts_with("version: v1alpha1\npersist: true\nmachine:\n"));
         assert!(!cfg.contains("apiVersion:"));
@@ -849,15 +781,15 @@ mod tests {
         assert_eq!(machine.get("type").and_then(|t| t.as_str()), Some("controlplane"));
         assert!(machine.get("network").is_some());
         assert!(machine.get("ca").is_some());
-        assert!(doc.get(&serde_yaml::Value::String("cluster".into())).is_some());
-        // sshd enabled on installed nodes (needed for the etcd-recover scp).
-        assert!(machine.get("features").and_then(|f| f.get("ssh")).is_some());
+        // No machine.features block (SSH was removed from Talos; there is no
+        // valid features.ssh schema in v1.13).
+        assert!(machine.get("features").is_none());
     }
 
     #[test]
     fn build_install_config_worker_uses_accepted_cas() {
         let net = "    interfaces:\n      - interface: bond0\n";
-        let cfg = build_install_config("worker", false, net, "/dev/sda", "img:v1", &fake_ident(), "", "ssh-ed25519 AAAATestKey tcs", false);
+        let cfg = build_install_config("worker", false, net, "/dev/sda", "img:v1", &fake_ident(), "");
         assert!(cfg.contains("  type: worker\n"));
         // Worker: acceptedCAs (crt only, base64-of-PEM), NO machine.ca / NO key.
         let crt_b64 = crate::controllers::provision::b64_le(&fake_ident().machine_ca_crt);
