@@ -74,7 +74,17 @@ impl NetworkCapture {
 echo "==INTERFACES=="; ip -j -o addr show 2>/dev/null
 echo "==LINKS=="; ip -j -o link show 2>/dev/null
 echo "==ROUTES=="; ip -j -o route show default 2>/dev/null
-echo "==DNS=="; awk '/^nameserver/{print $2}' /etc/resolv.conf 2>/dev/null
+# Real upstream DNS. /etc/resolv.conf often points at the systemd-resolved
+# stub (127.0.0.53) which does NOT exist inside the Talos installer, so we must
+# capture the actual upstream resolvers. Prefer the resolved upstream config,
+# then resolvectl, then fall back to /etc/resolv.conf (skipping loopback).
+echo "==DNS=="; {
+  for f in /run/systemd/resolve/resolv.conf /run/resolvconf/resolv.conf; do
+    [ -f "$f" ] && awk '/^nameserver/{print $2}' "$f" 2>/dev/null
+  done
+  resolvectl dns 2>/dev/null | awk '/^[A-Za-z0-9._-]+ +/{p=1} p && /^[[:space:]]+[0-9]/{print; p=0}'
+  awk '/^nameserver/{print $2}' /etc/resolv.conf 2>/dev/null
+} | grep -v '^127\.' | awk '!seen[$0]++' | head -8
 echo "==BONDS=="; for d in /sys/class/net/*/bonding; do [ -d "$d" ] || continue; b=$(basename $(dirname "$d")); echo "$b mode=$(cat "$d/mode" 2>/dev/null) slaves=$(cat "$d/slaves" 2>/dev/null)"; done
 echo "==OVS=="; ovs-vsctl list-br 2>/dev/null
 echo "==LSMOD=="; lsmod 2>/dev/null | awk 'NR>1{print $1}'
