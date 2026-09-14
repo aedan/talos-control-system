@@ -456,24 +456,67 @@ impl TalosctlClient {
         Ok(())
     }
 
-    /// Bootstrap with etcd recovery from a previously uploaded snapshot.
+    /// Bootstrap a freshly-installed control plane, recovering its etcd from a
+    /// snapshot that has already been uploaded to the NODE (see `file_put`).
+    ///
+    /// v1.13 syntax: `talosctl bootstrap --recover-from <node-path>` (the old
+    /// `talosctl etcd snapshot recover --from` subcommand no longer exists, and
+    /// `--recover-etcd` is not a flag). `--recover-skip-hash-check` is only for
+    /// data-dir copies, not snapshots, so it is not used here.
     pub async fn bootstrap_recover_etcd(
         endpoint: &str,
-        skip_hash_check: bool,
+        snapshot_node_path: &str,
         talosconfig: Option<&str>,
     ) -> Result<(), AppError> {
         Self::ensure_installed().await?;
 
         let mut args: Vec<String> = vec![
-            "bootstrap".into(), "-e".into(), endpoint.into(), "--recover-etcd".into(),
+            "bootstrap".into(), "-e".into(), endpoint.into(), "-n".into(), endpoint.into(),
+            "--recover-from".into(), snapshot_node_path.into(),
         ];
-        if skip_hash_check {
-            args.push("--recover-skip-hash-check".into());
-        }
         args.extend(Self::talosconfig_args(talosconfig));
 
         Self::run(&args).await?;
-        info!(endpoint, "talosctl bootstrap (recover_etcd)");
+        info!(endpoint, snapshot = snapshot_node_path, "talosctl bootstrap (recover-from)");
+        Ok(())
+    }
+
+    /// Upload a local file to a node's filesystem (e.g. an etcd snapshot into
+    /// the node's ephemeral `/tmp` so `bootstrap --recover-from` can read it).
+    ///
+    /// v1.13 syntax: `talosctl file put <local> <remote>`. Requires a valid
+    /// talosconfig (authenticated) — the node must be past maintenance mode.
+    pub async fn file_put(
+        endpoint: &str,
+        local_path: &str,
+        remote_path: &str,
+        talosconfig: Option<&str>,
+    ) -> Result<(), AppError> {
+        Self::ensure_installed().await?;
+
+        if !tokio::fs::metadata(local_path).await.map(|m| m.is_file()).unwrap_or(false) {
+            return Err(AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("local file to upload not found: {local_path}"),
+            )));
+        }
+
+        let mut args: Vec<String> = vec![
+            "file".into(), "put".into(), local_path.into(), remote_path.into(),
+            "-e".into(), endpoint.into(), "-n".into(), endpoint.into(),
+        ];
+        args.extend(Self::talosconfig_args(talosconfig));
+
+        // Uploading a 60MB snapshot can take a while; use a generous timeout.
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            Self::run(&args),
+        )
+        .await
+        .map_err(|_| AppError::Network("talosctl file put timed out".to_string()))?;
+        out.map_err(|e| AppError::Network(format!("talosctl file put failed: {e}")))?;
+
+        info!(endpoint, local = local_path, remote = remote_path, "talosctl file_put");
         Ok(())
     }
 

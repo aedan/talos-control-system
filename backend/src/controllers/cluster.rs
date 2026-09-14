@@ -1755,7 +1755,7 @@ impl ClusterController {
         let mut bootstrap_ok = false;
         let mut bootstrap_error: Option<String> = None;
         if run_bootstrap {
-            match TalosctlClient::bootstrap_recover_etcd(&address, skip_hash_check, tc.as_deref()).await {
+            match TalosctlClient::bootstrap_recover_etcd(&address, canon_path.to_str().unwrap(), tc.as_deref()).await {
                 Ok(()) => bootstrap_ok = true,
                 Err(e) => bootstrap_error = Some(e.to_string()),
             }

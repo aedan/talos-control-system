@@ -85,6 +85,12 @@ pub struct ConvertClusterIdentity {
     pub cluster_name: String,
     /// controlPlane.endpoint (https://<first-cp-ip>:6443).
     pub control_plane_endpoint: String,
+    /// Admin client cert (PEM) signed by the machine CA, org os:admin. Used to
+    /// build a talosconfig for talking to the freshly-installed node's apid
+    /// during etcd recovery.
+    pub admin_cert: String,
+    /// Admin client key (PEM) matching `admin_cert`.
+    pub admin_key: String,
 }
 
 impl ConvertJobPayload {

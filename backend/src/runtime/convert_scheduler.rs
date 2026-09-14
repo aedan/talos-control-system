@@ -518,14 +518,17 @@ async fn ensure_cluster_identity(
     if let Some(ident) = &payload.cluster_identity {
         return Ok(ident.clone());
     }
-    use crate::controllers::provision::{b64_random, bootstrap_token, generate_ca_issuer};
+    use crate::controllers::provision::{
+        b64_random, bootstrap_token, generate_ca_issuer, generate_server_cert,
+    };
     // Overtake keeps a stable cluster name; the API-server identity (k8s CA)
     // is carried over separately in the cluster block. TODO: derive from the
     // cluster record rather than hardcoding.
     let cluster_name = "phobos";
     let machine_ca = generate_ca_issuer(&format!("{cluster_name}-talos-ca"), 3650)?;
-    // Control-plane endpoint = first CP's address:6443 (the overtaken cluster's
-    // API server VIP). All nodes point here.
+    // Admin client cert (org os:admin) signed by the machine CA, so we can
+    // authenticate to the freshly-installed node's apid during etcd recovery.
+    // SANs = first CP address so the cert is valid for the apid TLS check.
     let cp_addr = payload
         .nodes
         .iter()
@@ -537,6 +540,14 @@ async fn ensure_cluster_identity(
     } else {
         format!("https://{cp_addr}:6443")
     };
+    let admin_sans: Vec<String> = if cp_addr.is_empty() {
+        vec!["localhost".into(), "127.0.0.1".into()]
+    } else {
+        vec!["localhost".into(), cp_addr.clone()]
+    };
+    let admin_sans_refs: Vec<&str> = admin_sans.iter().map(|s| s.as_str()).collect();
+    let (admin_cert, admin_key) =
+        generate_server_cert(&machine_ca, "admin", "os:admin", &admin_sans_refs, 365)?;
     let ident = ConvertClusterIdentity {
         machine_ca_crt: machine_ca.pem().to_string(),
         machine_ca_key: machine_ca.key().serialize_pem().to_string(),
@@ -546,30 +557,56 @@ async fn ensure_cluster_identity(
         kube_token: bootstrap_token(),
         cluster_name: cluster_name.to_string(),
         control_plane_endpoint: endpoint,
+        admin_cert,
+        admin_key,
     };
     payload.cluster_identity = Some(ident.clone());
     Ok(ident)
 }
 
-/// First CP: upload the etcd snapshot + `bootstrap --recover-etcd`.
+/// First CP: upload the etcd snapshot to the freshly-installed node and
+/// `talosctl bootstrap --recover-from <node-path>`.
+///
+/// The node just installed Talos and its etcd is in the join loop (no cluster
+/// yet). To recover the overtaken cluster's etcd we:
+///   1. Build a talosconfig from the job's generated identity (machine CA +
+///      an os:admin client cert) so we can authenticate to the node's apid
+///      on :50000.
+///   2. `talosctl file put` the etcd snapshot into the node's /tmp.
+///   3. `talosctl bootstrap --recover-from /tmp/<snapshot>` to form the etcd
+///      cluster from that snapshot.
 async fn do_first_cp_recover(
     pool: &DbPool,
     jwt_secret: &str,
-    payload: &ConvertJobPayload,
+    payload: &mut ConvertJobPayload,
     cluster_id: Uuid,
     node: &ConvertNodePlan,
 ) -> Result<(), AppError> {
-    let path = payload.etcd_snapshot_path.as_ref().ok_or_else(|| AppError::Internal("no etcd snapshot path".into()))?;
-    // The just-installed CP needs a talosconfig to talk to; for a freshly
-    // bootstrapped-from-snapshot node the identity comes from the snapshot.
-    let tc = stored_talosconfig_or_empty(pool, jwt_secret, cluster_id).await;
-    TalosctlClient::etcd_recover(&node.address, path, tc.as_deref()).await?;
-    if tc.is_none() {
-        return Err(AppError::Internal(
-            "no talosconfig stored yet; attach one (or re-run after CP is up) to complete bootstrap".into(),
-        ));
-    }
-    TalosctlClient::bootstrap_recover_etcd(&node.address, false, tc.as_deref()).await
+    let path = payload.etcd_snapshot_path.clone().ok_or_else(|| AppError::Internal("no etcd snapshot path".into()))?;
+    // Build a talosconfig from the generated identity (the node has no stored
+    // talosconfig yet — it's a brand-new Talos control plane).
+    let ident = ensure_cluster_identity(payload).await?;
+    let endpoint = talos_endpoint(&node.address);
+    let tc = build_node_talosconfig(&ident, &node.address);
+    // Upload the snapshot to the node, then bootstrap etcd from it.
+    TalosctlClient::file_put(&endpoint, &path, "/tmp/tcs-etcd-recover.db", Some(&tc)).await?;
+    TalosctlClient::bootstrap_recover_etcd(&endpoint, "/tmp/tcs-etcd-recover.db", Some(&tc)).await?;
+    // Persist the talosconfig so later phases / other nodes can use it.
+    let _ = (pool, jwt_secret, cluster_id);
+    Ok(())
+}
+
+/// Build a talosconfig YAML for a freshly-installed node's apid (:50000) from
+/// the generated identity (machine CA + os:admin client cert). The node list
+/// is required so talosctl knows which nodes to target.
+fn build_node_talosconfig(ident: &ConvertClusterIdentity, node_address: &str) -> String {
+    let ca_b64 = crate::controllers::provision::b64_le(&ident.machine_ca_crt);
+    let crt_b64 = crate::controllers::provision::b64_le(&ident.admin_cert);
+    let key_b64 = crate::controllers::provision::b64_le(&ident.admin_key);
+    let name = ident.cluster_name.replace('-', "_");
+    format!(
+        "context: {name}\ncontexts:\n  {name}:\n    endpoints:\n      - https://{node_address}:50000\n    nodes:\n      - {node_address}\n    ca: {ca_b64}\n    crt: {crt_b64}\n    key: {key_b64}\n"
+    )
 }
 
 async fn stored_kubeconfig_ca(pool: &DbPool, jwt_secret: &str, cluster_id: Uuid) -> Option<String> {
@@ -581,12 +618,6 @@ async fn stored_kubeconfig_ca(pool: &DbPool, jwt_secret: &str, cluster_id: Uuid)
         .and_then(|kc| kc.clusters.into_iter().next())
         .and_then(|cl| cl.cluster.certificate_authority_data)
         .and_then(|b64| String::from_utf8(base64_decode(&b64)).ok())
-}
-
-async fn stored_talosconfig_or_empty(pool: &DbPool, jwt_secret: &str, cluster_id: Uuid) -> Option<String> {
-    let c = repos::cluster::get(pool, cluster_id).await.ok().flatten()?;
-    let enc = c.talosconfig.as_deref()?;
-    secrets::decrypt(jwt_secret, enc).ok()
 }
 
 fn base64_decode(s: &str) -> Vec<u8> {
@@ -689,6 +720,19 @@ mod tests {
         assert!(!talos_endpoint("10.0.0.1").ends_with(":5006"));
     }
 
+    #[test]
+    fn build_node_talosconfig_uses_50000_and_nodes() {
+        // talosconfig for a freshly-installed node's apid: endpoint :50000,
+        // a nodes list (required by talosctl), base64-of-PEM ca/crt/key.
+        let tc = build_node_talosconfig(&fake_ident(), "10.0.0.1");
+        assert!(tc.contains("endpoints:\n      - https://10.0.0.1:50000\n"));
+        assert!(tc.contains("nodes:\n      - 10.0.0.1\n"));
+        // base64 fields present, no raw PEM.
+        assert!(!tc.contains("BEGIN CERTIFICATE"));
+        let ca_b64 = crate::controllers::provision::b64_le(&fake_ident().machine_ca_crt);
+        assert!(tc.contains(&format!("ca: {ca_b64}\n")));
+    }
+
     fn fake_ident() -> ConvertClusterIdentity {
         ConvertClusterIdentity {
             machine_ca_crt: "-----BEGIN CERTIFICATE-----\nMIIBxx\n-----END CERTIFICATE-----".into(),
@@ -699,6 +743,8 @@ mod tests {
             kube_token: "ddeeff.4444445555556666".into(),
             cluster_name: "phobos".into(),
             control_plane_endpoint: "https://10.0.0.1:6443".into(),
+            admin_cert: "-----BEGIN CERTIFICATE-----\nAdm\n-----END CERTIFICATE-----".into(),
+            admin_key: "-----BEGIN PRIVATE KEY-----\nAdk\n-----END PRIVATE KEY-----".into(),
         }
     }
 

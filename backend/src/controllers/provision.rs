@@ -321,7 +321,7 @@ pub(crate) fn generate_ca_issuer(cn: &str, days: i64) -> Result<CertifiedIssuer<
     Ok(issuer)
 }
 
-fn generate_server_cert(
+pub(crate) fn generate_server_cert(
     ca_issuer: &CertifiedIssuer<'_, KeyPair>,
     cn: &str,
     org: &str,
