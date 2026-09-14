@@ -497,6 +497,19 @@ fn build_install_config(
         cfg.push_str("  ca:\n");
         cfg.push_str(&format!("    crt: {}\n", crate::controllers::provision::b64_le(k8s_ca)));
     }
+    // Control planes MUST define the etcd CA (cluster.etcd.ca) or the
+    // RootEtcdController fails with "missing cluster.etcdCA secret" and etcd
+    // never starts (so bootstrap --recover-from reports "not ready for
+    // recovery"). Talos etcd is always TLS; the overtaken kubeadm etcd has no
+    // TLS, so we use a fresh generated etcd CA.
+    if is_cp {
+        let etcd_crt = crate::controllers::provision::b64_le(&ident.etcd_ca_crt);
+        let etcd_key = crate::controllers::provision::b64_le(&ident.etcd_ca_key);
+        cfg.push_str("  etcd:\n");
+        cfg.push_str("    ca:\n");
+        cfg.push_str(&format!("      crt: {etcd_crt}\n"));
+        cfg.push_str(&format!("      key: {etcd_key}\n"));
+    }
     cfg.push_str("\n");
     cfg
 }
@@ -542,6 +555,12 @@ async fn ensure_cluster_identity(
     let admin_sans_refs: Vec<&str> = admin_sans.iter().map(|s| s.as_str()).collect();
     let (admin_cert, admin_key) =
         generate_server_cert(&machine_ca, "admin", "os:admin", &admin_sans_refs, 365)?;
+    // etcd CA: Talos etcd is always TLS. The overtaken kubeadm etcd has NO TLS
+    // (no pki/etcd, no cert args in its static pod), so there is no etcd CA to
+    // match - we generate a fresh one. Required in the CP config as
+    // cluster.etcd.ca or the RootEtcdController fails with "missing
+    // cluster.etcdCA secret" and etcd never starts.
+    let etcd_ca = generate_ca_issuer(&format!("{cluster_name}-etcd-ca"), 3650)?;
     let ident = ConvertClusterIdentity {
         machine_ca_crt: machine_ca.pem().to_string(),
         machine_ca_key: machine_ca.key().serialize_pem().to_string(),
@@ -553,6 +572,8 @@ async fn ensure_cluster_identity(
         control_plane_endpoint: endpoint,
         admin_cert,
         admin_key,
+        etcd_ca_crt: etcd_ca.pem().to_string(),
+        etcd_ca_key: etcd_ca.key().serialize_pem().to_string(),
     };
     payload.cluster_identity = Some(ident.clone());
     Ok(ident)
@@ -737,6 +758,8 @@ mod tests {
             control_plane_endpoint: "https://10.0.0.1:6443".into(),
             admin_cert: "-----BEGIN CERTIFICATE-----\nAdm\n-----END CERTIFICATE-----".into(),
             admin_key: "-----BEGIN PRIVATE KEY-----\nAdk\n-----END PRIVATE KEY-----".into(),
+            etcd_ca_crt: "-----BEGIN CERTIFICATE-----\nEtc\n-----END CERTIFICATE-----".into(),
+            etcd_ca_key: "-----BEGIN PRIVATE KEY-----\nEtk\n-----END PRIVATE KEY-----".into(),
         }
     }
 
@@ -784,6 +807,11 @@ mod tests {
         // No machine.features block (SSH was removed from Talos; there is no
         // valid features.ssh schema in v1.13).
         assert!(machine.get("features").is_none());
+        // Control plane must carry the etcd CA (else "missing cluster.etcdCA
+        // secret" and etcd never starts).
+        assert!(cfg.contains("  etcd:\n    ca:\n"));
+        let etcd_crt_b64 = crate::controllers::provision::b64_le(&fake_ident().etcd_ca_crt);
+        assert!(cfg.contains(&format!("      crt: {etcd_crt_b64}\n")));
     }
 
     #[test]

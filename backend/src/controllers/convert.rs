@@ -91,6 +91,13 @@ pub struct ConvertClusterIdentity {
     pub admin_cert: String,
     /// Admin client key (PEM) matching `admin_cert`.
     pub admin_key: String,
+    /// etcd CA cert (PEM). Talos etcd is always TLS; a fresh CA is generated
+    /// (the overtaken kubeadm etcd has no TLS, so there is no CA to match).
+    /// Required in the control-plane config as cluster.etcd.ca, else the
+    /// RootEtcdController fails with "missing cluster.etcdCA secret".
+    pub etcd_ca_crt: String,
+    /// etcd CA key (PEM).
+    pub etcd_ca_key: String,
 }
 
 impl ConvertJobPayload {

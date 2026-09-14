@@ -285,33 +285,33 @@ pub fn render_node_network_yaml(c: &NodeNetworkCapture, hostname: &str) -> Strin
         for s in &bond.slaves {
             y.push_str(&format!("            - {}\n", s));
         }
-        // VLANs on the bond, or addresses/routes directly.
+        // The bond's own address + default route go on the bond (bond0), NOT on
+        // its VLANs. On these nodes the default route is `dev bond0` (verified:
+        // `ip route show default` -> `default via 172.20.0.1 dev bond0`), and the
+        // /22 IP sits on bond0. Placing the default route under a VLAN (as before)
+        // broke public-internet egress from the installed Talos ("network is
+        // unreachable") because the egress VLAN had no path to the gateway.
+        if let Some((ip, cidr)) = address_for_bond(c, bond) {
+            y.push_str("        addresses:\n");
+            y.push_str(&format!("          - {}/{}\n", ip, cidr));
+        }
+        if !c.gateway.is_empty() {
+            y.push_str("        routes:\n");
+            y.push_str("          - network: 0.0.0.0/0\n");
+            y.push_str(&format!("            gateway: {}\n", c.gateway));
+        }
+        // VLANs on the bond carry their OWN address (if any), no default route.
         let vlans_on_bond: Vec<&NodeNetworkVlan> =
             c.vlans.iter().filter(|v| v.parent == bond.name).collect();
         if !vlans_on_bond.is_empty() {
             y.push_str("        vlans:\n");
             for v in vlans_on_bond {
                 y.push_str(&format!("          - vlanId: {}\n", v.id));
-                if let Some(iface_ip) = address_for(c, &v.name) {
+                if let Some((v_ip, v_cidr)) = address_for(c, &v.name) {
                     y.push_str("            addresses:\n");
-                    y.push_str(&format!("              - {}/{}\n", iface_ip.0, iface_ip.1));
+                    y.push_str(&format!("              - {}/{}\n", v_ip, v_cidr));
                     y.push_str(&format!("            mtu: {}\n", mtu));
                 }
-                if !c.gateway.is_empty() {
-                    y.push_str("            routes:\n");
-                    y.push_str("              - network: 0.0.0.0/0\n");
-                    y.push_str(&format!("                gateway: {}\n", c.gateway));
-                }
-            }
-        } else {
-            if let Some((ip, cidr)) = address_for_bond(c, bond) {
-                y.push_str("        addresses:\n");
-                y.push_str(&format!("          - {}/{}\n", ip, cidr));
-            }
-            if !c.gateway.is_empty() {
-                y.push_str("        routes:\n");
-                y.push_str("          - network: 0.0.0.0/0\n");
-                y.push_str(&format!("            gateway: {}\n", c.gateway));
             }
         }
         // Ignore unused NICs (those that aren't bond slaves).
