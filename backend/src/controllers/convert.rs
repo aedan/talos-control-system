@@ -98,6 +98,36 @@ pub struct ConvertClusterIdentity {
     pub etcd_ca_crt: String,
     /// etcd CA key (PEM).
     pub etcd_ca_key: String,
+    // --- Original cluster identity (extracted from a running old CP). The
+    // apiserver/scheduler/controller-manager are static pods gated on
+    // secrets.KubernetesRoot, which is derived from the machine config's
+    // cluster identity. For an OVERTAKE the recovered kubeadm etcd data must be
+    // served with the ORIGINAL identity (k8s CA, aggregator/front-proxy CA,
+    // service-account key) so existing client certs + SA tokens validate. A
+    // fresh identity cannot serve foreign data. ---
+    /// Original k8s/apiserver CA (PEM) - becomes cluster.ca.crt.
+    pub k8s_ca_crt: String,
+    /// Original k8s CA key (PEM) - becomes cluster.ca.key.
+    pub k8s_ca_key: String,
+    /// Original front-proxy/aggregator CA (PEM) - cluster.aggregatorCA.crt.
+    pub aggregator_ca_crt: String,
+    /// Original front-proxy CA key (PEM) - cluster.aggregatorCA.key.
+    pub aggregator_ca_key: String,
+    /// Original service-account signing key (PEM) - cluster.serviceAccount.key.
+    pub service_account_key: String,
+    /// k8s control-plane component image tag, e.g. "v1.33.5" (from the running
+    /// kube-apiserver manifest).
+    pub k8s_version: String,
+    /// Service cluster IP range, e.g. "10.233.0.0/18".
+    pub service_cidr: String,
+    /// Cluster domain, e.g. "cluster.local".
+    pub cluster_domain: String,
+    /// Pod CIDR (for the Talos cluster.network; default 10.244.0.0/16).
+    pub pod_cidr: String,
+    /// secretbox encryption secret (fresh 32-byte b64 - encrypts the stored
+    /// cluster secrets on the node; a fresh value is fine since it only
+    /// protects at-rest storage of the CAs we provide).
+    pub secretbox_secret: String,
 }
 
 impl ConvertJobPayload {

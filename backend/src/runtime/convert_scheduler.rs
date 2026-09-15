@@ -270,7 +270,7 @@ async fn step_node_phase(
             Err(e) => payload.log(&format!("{} probe: {e} (waiting for reboot)", node.name)),
         },
         "install" => {
-            match do_install(pool, jwt_secret, factory, metal_pxe, payload, cluster_id, &node, is_first_cp).await {
+            match do_install(pool, jwt_secret, factory, metal_pxe, sshc, payload, cluster_id, &node, is_first_cp).await {
                 Ok(()) => {
                     payload.set_state(&node.name, "reboot", "waiting for Talos on disk", "");
                     payload.log(&format!("{} install issued; waiting for boot", node.name));
@@ -291,7 +291,7 @@ async fn step_node_phase(
             Ok(false) => payload.log(&format!("{} still rebooting into Talos", node.name)),
             Err(e) => payload.log(&format!("{} probe: {e}", node.name)),
         },
-        "recover" => match do_first_cp_recover(pool, jwt_secret, payload, cluster_id, &node).await {
+        "recover" => match do_first_cp_recover(pool, jwt_secret, sshc, payload, cluster_id, &node).await {
             Ok(()) => {
                 payload.set_state(&node.name, "done", "control plane up", "");
                 payload.log(&format!("{} control plane up (etcd recovered + bootstrapped)", node.name));
@@ -393,12 +393,13 @@ async fn do_install(
     jwt_secret: &str,
     factory: &FactoryConfig,
     _metal_pxe: &MetalPxeConfig,
+    sshc: &SshClient,
     payload: &mut ConvertJobPayload,
     cluster_id: Uuid,
     node: &ConvertNodePlan,
     _is_first_cp: bool,
 ) -> Result<(), AppError> {
-    let cfg = node_install_config(pool, jwt_secret, factory, payload, cluster_id, node).await?;
+    let cfg = node_install_config(pool, jwt_secret, factory, sshc, payload, cluster_id, node).await?;
     TalosctlClient::apply_config_maintenance(&node.address, &cfg, true, None).await
 }
 
@@ -408,6 +409,7 @@ async fn node_install_config(
     pool: &DbPool,
     jwt_secret: &str,
     factory: &FactoryConfig,
+    sshc: &SshClient,
     payload: &mut ConvertJobPayload,
     cluster_id: Uuid,
     node: &ConvertNodePlan,
@@ -417,7 +419,7 @@ async fn node_install_config(
     let k8s_ca = stored_kubeconfig_ca(pool, jwt_secret, cluster_id).await.unwrap_or_default();
     let is_cp = node.role == "control-plane" || node.role == "controlplane";
     let machine_type = if is_cp { "controlplane" } else { "worker" };
-    let ident = ensure_cluster_identity(payload).await?;
+    let ident = ensure_cluster_identity(sshc, payload).await?;
     let network_yaml = render_node_network_yaml(&node.network, &node.name);
 
     Ok(build_install_config(
@@ -428,6 +430,9 @@ async fn node_install_config(
         &image.ref_,
         &ident,
         &k8s_ca,
+        // Overtake: true when the original cluster PKI was extracted, so the CP
+        // config embeds it (and serves the recovered etcd with the same identity).
+        !ident.k8s_ca_crt.is_empty(),
     ))
 }
 
@@ -454,6 +459,7 @@ fn build_install_config(
     image_ref: &str,
     ident: &ConvertClusterIdentity,
     k8s_ca: &str,
+    full_identity: bool,
 ) -> String {
     let mut cfg = String::new();
     cfg.push_str("version: v1alpha1\n");
@@ -486,6 +492,14 @@ fn build_install_config(
     // disks (sdb..sdk hold ceph OSDs), so this is safe for the overtake.
     cfg.push_str("    wipe: true\n");
     cfg.push_str(&format!("    image: {image_ref}\n"));
+    // Cluster identity. For an OVERTAKE the CP must carry the ORIGINAL cluster
+    // PKI (k8s CA + key, aggregator/front-proxy CA + key, service-account key)
+    // so the static-pod apiserver (gated on secrets.KubernetesRoot, derived
+    // from this config) serves the recovered kubeadm etcd data with the SAME
+    // identity - existing client certs + SA tokens keep validating. A fresh
+    // identity cannot serve foreign data. Workers only need to TRUST the
+    // cluster CA (acceptedCAs / cluster.ca.crt, no keys).
+    let k8s_crt = if ident.k8s_ca_crt.is_empty() { k8s_ca } else { &ident.k8s_ca_crt };
     cfg.push_str("cluster:\n");
     cfg.push_str(&format!("  id: {}\n", ident.cluster_id));
     cfg.push_str(&format!("  secret: {}\n", ident.cluster_secret));
@@ -493,22 +507,57 @@ fn build_install_config(
     cfg.push_str(&format!("    endpoint: {}\n", ident.control_plane_endpoint));
     cfg.push_str(&format!("  clusterName: {}\n", ident.cluster_name));
     cfg.push_str(&format!("  token: {}\n", ident.kube_token));
-    if !k8s_ca.is_empty() {
+    if is_cp && !ident.k8s_ca_crt.is_empty() {
+        // Full CP cluster identity (original PKI carried over).
+        let b64 = crate::controllers::provision::b64_le;
+        cfg.push_str(&format!("  secretboxEncryptionSecret: {}\n", ident.secretbox_secret));
+        cfg.push_str("  network:\n");
+        cfg.push_str("    cni:\n");
+        cfg.push_str("      name: none\n");
+        cfg.push_str(&format!("    dnsDomain: {}\n", ident.cluster_domain));
+        cfg.push_str("    podSubnets:\n");
+        cfg.push_str(&format!("      - {}\n", ident.pod_cidr));
+        cfg.push_str("    serviceSubnets:\n");
+        cfg.push_str(&format!("      - {}\n", ident.service_cidr));
         cfg.push_str("  ca:\n");
-        cfg.push_str(&format!("    crt: {}\n", crate::controllers::provision::b64_le(k8s_ca)));
-    }
-    // Control planes MUST define the etcd CA (cluster.etcd.ca) or the
-    // RootEtcdController fails with "missing cluster.etcdCA secret" and etcd
-    // never starts (so bootstrap --recover-from reports "not ready for
-    // recovery"). Talos etcd is always TLS; the overtaken kubeadm etcd has no
-    // TLS, so we use a fresh generated etcd CA.
-    if is_cp {
-        let etcd_crt = crate::controllers::provision::b64_le(&ident.etcd_ca_crt);
-        let etcd_key = crate::controllers::provision::b64_le(&ident.etcd_ca_key);
+        cfg.push_str(&format!("    crt: {}\n", b64(&ident.k8s_ca_crt)));
+        cfg.push_str(&format!("    key: {}\n", b64(&ident.k8s_ca_key)));
+        cfg.push_str("  aggregatorCA:\n");
+        cfg.push_str(&format!("    crt: {}\n", b64(&ident.aggregator_ca_crt)));
+        cfg.push_str(&format!("    key: {}\n", b64(&ident.aggregator_ca_key)));
+        cfg.push_str("  serviceAccount:\n");
+        cfg.push_str(&format!("    key: {}\n", b64(&ident.service_account_key)));
+        let img = format!("registry.k8s.io/kube-apiserver:{}", ident.k8s_version);
+        cfg.push_str("  apiServer:\n");
+        cfg.push_str(&format!("    image: {img}\n"));
+        cfg.push_str("  controllerManager:\n");
+        cfg.push_str(&format!("    image: registry.k8s.io/kube-controller-manager:{v}\n", v = ident.k8s_version));
+        cfg.push_str("  proxy:\n");
+        cfg.push_str(&format!("    image: registry.k8s.io/kube-proxy:{v}\n", v = ident.k8s_version));
+        cfg.push_str("  scheduler:\n");
+        cfg.push_str(&format!("    image: registry.k8s.io/kube-scheduler:{v}\n", v = ident.k8s_version));
+        // Fresh etcd CA (old kubeadm etcd has no TLS; recovered data is plain KV).
+        let etcd_crt = b64(&ident.etcd_ca_crt);
+        let etcd_key = b64(&ident.etcd_ca_key);
         cfg.push_str("  etcd:\n");
         cfg.push_str("    ca:\n");
         cfg.push_str(&format!("      crt: {etcd_crt}\n"));
         cfg.push_str(&format!("      key: {etcd_key}\n"));
+    } else {
+        // Worker (or CP without original identity): trust the cluster CA only.
+        if !k8s_crt.is_empty() {
+            cfg.push_str("  ca:\n");
+            cfg.push_str(&format!("    crt: {}\n", crate::controllers::provision::b64_le(k8s_crt)));
+        }
+        if is_cp {
+            // CP always needs an etcd CA (fresh).
+            let etcd_crt = crate::controllers::provision::b64_le(&ident.etcd_ca_crt);
+            let etcd_key = crate::controllers::provision::b64_le(&ident.etcd_ca_key);
+            cfg.push_str("  etcd:\n");
+            cfg.push_str("    ca:\n");
+            cfg.push_str(&format!("      crt: {etcd_crt}\n"));
+            cfg.push_str(&format!("      key: {etcd_key}\n"));
+        }
     }
     cfg.push_str("\n");
     cfg
@@ -520,6 +569,7 @@ fn build_install_config(
 /// endpoint is the FIRST control-plane node's address:6443 (the VIP for the
 /// overtaken cluster's API server).
 async fn ensure_cluster_identity(
+    sshc: &SshClient,
     payload: &mut ConvertJobPayload,
 ) -> Result<ConvertClusterIdentity, AppError> {
     if let Some(ident) = &payload.cluster_identity {
@@ -528,14 +578,16 @@ async fn ensure_cluster_identity(
     use crate::controllers::provision::{
         b64_random, bootstrap_token, generate_ca_issuer, generate_server_cert,
     };
-    // Overtake keeps a stable cluster name; the API-server identity (k8s CA)
-    // is carried over separately in the cluster block. TODO: derive from the
-    // cluster record rather than hardcoding.
+    // Overtake keeps a stable cluster name. The API-server identity (k8s CA,
+    // aggregator CA, SA key) is CARRIED OVER from a running old control plane
+    // so the recovered cluster keeps its original identity (existing client
+    // certs + SA tokens validate). The Talos machine CA + membership
+    // id/secret/token are fresh (Talos-specific; the old cluster is kubeadm).
     let cluster_name = "phobos";
     let machine_ca = generate_ca_issuer(&format!("{cluster_name}-talos-ca"), 3650)?;
-    // Admin client cert (org os:admin) signed by the machine CA, so we can
-    // authenticate to the freshly-installed node's apid during etcd recovery.
-    // SANs = first CP address so the cert is valid for the apid TLS check.
+    let etcd_ca = generate_ca_issuer(&format!("{cluster_name}-etcd-ca"), 3650)?;
+
+    // First CP address = control-plane endpoint (all nodes join here).
     let cp_addr = payload
         .nodes
         .iter()
@@ -555,12 +607,24 @@ async fn ensure_cluster_identity(
     let admin_sans_refs: Vec<&str> = admin_sans.iter().map(|s| s.as_str()).collect();
     let (admin_cert, admin_key) =
         generate_server_cert(&machine_ca, "admin", "os:admin", &admin_sans_refs, 365)?;
-    // etcd CA: Talos etcd is always TLS. The overtaken kubeadm etcd has NO TLS
-    // (no pki/etcd, no cert args in its static pod), so there is no etcd CA to
-    // match - we generate a fresh one. Required in the CP config as
-    // cluster.etcd.ca or the RootEtcdController fails with "missing
-    // cluster.etcdCA secret" and etcd never starts.
-    let etcd_ca = generate_ca_issuer(&format!("{cluster_name}-etcd-ca"), 3650)?;
+
+    // Extract the original cluster identity from a RUNNING old CP. The first
+    // CP (cp_addr) is the one being converted, so pull from another old CP if
+    // available; fall back to the first CP's pre-convert state (it's still old
+    // at install time, before its install reboots it).
+    let source_cp = payload
+        .nodes
+        .iter()
+        .filter(|n| (n.role == "control-plane" || n.role == "controlplane"))
+        .find(|n| n.address != cp_addr)
+        .map(|n| n.address.clone())
+        .unwrap_or_else(|| cp_addr.clone());
+    let orig = if source_cp.is_empty() {
+        None
+    } else {
+        extract_original_identity(sshc, &source_cp).await
+    };
+
     let ident = ConvertClusterIdentity {
         machine_ca_crt: machine_ca.pem().to_string(),
         machine_ca_key: machine_ca.key().serialize_pem().to_string(),
@@ -574,9 +638,87 @@ async fn ensure_cluster_identity(
         admin_key,
         etcd_ca_crt: etcd_ca.pem().to_string(),
         etcd_ca_key: etcd_ca.key().serialize_pem().to_string(),
+        // Original identity (empty if extraction unavailable -> config falls
+        // back to a fresh-identity CP, which cannot serve foreign etcd; the
+        // overtake requires the original PKI, so extraction must succeed).
+        k8s_ca_crt: orig.as_ref().map(|o| o.k8s_ca_crt.clone()).unwrap_or_default(),
+        k8s_ca_key: orig.as_ref().map(|o| o.k8s_ca_key.clone()).unwrap_or_default(),
+        aggregator_ca_crt: orig.as_ref().map(|o| o.aggregator_ca_crt.clone()).unwrap_or_default(),
+        aggregator_ca_key: orig.as_ref().map(|o| o.aggregator_ca_key.clone()).unwrap_or_default(),
+        service_account_key: orig.as_ref().map(|o| o.service_account_key.clone()).unwrap_or_default(),
+        k8s_version: orig.as_ref().map(|o| o.k8s_version.clone()).unwrap_or_default(),
+        service_cidr: orig.as_ref().map(|o| o.service_cidr.clone()).unwrap_or_default(),
+        cluster_domain: orig.as_ref().map(|o| o.cluster_domain.clone()).unwrap_or_else(|| "cluster.local".into()),
+        pod_cidr: "10.244.0.0/16".into(),
+        secretbox_secret: b64_random(32),
     };
     payload.cluster_identity = Some(ident.clone());
     Ok(ident)
+}
+
+/// The original (kubeadm) cluster identity extracted from a running old CP.
+#[derive(Debug, Clone, Default)]
+struct OriginalIdentity {
+    k8s_ca_crt: String,
+    k8s_ca_key: String,
+    aggregator_ca_crt: String,
+    aggregator_ca_key: String,
+    service_account_key: String,
+    k8s_version: String,
+    service_cidr: String,
+    cluster_domain: String,
+}
+
+/// Extract the original cluster's PKI + control-plane settings from a RUNNING
+/// old control plane (over SSH). The overtake must reuse this identity so the
+/// recovered etcd data is served with the same k8s CA / aggregator CA /
+/// service-account key (existing client certs + SA tokens keep validating).
+///
+/// Returns `Ok(None)` if the source CP is unreachable or the files are missing
+/// (the caller then falls back to a fresh identity, which will NOT serve
+/// foreign etcd - the overtake would need re-running once a source is up).
+async fn extract_original_identity(sshc: &SshClient, source_cp: &str) -> Option<OriginalIdentity> {
+    // Dump each file between markers + a couple of config values, in one SSH
+    // round-trip. PEM files are multi-line; markers make parsing robust.
+    let cmd = r#"
+emit() { echo "BEGIN $1"; cat "$2" 2>/dev/null; echo "END $1"; }
+emit K8S_CA_CRT /etc/kubernetes/pki/ca.crt
+emit K8S_CA_KEY /etc/kubernetes/pki/ca.key
+emit AGG_CA_CRT /etc/kubernetes/pki/front-proxy-ca.crt
+emit AGG_CA_KEY /etc/kubernetes/pki/front-proxy-ca.key
+emit SA_KEY /etc/kubernetes/pki/sa.key
+echo "BEGIN K8S_VERSION"
+grep -oE 'image: registry.k8s.io/kube-apiserver:v[0-9.]+' /etc/kubernetes/manifests/kube-apiserver.yaml 2>/dev/null | head -1 | sed 's#.*kube-apiserver:##'
+echo "END K8S_VERSION"
+echo "BEGIN SERVICE_CIDR"
+grep -oE '\-\-service-cluster-ip-range=[0-9./]+' /etc/kubernetes/manifests/kube-apiserver.yaml 2>/dev/null | head -1 | sed 's/.*=//'
+echo "END SERVICE_CIDR"
+echo "BEGIN CLUSTER_DOMAIN"
+echo cluster.local
+echo "END CLUSTER_DOMAIN"
+"#;
+    let out = match sshc.run(source_cp, cmd).await {
+        Ok(o) => o,
+        Err(_) => return None,
+    };
+    let block = |out: &str, name: &str| -> Option<String> {
+        let b = format!("BEGIN {name}\n");
+        let e = format!("END {name}\n");
+        let si = out.find(&b)? + b.len();
+        let ei = out[si..].find(&e)? + si;
+        let v = out[si..ei].trim().to_string();
+        if v.is_empty() { None } else { Some(v) }
+    };
+    Some(OriginalIdentity {
+        k8s_ca_crt: block(&out, "K8S_CA_CRT")?,
+        k8s_ca_key: block(&out, "K8S_CA_KEY")?,
+        aggregator_ca_crt: block(&out, "AGG_CA_CRT")?,
+        aggregator_ca_key: block(&out, "AGG_CA_KEY")?,
+        service_account_key: block(&out, "SA_KEY")?,
+        k8s_version: block(&out, "K8S_VERSION").unwrap_or_default(),
+        service_cidr: block(&out, "SERVICE_CIDR").unwrap_or_default(),
+        cluster_domain: block(&out, "CLUSTER_DOMAIN").unwrap_or_else(|| "cluster.local".into()),
+    })
 }
 
 /// First CP: `talosctl bootstrap --recover-from <snapshot>` to form its etcd
@@ -594,14 +736,15 @@ async fn ensure_cluster_identity(
 async fn do_first_cp_recover(
     _pool: &DbPool,
     _jwt_secret: &str,
+    sshc: &SshClient,
     payload: &mut ConvertJobPayload,
     _cluster_id: Uuid,
     node: &ConvertNodePlan,
 ) -> Result<(), AppError> {
     let path = payload.etcd_snapshot_path.clone().ok_or_else(|| AppError::Internal("no etcd snapshot path".into()))?;
-    // talosconfig from the generated identity (the node is a brand-new Talos
-    // control plane with no stored talosconfig).
-    let tc = build_node_talosconfig(&ensure_cluster_identity(payload).await?, &node.address);
+    // talosconfig from the generated identity (already created during do_install;
+    // cached in the payload, so no SSH re-extraction happens here).
+    let tc = build_node_talosconfig(&ensure_cluster_identity(sshc, payload).await?, &node.address);
     let endpoint = talos_endpoint(&node.address);
     payload.set_state(&node.name, "recover", "bootstrap --recover-from (streaming snapshot)", "");
     payload.log(&format!("{} bootstrapping etcd from snapshot {}", node.name, path));
@@ -760,6 +903,16 @@ mod tests {
             admin_key: "-----BEGIN PRIVATE KEY-----\nAdk\n-----END PRIVATE KEY-----".into(),
             etcd_ca_crt: "-----BEGIN CERTIFICATE-----\nEtc\n-----END CERTIFICATE-----".into(),
             etcd_ca_key: "-----BEGIN PRIVATE KEY-----\nEtk\n-----END PRIVATE KEY-----".into(),
+            k8s_ca_crt: "-----BEGIN CERTIFICATE-----\nOrigK8s\n-----END CERTIFICATE-----".into(),
+            k8s_ca_key: "-----BEGIN PRIVATE KEY-----\nOrigK8sKey\n-----END PRIVATE KEY-----".into(),
+            aggregator_ca_crt: "-----BEGIN CERTIFICATE-----\nOrigAgg\n-----END CERTIFICATE-----".into(),
+            aggregator_ca_key: "-----BEGIN PRIVATE KEY-----\nOrigAggKey\n-----END PRIVATE KEY-----".into(),
+            service_account_key: "-----BEGIN PRIVATE KEY-----\nOrigSA\n-----END PRIVATE KEY-----".into(),
+            k8s_version: "v1.33.5".into(),
+            service_cidr: "10.233.0.0/18".into(),
+            cluster_domain: "cluster.local".into(),
+            pod_cidr: "10.244.0.0/16".into(),
+            secretbox_secret: "c2VjcmV0Ym94".into(),
         }
     }
 
@@ -769,7 +922,7 @@ mod tests {
         // `talosctl apply-config --dry-run`.
         let net = "    hostname: cp1\n    interfaces:\n      - interface: bond0\n        mtu: 1500\n";
         let k8s_ca = "-----BEGIN CERTIFICATE-----\nK8s\n-----END CERTIFICATE-----";
-        let cfg = build_install_config("controlplane", true, net, "/dev/sda", "factory.talos.dev/metal-installer/x:v1.13.10", &fake_ident(), k8s_ca);
+        let cfg = build_install_config("controlplane", true, net, "/dev/sda", "factory.talos.dev/metal-installer/x:v1.13.10", &fake_ident(), k8s_ca, true);
         // Root form: version + persist, NO apiVersion/kind/metadata.
         assert!(cfg.starts_with("version: v1alpha1\npersist: true\nmachine:\n"));
         assert!(!cfg.contains("apiVersion:"));
@@ -788,6 +941,18 @@ mod tests {
         // cluster block required.
         assert!(cfg.contains("cluster:\n  id: Y2x1c3Rlci1pZA==\n  secret: Y2x1c3Rlci1zZWNyZXQ=\n"));
         assert!(cfg.contains("  controlPlane:\n    endpoint: https://10.0.0.1:6443\n"));
+        // Overtake: the full ORIGINAL cluster identity is carried (k8s CA + key,
+        // aggregator CA + key, SA key, original k8s version images, service CIDR).
+        let b64 = crate::controllers::provision::b64_le;
+        let fi = fake_ident();
+        assert!(cfg.contains(&format!("  ca:\n    crt: {}\n    key: {}\n", b64(&fi.k8s_ca_crt), b64(&fi.k8s_ca_key))));
+        assert!(cfg.contains(&format!("  aggregatorCA:\n    crt: {}\n    key: {}\n", b64(&fi.aggregator_ca_crt), b64(&fi.aggregator_ca_key))));
+        assert!(cfg.contains(&format!("  serviceAccount:\n    key: {}\n", b64(&fi.service_account_key))));
+        assert!(cfg.contains("  apiServer:\n    image: registry.k8s.io/kube-apiserver:v1.33.5\n"));
+        assert!(cfg.contains("  serviceSubnets:\n      - 10.233.0.0/18\n"));
+        assert!(cfg.contains("  secretboxEncryptionSecret: c2VjcmV0Ym94\n"));
+        // etcd CA present (fresh, since old etcd had no TLS).
+        assert!(cfg.contains("  etcd:\n    ca:\n"));
         // network block emitted verbatim (its 4-space base is already correct
         // under the 2-space `network:` key).
         assert!(cfg.contains("  network:\n    hostname: cp1"));
@@ -817,14 +982,21 @@ mod tests {
     #[test]
     fn build_install_config_worker_uses_accepted_cas() {
         let net = "    interfaces:\n      - interface: bond0\n";
-        let cfg = build_install_config("worker", false, net, "/dev/sda", "img:v1", &fake_ident(), "");
+        let cfg = build_install_config("worker", false, net, "/dev/sda", "img:v1", &fake_ident(), "", false);
         assert!(cfg.contains("  type: worker\n"));
         // Worker: acceptedCAs (crt only, base64-of-PEM), NO machine.ca / NO key.
         let crt_b64 = crate::controllers::provision::b64_le(&fake_ident().machine_ca_crt);
         assert!(cfg.contains(&format!("  acceptedCAs:\n    crt: {crt_b64}\n")));
         assert!(!cfg.contains("    key:"));
         assert!(!cfg.contains("PRIVATE KEY"));
-        // Empty k8s_ca -> no cluster.ca block.
-        assert!(!cfg.contains("  ca:\n    crt:"));
+        // Worker trusts the cluster CA (crt only) but carries NO issuing keys:
+        // no cluster.ca.key, no aggregatorCA, no serviceAccount, no etcd block.
+        let b64 = crate::controllers::provision::b64_le;
+        let fi = fake_ident();
+        assert!(cfg.contains(&format!("  ca:\n    crt: {}\n", b64(&fi.k8s_ca_crt))));
+        assert!(!cfg.contains("aggregatorCA"));
+        assert!(!cfg.contains("serviceAccount"));
+        assert!(!cfg.contains("  etcd:"));
+        assert!(!cfg.contains("apiServer"));
     }
 }
