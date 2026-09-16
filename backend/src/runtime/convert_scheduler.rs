@@ -539,6 +539,8 @@ async fn node_install_config(
         // Overtake: true when the original cluster PKI was extracted, so the CP
         // config embeds it (and serves the recovered etcd with the same identity).
         !ident.k8s_ca_crt.is_empty(),
+        &node.kubelet_cert,
+        &node.kubelet_key,
     );
     // Debug: log the network section (where YAML decode errors land) so a
     // malformed block is visible in the job log without dumping the whole
@@ -578,6 +580,8 @@ fn build_install_config(
     ident: &ConvertClusterIdentity,
     k8s_ca: &str,
     full_identity: bool,
+    kubelet_cert: &str,
+    kubelet_key: &str,
 ) -> String {
     let mut cfg = String::new();
     cfg.push_str("version: v1alpha1\n");
@@ -604,6 +608,15 @@ fn build_install_config(
         cfg.push_str(&format!("    - crt: {ca_crt_b64}\n"));
     }
     cfg.push_str(&format!("  token: {}\n", ident.machine_token));
+    // Overtake: carry the existing kubelet client cert so the node keeps its
+    // k8s identity (CN=system:node:<hostname>). Without this, the kubelet
+    // would try to bootstrap with a token the apiserver doesn't recognize.
+    if !kubelet_cert.is_empty() && !kubelet_key.is_empty() {
+        let b64 = crate::controllers::provision::b64_le;
+        cfg.push_str("  kubelet:\n");
+        cfg.push_str(&format!("    cert: {}\n", b64(kubelet_cert)));
+        cfg.push_str(&format!("    key: {}\n", b64(kubelet_key)));
+    }
     cfg.push_str("  install:\n");
     cfg.push_str(&format!("    disk: {disk}\n"));
     // Wipe only the install disk (/dev/sda). Talos does not touch the other
@@ -997,9 +1010,9 @@ mod tests {
         let mut p = ConvertJobPayload::default();
         p.phase = "control-plane".into();
         p.nodes = vec![
-            ConvertNodePlan { name: "cp1".into(), role: "control-plane".into(), address: "10.0.0.1".into(), network: Default::default(), drivers: vec![] },
-            ConvertNodePlan { name: "cp2".into(), role: "control-plane".into(), address: "10.0.0.2".into(), network: Default::default(), drivers: vec![] },
-            ConvertNodePlan { name: "w1".into(), role: "worker".into(), address: "10.0.0.3".into(), network: Default::default(), drivers: vec![] },
+            ConvertNodePlan { name: "cp1".into(), role: "control-plane".into(), address: "10.0.0.1".into(), network: Default::default(), drivers: vec![], kubelet_cert: String::new(), kubelet_key: String::new() },
+            ConvertNodePlan { name: "cp2".into(), role: "control-plane".into(), address: "10.0.0.2".into(), network: Default::default(), drivers: vec![], kubelet_cert: String::new(), kubelet_key: String::new() },
+            ConvertNodePlan { name: "w1".into(), role: "worker".into(), address: "10.0.0.3".into(), network: Default::default(), drivers: vec![], kubelet_cert: String::new(), kubelet_key: String::new() },
         ];
         p.node_states = p.nodes.iter().map(|n| crate::controllers::convert::ConvertNodeState {
             name: n.name.clone(), role: n.role.clone(), status: "pending".into(), current_step: "".into(), error: "".into(), attempts: 0,
@@ -1098,7 +1111,7 @@ mod tests {
         // `talosctl apply-config --dry-run`.
         let net = "    hostname: cp1\n    interfaces:\n      - interface: bond0\n        mtu: 1500\n";
         let k8s_ca = "-----BEGIN CERTIFICATE-----\nK8s\n-----END CERTIFICATE-----";
-        let cfg = build_install_config("controlplane", true, net, "/dev/sda", "factory.talos.dev/metal-installer/x:v1.13.10", &fake_ident(), k8s_ca, true);
+        let cfg = build_install_config("controlplane", true, net, "/dev/sda", "factory.talos.dev/metal-installer/x:v1.13.10", &fake_ident(), k8s_ca, true, "", "");
         // Root form: version + persist, NO apiVersion/kind/metadata.
         assert!(cfg.starts_with("version: v1alpha1\npersist: true\nmachine:\n"));
         assert!(!cfg.contains("apiVersion:"));
@@ -1158,7 +1171,7 @@ mod tests {
     #[test]
     fn build_install_config_worker_uses_accepted_cas() {
         let net = "    interfaces:\n      - interface: bond0\n";
-        let cfg = build_install_config("worker", false, net, "/dev/sda", "img:v1", &fake_ident(), "", false);
+        let cfg = build_install_config("worker", false, net, "/dev/sda", "img:v1", &fake_ident(), "", false, "", "");
         assert!(cfg.contains("  type: worker\n"));
         // Worker: acceptedCAs (crt only, base64-of-PEM), NO machine.ca / NO key.
         let crt_b64 = crate::controllers::provision::b64_le(&fake_ident().machine_ca_crt);

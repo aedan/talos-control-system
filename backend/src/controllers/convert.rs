@@ -31,6 +31,14 @@ pub struct ConvertNodePlan {
     pub address: String,
     pub network: NodeNetworkCapture,
     pub drivers: Vec<String>,
+    /// Existing kubelet client cert (PEM). When set, the Talos kubelet uses
+    /// this cert to authenticate to the apiserver (overtake: the node keeps
+    /// its identity). Empty for fresh installs.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kubelet_cert: String,
+    /// Existing kubelet client key (PEM).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kubelet_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -197,6 +205,12 @@ pub struct PreviewNode {
     pub drivers: Vec<String>,
     pub recommended_modules: Vec<String>,
     pub network: NodeNetworkCapture,
+    /// Existing kubelet client cert (PEM) — captured from the node so the
+    /// overtake preserves the node's k8s identity.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kubelet_cert: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kubelet_key: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -289,6 +303,8 @@ impl ConvertController {
                     drivers: vec![],
                     recommended_modules: vec![],
                     network: NodeNetworkCapture::default(),
+                    kubelet_cert: String::new(),
+                    kubelet_key: String::new(),
                 });
                 blockers.push(format!("node {}: no address recorded", m.hostname));
                 continue;
@@ -313,6 +329,8 @@ impl ConvertController {
                         drivers: res.drivers.clone(),
                         recommended_modules: recommended,
                         network: res.network,
+                        kubelet_cert: res.kubelet_cert,
+                        kubelet_key: res.kubelet_key,
                     });
                 }
                 Err(e) => {
@@ -327,6 +345,8 @@ impl ConvertController {
                         drivers: vec![],
                         recommended_modules: vec![],
                         network: NodeNetworkCapture::default(),
+                        kubelet_cert: String::new(),
+                        kubelet_key: String::new(),
                     });
                 }
             }
@@ -380,6 +400,8 @@ impl ConvertController {
                 address: m.address.clone(),
                 network: n.network.clone(),
                 drivers: n.drivers.clone(),
+                kubelet_cert: n.kubelet_cert.clone(),
+                kubelet_key: n.kubelet_key.clone(),
             });
         }
         let _ = ordered; // (ordering is driven by body.nodes order)
@@ -541,6 +563,10 @@ pub struct NodeIn {
     pub network: NodeNetworkCapture,
     #[serde(default)]
     pub drivers: Vec<String>,
+    #[serde(default)]
+    pub kubelet_cert: String,
+    #[serde(default)]
+    pub kubelet_key: String,
 }
 
 fn os_image_for(m: &crate::db::models::machine::Machine) -> String {

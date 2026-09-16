@@ -57,6 +57,10 @@ pub struct NodeNetworkCapture {
 pub struct CaptureResult {
     pub network: NodeNetworkCapture,
     pub drivers: Vec<String>,
+    /// Existing kubelet client cert (PEM). Empty if not found.
+    pub kubelet_cert: String,
+    /// Existing kubelet client key (PEM). Empty if not found.
+    pub kubelet_key: String,
 }
 
 pub struct NetworkCapture {
@@ -88,6 +92,8 @@ echo "==DNS=="; {
 echo "==BONDS=="; for d in /sys/class/net/*/bonding; do [ -d "$d" ] || continue; b=$(basename $(dirname "$d")); echo "$b mode=$(cat "$d/mode" 2>/dev/null) slaves=$(cat "$d/slaves" 2>/dev/null)"; done
 echo "==OVS=="; ovs-vsctl list-br 2>/dev/null
 echo "==LSMOD=="; lsmod 2>/dev/null | awk 'NR>1{print $1}'
+echo "==KUBELET_CERT=="; cat /var/lib/kubelet/pki/kubelet-client-current.pem 2>/dev/null || cat /var/lib/kubelet/pki/kubelet.crt 2>/dev/null
+echo "==KUBELET_KEY=="; cat /var/lib/kubelet/pki/kubelet-client-current.key 2>/dev/null || cat /var/lib/kubelet/pki/kubelet.key 2>/dev/null
 echo "==END==""#
     }
 
@@ -256,7 +262,10 @@ pub fn parse_capture(text: &str) -> CaptureResult {
         .filter(|l| !l.is_empty())
         .collect();
 
-    CaptureResult { network: net, drivers }
+    let kubelet_cert = section(text, "KUBELET_CERT");
+    let kubelet_key = section(text, "KUBELET_KEY");
+
+    CaptureResult { network: net, drivers, kubelet_cert, kubelet_key }
 }
 
 /// Render the captured per-node networking as a Talos `machine.network` YAML
