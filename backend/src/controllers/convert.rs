@@ -80,6 +80,11 @@ pub struct ConvertJobPayload {
     /// on the first tick that needs it, then persisted in the payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cluster_identity: Option<ConvertClusterIdentity>,
+    /// Optional override for the install image ref (bypasses the factory
+    /// schematic). Use when the standard factory image lacks required NIC
+    /// firmware (e.g. bnx2x) and a locally-patched image is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_image_override: Option<String>,
     pub steps_log: Vec<String>,
 }
 
@@ -412,6 +417,7 @@ impl ConvertController {
             etcd_snapshot_path: None,
             etcd_snapshot_size: 0,
             cluster_identity: None,
+            install_image_override: body.install_image.clone(),
             steps_log: vec![format!("{now} convert job created ({} nodes)", body.nodes.len())],
         };
 
@@ -520,6 +526,10 @@ pub struct StartBody {
     #[serde(default)]
     pub modules: Vec<String>,
     pub nodes: Vec<NodeIn>,
+    /// Override the install image ref (e.g. a locally-patched image with
+    /// NIC firmware baked in).
+    #[serde(default)]
+    pub install_image: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

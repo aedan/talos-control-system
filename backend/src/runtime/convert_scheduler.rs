@@ -419,7 +419,11 @@ fn do_kexec<'a>(
         // The factory image (UEFI vmlinuz.efi) is NEVER the kexec vehicle —
         // `kexec -l` can't load a PE32+ image. It remains the install *target*
         // in do_install.
-        let image = kexec::installer_image(factory, &payload.talos_version, &payload.modules, payload.schematic.as_deref());
+    let image = if let Some(override_ref) = &payload.install_image_override {
+        kexec::InstallerImage { ref_: override_ref.clone(), has_modules: true }
+    } else {
+        kexec::installer_image(factory, &payload.talos_version, &payload.modules, payload.schematic.as_deref())
+    };
         let asset_dir = std::path::PathBuf::from(&metal_pxe.asset_dir);
         let assets = match kexec::resolve_custom_assets(&asset_dir, &payload.talos_version) {
             Ok(a) => {
