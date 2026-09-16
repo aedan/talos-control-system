@@ -597,7 +597,7 @@ fn build_install_config(
         cfg.push_str(&format!("    key: {ca_key_b64}\n"));
     } else {
         cfg.push_str("  acceptedCAs:\n");
-        cfg.push_str(&format!("    crt: {ca_crt_b64}\n"));
+        cfg.push_str(&format!("    - crt: {ca_crt_b64}\n"));
     }
     cfg.push_str(&format!("  token: {}\n", ident.machine_token));
     cfg.push_str("  install:\n");
@@ -1151,7 +1151,7 @@ mod tests {
         assert!(cfg.contains("  type: worker\n"));
         // Worker: acceptedCAs (crt only, base64-of-PEM), NO machine.ca / NO key.
         let crt_b64 = crate::controllers::provision::b64_le(&fake_ident().machine_ca_crt);
-        assert!(cfg.contains(&format!("  acceptedCAs:\n    crt: {crt_b64}\n")));
+        assert!(cfg.contains(&format!("  acceptedCAs:\n    - crt: {crt_b64}\n")));
         assert!(!cfg.contains("    key:"));
         assert!(!cfg.contains("PRIVATE KEY"));
         // Worker trusts the cluster CA (crt only) but carries NO issuing keys:
