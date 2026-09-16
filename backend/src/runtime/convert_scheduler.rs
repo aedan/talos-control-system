@@ -524,7 +524,7 @@ async fn node_install_config(
     let ident = ensure_cluster_identity(sshc, payload).await?;
     let network_yaml = render_node_network_yaml(&node.network, &node.name);
 
-    Ok(build_install_config(
+    let cfg = build_install_config(
         machine_type,
         is_cp,
         &network_yaml,
@@ -535,7 +535,19 @@ async fn node_install_config(
         // Overtake: true when the original cluster PKI was extracted, so the CP
         // config embeds it (and serves the recovered etcd with the same identity).
         !ident.k8s_ca_crt.is_empty(),
-    ))
+    );
+    // Debug: log the network section (where YAML decode errors land) so a
+    // malformed block is visible in the job log without dumping the whole
+    // config (PEM base64 is huge).
+    let net_lines: Vec<String> = cfg
+        .lines()
+        .skip_while(|l| !l.starts_with("  network:"))
+        .take_while(|l| !l.starts_with("  acceptedCAs:") && !l.starts_with("  ca:"))
+        .enumerate()
+        .map(|(i, l)| format!("L{}| {}", i + 6, l.chars().take(120).collect::<String>()))
+        .collect();
+    payload.log(&format!("{} install network section:\n{}", node.name, net_lines.join("\n")));
+    Ok(cfg)
 }
 
 /// Build the installer maintenance-mode machine config (bare root v1alpha1 form)
