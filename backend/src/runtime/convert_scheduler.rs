@@ -160,7 +160,14 @@ async fn step_snapshot(
         .map(|(i, _)| i)
         .collect();
     let Some(&i) = order.first() else {
-        fail_node(payload, "", "snapshot", "no control-plane node with an address");
+        // No CP in the plan: nothing to snapshot; proceed straight to the
+        // per-node phases (worker-only pilot conversions).
+        payload.phase = if payload.cp_indexes().is_empty() && !payload.worker_indexes().is_empty() {
+            "workers".into()
+        } else {
+            "control-plane".into()
+        };
+        payload.log("no control-plane in convert plan; skipping etcd snapshot");
         return Ok(());
     };
     // Use a unique per-tick remote path so a re-run (if scp failed) does not
