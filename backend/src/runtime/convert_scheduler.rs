@@ -321,12 +321,23 @@ async fn step_node_phase(
             Err(e) => payload.log(&format!("{} probe: {e} (waiting for reboot)", node.name)),
         },
         "install" => {
-            match do_install(pool, jwt_secret, factory, metal_pxe, sshc, payload, cluster_id, &node, is_first_cp).await {
-                Ok(()) => {
+            // Resume path: a previous run may have already applied the install
+            // config to the live installer (and the installer reboots itself).
+            // If the installer is no longer up, treat it as "install issued"
+            // and let the reboot probe take over — no re-apply.
+            match probe_talos_up(&node.address).await {
+                Ok(true) => match do_install(pool, jwt_secret, factory, metal_pxe, sshc, payload, cluster_id, &node, is_first_cp).await {
+                    Ok(()) => {
+                        payload.set_state(&node.name, "reboot", "waiting for Talos on disk", "");
+                        payload.log(&format!("{} install issued; waiting for boot", node.name));
+                    }
+                    Err(e) => fail_node(payload, &node.name, "install", &e.to_string()),
+                },
+                Ok(false) => {
                     payload.set_state(&node.name, "reboot", "waiting for Talos on disk", "");
-                    payload.log(&format!("{} install issued; waiting for boot", node.name));
+                    payload.log(&format!("{} installer no longer up; assuming install completed, waiting for boot", node.name));
                 }
-                Err(e) => fail_node(payload, &node.name, "install", &e.to_string()),
+                Err(e) => payload.log(&format!("{} install probe: {e} (waiting)", node.name)),
             }
         }
         "reboot" => match probe_talos_up(&node.address).await {
@@ -426,17 +437,26 @@ fn do_kexec<'a>(
                 .await
             }
         };
-        let append = kexec::kexec_append(&node.network, &node.name, "");
-        match assets {
-            Ok(a) => match kexec::kexec_node(sshc, &node.address, &a, &append).await {
-                Ok(()) => {
-                    payload.set_state(&node.name, "kexec", "kexec issued; node rebooting", "");
-                    payload.log(&format!("{} kexec issued (install target {})", node.name, image.ref_));
-                }
-                Err(e) => fail_node(payload, &node.name, "kexec", &e.to_string()),
-            },
-            Err(e) => fail_node(payload, &node.name, "resolve-installer", &e.to_string()),
+    let append = kexec::kexec_append(&node.network, &node.name, "");
+    match assets {
+        Ok(a) => {
+            // A PREVIOUS attempt may have already kexec'd this node into the
+            // Talos installer (the transfer or kexec step failed after the
+            // reboot, or the job was retried). Detect it and skip straight to
+            // the install probe instead of re-sending 100MB+ of assets over a
+            // dead sshd.
+            let already_installer = probe_talos_up(&node.address).await.unwrap_or(false);
+            if already_installer {
+                payload.log(&format!("{} already in Talos installer (previous kexec landed); skipping transfer", node.name));
+            } else if let Err(e) = kexec::kexec_node(sshc, &node.address, &a, &append).await {
+                fail_node(payload, &node.name, "kexec", &e.to_string());
+                return;
+            }
+            payload.set_state(&node.name, "kexec", "kexec issued; node rebooting", "");
+            payload.log(&format!("{} kexec issued (install target {})", node.name, image.ref_));
         }
+        Err(e) => fail_node(payload, &node.name, "resolve-installer", &e.to_string()),
+    }
     }
 }
 

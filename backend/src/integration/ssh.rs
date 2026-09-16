@@ -177,10 +177,35 @@ impl SshClient {
     /// tens of MB) and pipes it to the remote `cat`.
     pub async fn scp_to(&self, host: &str, local: &Path, remote: &str) -> Result<(), AppError> {
         let data = tokio::fs::read(local).await.map_err(AppError::Io)?;
+        // A remote reboot (kexec) or sshd hiccup can tear the connection mid
+        // transfer; retry a few times. The write is CHUNKED (and the remote
+        // side truncates on each attempt) so a retry restarts cleanly and the
+        // kernel/initramfs streams without holding 90MB+ in the ssh pipe.
+        const MAX_ATTEMPTS: u32 = 3;
+        const CHUNK: usize = 1 << 20; // 1 MiB
+        let mut last_err = String::new();
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self.scp_to_once(host, &data, remote).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last_err = e.to_string();
+                    tracing::warn!(host, remote, attempt, error = %last_err, "scp_to attempt failed; retrying");
+                    tokio::time::sleep(Duration::from_secs(2 * attempt as u64)).await;
+                }
+            }
+        }
+        Err(AppError::Network(format!(
+            "scp_to {host}:{remote} failed after {MAX_ATTEMPTS} attempts: {last_err}"
+        )))
+    }
+
+    async fn scp_to_once(&self, host: &str, data: &[u8], remote: &str) -> Result<(), AppError> {
+        const CHUNK: usize = 1 << 20; // 1 MiB
         let mut args = self.base_opts();
         args.push(self.target(host).to_string());
         // Write to a temp then rename so a partial transfer never leaves a
-        // truncated file at the target path.
+        // truncated file at the target path. `cat >` (truncate-on-open) keeps
+        // each retry self-contained.
         args.push(format!("cat -- > {remote}.partial && mv {remote}.partial {remote}"));
 
         let fut = async {
@@ -193,17 +218,22 @@ impl SshClient {
                 .spawn()
                 .map_err(|e| AppError::Network(format!("ssh cat> spawn: {e}")))?;
             if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(&data).await.map_err(AppError::Io)?;
+                for chunk in data.chunks(CHUNK) {
+                    stdin.write_all(chunk).await.map_err(AppError::Io)?;
+                    stdin.flush().await.map_err(AppError::Io)?;
+                }
                 drop(stdin); // close so the remote cat sees EOF and finishes
             }
             child.wait_with_output().await.map_err(AppError::Io)
         };
         let out = match tokio::time::timeout(Duration::from_secs(self.cfg.timeout_secs), fut).await {
             Ok(res) => res?,
-            Err(_) => return Err(AppError::Network(format!(
-                "scp_to {host}:{remote} timed out after {}s",
-                self.cfg.timeout_secs
-            ))),
+            Err(_) => {
+                return Err(AppError::Network(format!(
+                    "scp_to {host}:{remote} timed out after {}s",
+                    self.cfg.timeout_secs
+                )))
+            }
         };
         if !out.status.success() {
             return Err(AppError::Network(format!(
