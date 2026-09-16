@@ -301,8 +301,15 @@ pub fn render_node_network_yaml(c: &NodeNetworkCapture, hostname: &str) -> Strin
             y.push_str(&format!("            gateway: {}\n", c.gateway));
         }
         // VLANs on the bond carry their OWN address (if any), no default route.
-        let vlans_on_bond: Vec<&NodeNetworkVlan> =
-            c.vlans.iter().filter(|v| v.parent == bond.name).collect();
+        // A VLAN with no address is NOT emitted: Talos' schema rejects a bare
+        // `- vlanId: N` list item (it must be a mapping with an address block),
+        // which broke config decoding on OVN/kubespray nodes that carry
+        // address-less bond VLANs.
+        let vlans_on_bond: Vec<&NodeNetworkVlan> = c
+            .vlans
+            .iter()
+            .filter(|v| v.parent == bond.name && address_for(c, &v.name).is_some())
+            .collect();
         if !vlans_on_bond.is_empty() {
             y.push_str("        vlans:\n");
             for v in vlans_on_bond {
@@ -509,7 +516,13 @@ openvswitch
     #[test]
     fn renders_bonded_vlan_network_yaml() {
         let c = NodeNetworkCapture {
-            interfaces: vec![],
+            interfaces: vec![NodeNetworkInterface {
+                name: "bond0.207".into(),
+                mtu: 1500,
+                ip: "10.207.0.2".into(),
+                cidr: "24".into(),
+                mac: "aa:bb".into(),
+            }],
             bonds: vec![NodeNetworkBond {
                 name: "bond0".into(),
                 mode: "4".into(),
@@ -529,9 +542,36 @@ openvswitch
         assert!(y.contains("- interface: bond0"));
         assert!(y.contains("mode: 802.3ad"));
         assert!(y.contains("- eth0"));
+        // Address-bearing VLANs render with their vlanId + address.
         assert!(y.contains("- vlanId: 207"));
+        assert!(y.contains("10.207.0.2/24"));
         assert!(y.contains("gateway: 10.0.0.1"));
         assert!(y.contains("- 10.0.0.2"));
+    }
+
+    #[test]
+    fn renders_bond_without_addressless_vlan() {
+        // Address-less bond VLANs (OVN/kubespray) must NOT render: Talos
+        // rejects a bare `- vlanId: N` list item (config decode failure).
+        let c = NodeNetworkCapture {
+            interfaces: vec![],
+            bonds: vec![NodeNetworkBond {
+                name: "bond0".into(),
+                mode: "4".into(),
+                slaves: vec!["eno49".into(), "eno50".into()],
+            }],
+            vlans: vec![NodeNetworkVlan {
+                name: "bond0.326".into(),
+                id: 326,
+                parent: "bond0".into(),
+            }],
+            gateway: "172.20.0.1".into(),
+            dns: vec![],
+            ovs_bridges: vec![],
+        };
+        let y = render_node_network_yaml(&c, "node1");
+        assert!(!y.contains("vlanId"), "addressless vlan must not render: {y}");
+        assert!(!y.contains("vlans:"), "no vlans block at all: {y}");
     }
 
     #[test]
