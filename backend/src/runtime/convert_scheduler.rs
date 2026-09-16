@@ -610,6 +610,13 @@ fn build_install_config(
     // disks (sdb..sdk hold ceph OSDs), so this is safe for the overtake.
     cfg.push_str("    wipe: true\n");
     cfg.push_str(&format!("    image: {image_ref}\n"));
+    // Enable serial console on the installed system so SOL (IPMI) works for
+    // debugging. The kexec boot has console=ttyS0 in its append line, but the
+    // GRUB config written by the installer does NOT inherit those params.
+    cfg.push_str("    extraKernelArgs:\n");
+    cfg.push_str("      - console=ttyS0\n");
+    cfg.push_str("      - slab_nomerge\n");
+    cfg.push_str("      - pti=on\n");
     // Cluster identity. For an OVERTAKE the CP must carry the ORIGINAL cluster
     // PKI (k8s CA + key, aggregator/front-proxy CA + key, service-account key)
     // so the static-pod apiserver (gated on secrets.KubernetesRoot, derived
