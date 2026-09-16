@@ -296,7 +296,38 @@ async fn step_node_phase(
                 payload.set_state(&node.name, "done", "control plane up", "");
                 payload.log(&format!("{} control plane up (etcd recovered + bootstrapped)", node.name));
             }
-            Err(e) => fail_node(payload, &node.name, "recover", &e.to_string()),
+            Err(e) => {
+                let msg = e.to_string();
+                // Transient: the freshly-booted CP's etcd isn't ready to accept a
+                // recovery snapshot yet ("etcd service is not ready for recovery
+                // yet" / FailedPrecondition). Keep "recover" so the next tick
+                // retries; cap attempts so a genuine fault fails instead of looping.
+                let transient = msg.contains("not ready for recovery")
+                    || msg.contains("FailedPrecondition")
+                    || msg.contains("etcd service is not ready");
+                if transient {
+                    if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == node.name) {
+                        s.attempts += 1;
+                        if s.attempts > 60 {
+                            s.status = "failed".into();
+                            s.current_step = "recover".into();
+                            s.error = format!("etcd never ready for recovery after 60 attempts: {msg}");
+                            payload.log(&format!("PHASE FAILED: {} etcd not ready after 60 attempts", node.name));
+                        } else {
+                            s.current_step = format!("bootstrap --recover-from (retry {}/60)", s.attempts);
+                            let att = s.attempts;
+                            payload.log(&format!(
+                                "{} etcd not ready for recovery yet (attempt {att}); retrying next tick",
+                                node.name
+                            ));
+                        }
+                    } else {
+                        fail_node(payload, &node.name, "recover", &msg);
+                    }
+                } else {
+                    fail_node(payload, &node.name, "recover", &msg);
+                }
+            }
         },
         other => fail_node(payload, &node.name, "stuck", &format!("stuck in status {other}")),
     }
@@ -830,7 +861,7 @@ mod tests {
             ConvertNodePlan { name: "w1".into(), role: "worker".into(), address: "10.0.0.3".into(), network: Default::default(), drivers: vec![] },
         ];
         p.node_states = p.nodes.iter().map(|n| crate::controllers::convert::ConvertNodeState {
-            name: n.name.clone(), role: n.role.clone(), status: "pending".into(), current_step: "".into(), error: "".into(),
+            name: n.name.clone(), role: n.role.clone(), status: "pending".into(), current_step: "".into(), error: "".into(), attempts: 0,
         }).collect();
         p
     }

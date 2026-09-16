@@ -41,6 +41,10 @@ pub struct ConvertNodeState {
     pub status: String, // pending|snapshot|kexec|install|reboot|join|recover|done|failed|skipped
     pub current_step: String,
     pub error: String,
+    /// Retry counter for transient steps (etcd-recovery "not ready yet");
+    /// bounds the retry loop so a genuine fault fails instead of looping.
+    #[serde(default)]
+    pub attempts: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -373,6 +377,7 @@ impl ConvertController {
                     status: "pending".into(),
                     current_step: String::new(),
                     error: String::new(),
+                    attempts: 0,
                 })
                 .collect(),
             etcd_snapshot_path: None,
