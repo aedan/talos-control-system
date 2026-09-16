@@ -608,15 +608,6 @@ fn build_install_config(
         cfg.push_str(&format!("    - crt: {ca_crt_b64}\n"));
     }
     cfg.push_str(&format!("  token: {}\n", ident.machine_token));
-    // Overtake: carry the existing kubelet client cert so the node keeps its
-    // k8s identity (CN=system:node:<hostname>). Without this, the kubelet
-    // would try to bootstrap with a token the apiserver doesn't recognize.
-    if !kubelet_cert.is_empty() && !kubelet_key.is_empty() {
-        let b64 = crate::controllers::provision::b64_le;
-        cfg.push_str("  kubelet:\n");
-        cfg.push_str(&format!("    cert: {}\n", b64(kubelet_cert)));
-        cfg.push_str(&format!("    key: {}\n", b64(kubelet_key)));
-    }
     cfg.push_str("  install:\n");
     cfg.push_str(&format!("    disk: {disk}\n"));
     // Wipe only the install disk (/dev/sda). Talos does not touch the other
