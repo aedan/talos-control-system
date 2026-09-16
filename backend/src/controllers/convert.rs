@@ -47,10 +47,24 @@ pub struct ConvertNodeState {
     pub attempts: u32,
 }
 
+fn default_cluster_name() -> String {
+    "phobos".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ConvertJobPayload {
     pub talos_version: String,
+    /// Target cluster name (from the cluster record; defaults to "phobos" for
+    /// payloads saved before this field existed).
+    #[serde(default = "default_cluster_name")]
+    pub cluster_name: String,
+    /// True when the original (kubespray) etcd already speaks TLS — detected by
+    /// the snapshot probe. When true, etcd recovery must run `snapshot restore`
+    /// (member list / TLS peer URLs are stale); the fresh-install bootstrap
+    /// cannot use `--recover-from` directly in that case.
+    #[serde(default)]
+    pub etcd_tls: bool,
     pub modules: Vec<String>,
     pub schematic: Option<String>,
     /// Ordered conversion plan: control-plane first, then workers.
@@ -132,6 +146,16 @@ pub struct ConvertClusterIdentity {
     /// cluster secrets on the node; a fresh value is fine since it only
     /// protects at-rest storage of the CAs we provide).
     pub secretbox_secret: String,
+    /// Original (kubespray) etcd CA (PEM). When set, Talos etcd uses it so the
+    /// recovered snapshot's peer URLs + member TLS stay compatible across the
+    /// conversion; empty -> Talos issues a fresh etcd CA.
+    pub etcd_ca_crt_orig: String,
+    /// Original etcd CA key (PEM; ca-key.pem lives on kubespray CPs).
+    pub etcd_ca_key_orig: String,
+    /// Original etcd server cert (PEM; SANs cover all CP hostnames + IPs).
+    pub etcd_server_crt: String,
+    /// Original etcd server key (PEM).
+    pub etcd_server_key: String,
 }
 
 impl ConvertJobPayload {
@@ -327,6 +351,9 @@ impl ConvertController {
         cluster_id: Uuid,
         body: StartBody,
     ) -> Result<Uuid, AppError> {
+        let cluster = repos::cluster::get(&self.pool, cluster_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("cluster not found".into()))?;
         let machines = repos::machine::list_by_cluster(&self.pool, cluster_id).await?;
         let mut plans = Vec::new();
         let mut by_name: std::collections::HashMap<String, &crate::db::models::machine::Machine> =
@@ -363,6 +390,8 @@ impl ConvertController {
         let now = Utc::now();
         let payload = ConvertJobPayload {
             talos_version: body.talos_version,
+            cluster_name: cluster.name.clone(),
+            etcd_tls: false,
             modules: body.modules.clone(),
             schematic,
             nodes: plans,

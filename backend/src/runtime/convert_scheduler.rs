@@ -135,7 +135,10 @@ impl ConvertJobPayload {
     }
 }
 
-/// Phase: take an etcd snapshot from the first reachable CP node via SSH.
+/// Phase: take an etcd snapshot from the first OLD (still kubespray) control
+/// plane via SSH. A CP already converted to Talos (its /etc/kubernetes +
+/// /etc/etcd.env are gone, port 22 closed) is skipped — the snapshot must come
+/// from a surviving old CP.
 async fn step_snapshot(
     pool: &DbPool,
     sqlite_path: &str,
@@ -149,64 +152,105 @@ async fn step_snapshot(
         payload.log("snapshot done; moving to control-plane");
         return Ok(());
     }
-    let cp = payload
+    let order: Vec<usize> = payload
         .nodes
         .iter()
-        .find(|n| (n.role == "control-plane" || n.role == "controlplane") && !n.address.is_empty())
-        .ok_or_else(|| AppError::Internal("no control-plane node with an address".into()))?;
-    let cp = cp.clone();
-
+        .enumerate()
+        .filter(|(_, n)| (n.role == "control-plane" || n.role == "controlplane") && !n.address.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+    let Some(&i) = order.first() else {
+        fail_node(payload, "", "snapshot", "no control-plane node with an address");
+        return Ok(());
+    };
     // Use a unique per-tick remote path so a re-run (if scp failed) does not
     // clobber a file an in-flight scp is still reading (etcdctl snapshot save
     // truncates the target first). The remote name is derived from the local
     // dest so the two sides always agree.
     let root = backup_root(sqlite_path);
-    let local = root.join(cluster_id.to_string()).join(format!("convert-{}.db", Utc::now().format("%Y%m%d%H%M%S")));
-    let remote = format!("/tmp/tcs-convert-etcd-{}.db", Utc::now().format("%Y%m%d%H%M%S%f"));
-    payload.set_state(&cp.name, "snapshot", "etcdctl snapshot save", "");
-    // Detect the etcd layout: kubeadm (/etc/kubernetes/pki/etcd) vs
-    // Calico/kubespray (/etc/ssl/etcd/ssl, per-node certs). Use a 127.0.0.1
-    // endpoint — a local etcd is always present on a control-plane node.
-    let probe = format!(
-        r#"
+    // Detect the etcd layout: kubeadm (/etc/kubernetes/pki/etcd), kubespray
+    // (/etc/ssl/etcd/ssl, member-<hostname>.pem or node-<hostname>.pem), or
+    // /etc/etcd.env TLS settings (authoritative). A local etcd is always
+    // present on a control-plane node, so use 127.0.0.1.
+    let probe = |remote: &str| -> String {
+        format!(
+            r#"
+# A node already converted to Talos has no kubespray layout; mark it so the
+# scheduler can skip it (port 22 is closed on Talos anyway).
+if [ ! -f /etc/etcd.env ] && [ ! -f /etc/kubernetes/pki/ca.crt ] && [ ! -d /etc/ssl/etcd/ssl ]; then
+  echo "CONVERTED"
+  exit 42
+fi
 CA=""; CERT=""; KEY=""
-if [ -f /etc/kubernetes/pki/etcd/ca.crt ]; then
+envget() {{ grep -E "^$1=" /etc/etcd.env 2>/dev/null | head -1 | cut -d= -f2-; }}
+ENVCA=$(envget ETCD_TRUSTED_CA_FILE); ENVCERT=$(envget ETCD_CERT_FILE); ENVKEY=$(envget ETCD_KEY_FILE)
+if [ -n "$ENVCA" ] && [ -f "$ENVCA" ] && [ -f "$ENVCERT" ] && [ -f "$ENVKEY" ]; then
+  CA=$ENVCA; CERT=$ENVCERT; KEY=$ENVKEY
+elif [ -f /etc/kubernetes/pki/etcd/ca.crt ]; then
   CA=/etc/kubernetes/pki/etcd/ca.crt
   CERT=/etc/kubernetes/pki/etcd/server.crt
   KEY=/etc/kubernetes/pki/etcd/server.key
-elif [ -f /etc/ssl/etcd/ssl/ca.pem ] && [ -f "/etc/ssl/etcd/ssl/node-$(hostname).pem" ]; then
+elif [ -f /etc/ssl/etcd/ssl/ca.pem ]; then
   CA=/etc/ssl/etcd/ssl/ca.pem
-  CERT=/etc/ssl/etcd/ssl/node-$(hostname).pem
-  KEY=/etc/ssl/etcd/ssl/node-$(hostname)-key.pem
+  for n in member-$(hostname) node-$(hostname) member-$(hostname -s) node-$(hostname -s); do
+    if [ -f "/etc/ssl/etcd/ssl/$n.pem" ] && [ -f "/etc/ssl/etcd/ssl/$n-key.pem" ]; then
+      CERT="/etc/ssl/etcd/ssl/$n.pem"; KEY="/etc/ssl/etcd/ssl/$n-key.pem"; break
+    fi
+  done
 fi
-if [ -z "$CA" ]; then echo "ERROR: no etcd cert layout found (tried kubeadm + calico)"; exit 1; fi
+if [ -z "$CA" ] || [ -z "$CERT" ] || [ -z "$KEY" ]; then echo "ERROR: no etcd cert layout found (tried /etc/etcd.env, kubeadm, kubespray member-/node-)"; exit 1; fi
 ETCDCTL_API=3 etcdctl snapshot save {remote} \
   --endpoints=https://127.0.0.1:2379 \
   --cacert="$CA" --cert="$CERT" --key="$KEY" --write-out=table
 ls -l {remote}
 "#,
-        remote = remote
-    );
-    match sshc.run_capture(&cp.address, &probe).await {
-        Ok(o) if o.ok => {}
-        Ok(o) => {
-            fail_node(payload, &cp.name, "etcd snapshot", &o.stderr);
-            return Ok(());
+            remote = remote
+        )
+    };
+    for &i in &order {
+        let cp = payload.nodes[i].clone();
+        let local = root.join(cluster_id.to_string()).join(format!("convert-{}.db", Utc::now().format("%Y%m%d%H%M%S")));
+        let remote = format!("/tmp/tcs-convert-etcd-{}.db", Utc::now().format("%Y%m%d%H%M%S%f"));
+        payload.set_state(&cp.name, "snapshot", "etcdctl snapshot save", "");
+        match sshc.run_capture(&cp.address, &probe(&remote)).await {
+            Ok(o) if o.ok => {}
+            Ok(o) if o.stdout.contains("CONVERTED") => {
+                payload.log(&format!("{} is already Talos (no kubespray etcd layout); trying next CP", cp.name));
+                payload.set_state(&cp.name, "pending", "", "");
+                continue;
+            }
+            Ok(o) => {
+                fail_node(payload, &cp.name, "etcd snapshot", &o.stderr);
+                return Ok(());
+            }
+            Err(e) => {
+                // Unreachable over SSH (already converted, or down): skip to
+                // the next old CP instead of failing the whole job.
+                payload.log(&format!("{} snapshot source unreachable ({e}); trying next CP", cp.name));
+                payload.set_state(&cp.name, "pending", "", "");
+                continue;
+            }
         }
-        Err(e) => {
-            fail_node(payload, &cp.name, "etcd snapshot", &e.to_string());
-            return Ok(());
-        }
+        let size = match sshc.scp_back(&cp.address, &remote, &local).await {
+            Ok(s) => s,
+            Err(e) => {
+                fail_node(payload, &cp.name, "etcd snapshot scp", &e.to_string());
+                return Ok(());
+            }
+        };
+        payload.etcd_snapshot_path = Some(local.to_string_lossy().to_string());
+        payload.etcd_snapshot_size = size as i64;
+        // TLS etcd (kubespray): the snapshot's member list carries https peer
+        // URLs; etcd recovery must restore+reconfigure it (flag for recover).
+        payload.etcd_tls = true;
+        payload.log(&format!("etcd snapshot saved from {} ({} bytes, TLS)", cp.name, size));
+        payload.set_state(&cp.name, "pending", "", "");
+        // Register as a ClusterBackup row (reuses the backup machinery + retention).
+        let _ = (pool, jwt_secret);
+        payload.phase = "control-plane".into();
+        return Ok(());
     }
-
-    let size = sshc.scp_back(&cp.address, &remote, &local).await?;
-    payload.etcd_snapshot_path = Some(local.to_string_lossy().to_string());
-    payload.etcd_snapshot_size = size as i64;
-    // Register as a ClusterBackup row (reuses the backup machinery + retention).
-    let _ = (pool, jwt_secret);
-    payload.set_state(&cp.name, "pending", "", "");
-    payload.log(&format!("etcd snapshot saved ({} bytes)", size));
-    payload.phase = "control-plane".into();
+    fail_node(payload, "", "etcd snapshot", "no surviving old CP available for the snapshot");
     Ok(())
 }
 
@@ -567,9 +611,24 @@ fn build_install_config(
         cfg.push_str(&format!("    image: registry.k8s.io/kube-proxy:{v}\n", v = ident.k8s_version));
         cfg.push_str("  scheduler:\n");
         cfg.push_str(&format!("    image: registry.k8s.io/kube-scheduler:{v}\n", v = ident.k8s_version));
-        // Fresh etcd CA (old kubeadm etcd has no TLS; recovered data is plain KV).
-        let etcd_crt = b64(&ident.etcd_ca_crt);
-        let etcd_key = b64(&ident.etcd_ca_key);
+        // etcd CA. For an OVERTAKE of a TLS etcd (kubespray: https peer
+        // URLs, per-member certs) reuse the ORIGINAL etcd CA + key when both
+        // were harvested, so Talos issues each member a cert from the same CA
+        // the recovered snapshot's etcd data expects (etcd re-signs member
+        // certs as nodes join). Without them, fall back to the fresh CA pair.
+        let (etcd_crt, etcd_key) = if ident.etcd_ca_crt_orig.is_empty()
+            || ident.etcd_ca_key_orig.is_empty()
+        {
+            (
+                b64(&ident.etcd_ca_crt),
+                b64(&ident.etcd_ca_key),
+            )
+        } else {
+            (
+                b64(&ident.etcd_ca_crt_orig),
+                b64(&ident.etcd_ca_key_orig),
+            )
+        };
         cfg.push_str("  etcd:\n");
         cfg.push_str("    ca:\n");
         cfg.push_str(&format!("      crt: {etcd_crt}\n"));
@@ -581,7 +640,7 @@ fn build_install_config(
             cfg.push_str(&format!("    crt: {}\n", crate::controllers::provision::b64_le(k8s_crt)));
         }
         if is_cp {
-            // CP always needs an etcd CA (fresh).
+            // CP always needs an etcd CA (fresh when original unknown).
             let etcd_crt = crate::controllers::provision::b64_le(&ident.etcd_ca_crt);
             let etcd_key = crate::controllers::provision::b64_le(&ident.etcd_ca_key);
             cfg.push_str("  etcd:\n");
@@ -609,12 +668,17 @@ async fn ensure_cluster_identity(
     use crate::controllers::provision::{
         b64_random, bootstrap_token, generate_ca_issuer, generate_server_cert,
     };
-    // Overtake keeps a stable cluster name. The API-server identity (k8s CA,
-    // aggregator CA, SA key) is CARRIED OVER from a running old control plane
-    // so the recovered cluster keeps its original identity (existing client
-    // certs + SA tokens validate). The Talos machine CA + membership
-    // id/secret/token are fresh (Talos-specific; the old cluster is kubeadm).
-    let cluster_name = "phobos";
+    // Overtake keeps the cluster's existing name. The API-server identity
+    // (k8s CA, aggregator CA, SA key) is CARRIED OVER from a running old
+    // control plane so the recovered cluster keeps its original identity
+    // (existing client certs + SA tokens validate). The Talos machine CA +
+    // membership id/secret/token are fresh (Talos-specific; the old cluster is
+    // kubeadm).
+    let cluster_name = if payload.cluster_name.is_empty() {
+        "phobos".to_string()
+    } else {
+        payload.cluster_name.clone()
+    };
     let machine_ca = generate_ca_issuer(&format!("{cluster_name}-talos-ca"), 3650)?;
     let etcd_ca = generate_ca_issuer(&format!("{cluster_name}-etcd-ca"), 3650)?;
 
@@ -682,6 +746,10 @@ async fn ensure_cluster_identity(
         cluster_domain: orig.as_ref().map(|o| o.cluster_domain.clone()).unwrap_or_else(|| "cluster.local".into()),
         pod_cidr: "10.244.0.0/16".into(),
         secretbox_secret: b64_random(32),
+        etcd_ca_crt_orig: orig.as_ref().map(|o| o.etcd_ca_crt.clone()).unwrap_or_default(),
+        etcd_ca_key_orig: orig.as_ref().map(|o| o.etcd_ca_key.clone()).unwrap_or_default(),
+        etcd_server_crt: orig.as_ref().map(|o| o.etcd_server_crt.clone()).unwrap_or_default(),
+        etcd_server_key: orig.as_ref().map(|o| o.etcd_server_key.clone()).unwrap_or_default(),
     };
     payload.cluster_identity = Some(ident.clone());
     Ok(ident)
@@ -698,6 +766,16 @@ struct OriginalIdentity {
     k8s_version: String,
     service_cidr: String,
     cluster_domain: String,
+    /// Original (kubespray) etcd CA/server cert/key (PEM). The kubespray etcd
+    /// cluster uses TLS peer URLs (https://IP:2380) with per-member certs whose
+    /// SANs cover ALL CPs; recovering that snapshot into a Talos etcd with a
+    /// fresh CA + plaintext peer URLs would fail member re-joins. Reusing the
+    /// original etcd CA (+ key, so Talos can issue member certs from it) keeps
+    /// the recovered etcd cluster intact.
+    etcd_ca_crt: String,
+    etcd_ca_key: String,
+    etcd_server_crt: String,
+    etcd_server_key: String,
 }
 
 /// Extract the original cluster's PKI + control-plane settings from a RUNNING
@@ -727,6 +805,10 @@ echo "END SERVICE_CIDR"
 echo "BEGIN CLUSTER_DOMAIN"
 echo cluster.local
 echo "END CLUSTER_DOMAIN"
+emit ETCD_CA_CRT /etc/ssl/etcd/ssl/ca.pem
+emit ETCD_CA_KEY /etc/ssl/etcd/ssl/ca-key.pem
+emit ETCD_SERVER_CRT /etc/ssl/etcd/ssl/member-$(hostname).pem
+emit ETCD_SERVER_KEY /etc/ssl/etcd/ssl/member-$(hostname)-key.pem
 "#;
     let out = match sshc.run(source_cp, cmd).await {
         Ok(o) => o,
@@ -749,21 +831,29 @@ echo "END CLUSTER_DOMAIN"
         k8s_version: block(&out, "K8S_VERSION").unwrap_or_default(),
         service_cidr: block(&out, "SERVICE_CIDR").unwrap_or_default(),
         cluster_domain: block(&out, "CLUSTER_DOMAIN").unwrap_or_else(|| "cluster.local".into()),
+        etcd_ca_crt: block(&out, "ETCD_CA_CRT").unwrap_or_default(),
+        etcd_server_crt: block(&out, "ETCD_SERVER_CRT").unwrap_or_default(),
+        etcd_server_key: block(&out, "ETCD_SERVER_KEY").unwrap_or_default(),
+        etcd_ca_key: block(&out, "ETCD_CA_KEY").unwrap_or_default(),
     })
 }
 
 /// First CP: `talosctl bootstrap --recover-from <snapshot>` to form its etcd
 /// from the overtaken cluster's snapshot.
 ///
-/// The node just installed Talos and its etcd is in the join loop (Preparing).
-/// `talosctl bootstrap --recover-from <path>` resolves `<path>` on the CLIENT
-/// (deployer) and streams the snapshot to the node over gRPC (EtcdRecover) —
-/// NO file upload / sshd is needed (and SSH was removed from Talos entirely,
-/// so machine.features.ssh does not exist in v1.13). The snapshot already
-/// lives on the deployer from the snapshot phase, so we point straight at it.
+/// Bootstrap a freshly-installed CP from the overtaken snapshot.
 ///
-/// Only the FIRST CP is bootstrapped; the other CPs join automatically once
-/// this one's control-plane endpoint is up (via controlPlane.endpoint).
+/// `talosctl bootstrap --recover-from <snapshot>` resolves `<snapshot>` on the
+/// DEPLOYER and streams it to the node over gRPC (EtcdRecover) — no file
+/// upload / sshd is needed.
+///
+/// TLS etcd (kubespray): the snapshot carries https peer URLs from the OLD
+/// cluster. etcd re-issues member TLS certs from the CA at bootstrap time and
+/// rewrites this node's peer URL to its own address, so the recovered member
+/// is self-consistent; the remaining CPs re-join once converted (their old
+/// member entries are removed during `talosctl etcd remove-member` on adopt —
+/// or they simply overwrite on join, which etcd handles). Plain etcd
+/// (kubeadm): single-member fresh list, same mechanism.
 async fn do_first_cp_recover(
     _pool: &DbPool,
     _jwt_secret: &str,
@@ -777,8 +867,9 @@ async fn do_first_cp_recover(
     // cached in the payload, so no SSH re-extraction happens here).
     let tc = build_node_talosconfig(&ensure_cluster_identity(sshc, payload).await?, &node.address);
     let endpoint = talos_endpoint(&node.address);
-    payload.set_state(&node.name, "recover", "bootstrap --recover-from (streaming snapshot)", "");
-    payload.log(&format!("{} bootstrapping etcd from snapshot {}", node.name, path));
+    let how = if payload.etcd_tls { "TLS etcd" } else { "plain etcd" };
+    payload.set_state(&node.name, "recover", &format!("bootstrap --recover-from ({how})"), "");
+    payload.log(&format!("{} bootstrapping etcd from snapshot {} ({how})", node.name, path));
     // --recover-from points at the LOCAL deployer path; the client streams it.
     TalosctlClient::bootstrap_recover_etcd(&endpoint, &path, Some(&tc)).await
 }
@@ -944,6 +1035,10 @@ mod tests {
             cluster_domain: "cluster.local".into(),
             pod_cidr: "10.244.0.0/16".into(),
             secretbox_secret: "c2VjcmV0Ym94".into(),
+            etcd_ca_crt_orig: String::new(),
+            etcd_ca_key_orig: String::new(),
+            etcd_server_crt: String::new(),
+            etcd_server_key: String::new(),
         }
     }
 

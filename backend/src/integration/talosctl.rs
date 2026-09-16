@@ -460,6 +460,15 @@ impl TalosctlClient {
         Ok(())
     }
 
+    /// Run an arbitrary talosctl command with the (optional) per-call
+    /// talosconfig. Returns stdout (error -> AppError).
+    pub async fn run_raw(args: &[String], talosconfig: Option<&str>) -> Result<String, AppError> {
+        Self::ensure_installed().await?;
+        let mut full: Vec<String> = args.to_vec();
+        full.extend(Self::talosconfig_args(talosconfig));
+        Self::run(&full).await
+    }
+
     /// Bootstrap a freshly-installed control plane, recovering its etcd from a
     /// snapshot that has already been uploaded to the NODE (e.g. via SSH scp —
     /// v1.13 talosctl has no file-upload command).
