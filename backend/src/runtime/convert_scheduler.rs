@@ -617,8 +617,10 @@ fn build_install_config(
     // Enable serial console on the installed system so SOL (IPMI) works for
     // debugging. The kexec boot has console=ttyS0 in its append line, but the
     // GRUB config written by the installer does NOT inherit those params.
+    // NOTE: iLO4 SOL runs at 115200 baud; a bare console=ttyS0 defaults to
+    // 9600 and produces silent SOL after GRUB handoff. Always set the baud.
     cfg.push_str("    extraKernelArgs:\n");
-    cfg.push_str("      - console=ttyS0\n");
+    cfg.push_str("      - console=ttyS0,115200\n");
     cfg.push_str("      - slab_nomerge\n");
     cfg.push_str("      - pti=on\n");
     // Cluster identity. For an OVERTAKE the CP must carry the ORIGINAL cluster

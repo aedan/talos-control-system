@@ -90,7 +90,7 @@ pub fn standard_asset_urls(mirror_base: &str, version: &str, arch: &str) -> (Str
 /// `extra` allows the caller to append further params.
 pub fn kexec_append(network: &NodeNetworkCapture, hostname: &str, extra: &str) -> String {
     let mut a = String::from(
-        "console=tty0 console=ttyS0 talos.platform=metal slab_nomerge pti=on",
+        "console=tty0 console=ttyS0,115200 talos.platform=metal slab_nomerge pti=on",
     );
 
     // Kernel-level static network so the link is up before Talos userspace.
