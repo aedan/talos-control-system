@@ -745,13 +745,49 @@ async fn ensure_cluster_identity(
         .find(|n| n.role == "control-plane" || n.role == "controlplane")
         .map(|n| n.address.clone())
         .unwrap_or_default();
-    let endpoint = if cp_addr.is_empty() {
-        "https://127.0.0.1:6443".into()
-    } else {
+    // Worker-only overtakes have no CP in the node list, so cp_addr is empty.
+    // The operator supplies the EXISTING running CP explicitly
+    // (payload.control_plane_endpoint) -- without it the endpoint would default
+    // to 127.0.0.1:6443 and the workers could never join the cluster plane
+    // (kubelet/apiserver can't reach the CP -> node stuck "rebooting into Talos").
+    let endpoint = if !cp_addr.is_empty() {
         format!("https://{cp_addr}:6443")
+    } else if let Some(ref explicit) = payload.control_plane_endpoint {
+        let e = explicit.trim();
+        if e.is_empty() {
+            "https://127.0.0.1:6443".into()
+        } else if let Some(hostport) = e.strip_prefix("https://") {
+            format!("https://{hostport}")
+        } else if let Some(hostport) = e.strip_prefix("http://") {
+            format!("https://{hostport}")
+        } else if e.contains(':') {
+            format!("https://{e}")
+        } else {
+            format!("https://{e}:6443")
+        }
+    } else {
+        "https://127.0.0.1:6443".into()
     };
     let admin_sans: Vec<String> = if cp_addr.is_empty() {
-        vec!["localhost".into(), "127.0.0.1".into()]
+        // Worker-only overtake: include the explicit CP host (if given) so the
+        // admin cert is valid for the real control plane, plus loopback.
+        let mut sans = vec!["localhost".into(), "127.0.0.1".into()];
+        if let Some(ref explicit) = payload.control_plane_endpoint {
+            let e = explicit.trim();
+            if !e.is_empty() {
+                let host = e
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .split(':')
+                    .next()
+                    .unwrap_or(e)
+                    .trim();
+                if !host.is_empty() && !sans.iter().any(|s| s == host) {
+                    sans.push(host.to_string());
+                }
+            }
+        }
+        sans
     } else {
         vec!["localhost".into(), cp_addr.clone()]
     };

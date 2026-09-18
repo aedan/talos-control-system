@@ -93,6 +93,11 @@ pub struct ConvertJobPayload {
     /// firmware (e.g. bnx2x) and a locally-patched image is available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_image_override: Option<String>,
+    /// Explicit control-plane endpoint supplied at job start, for worker-only
+    /// overtakes (no CP in the node list). Used by ensure_cluster_identity when
+    /// deriving the join endpoint; empty when a CP node is present in the plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane_endpoint: Option<String>,
     pub steps_log: Vec<String>,
 }
 
@@ -440,6 +445,7 @@ impl ConvertController {
             etcd_snapshot_size: 0,
             cluster_identity: None,
             install_image_override: body.install_image.clone(),
+            control_plane_endpoint: body.control_plane_endpoint.clone(),
             steps_log: vec![format!("{now} convert job created ({} nodes)", body.nodes.len())],
         };
 
@@ -552,6 +558,13 @@ pub struct StartBody {
     /// NIC firmware baked in).
     #[serde(default)]
     pub install_image: Option<String>,
+    /// Explicit control-plane endpoint for worker-only overtakes, e.g.
+    /// "172.20.0.55" or "https://172.20.0.55:6443". Required when the node
+    /// list contains no control-plane node (a worker-only convert); otherwise
+    /// the endpoint defaults to 127.0.0.1:6443 and the workers can never join
+    /// the running cluster plane.
+    #[serde(default)]
+    pub control_plane_endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
