@@ -431,6 +431,51 @@ pub async fn resolve_standard_assets(
     })
 }
 
+/// Factory Image Factory URLs for a **kexec-loadable** kernel + initramfs
+/// (bzImage, not the UEFI `vmlinuz.efi` metal-installer blob). These carry
+/// the schematic's system extensions (bnx2-bnx2x firmware, iscsi-tools,
+/// nfs-utils, …) in the initramfs, which is what the convert kexec needs.
+pub fn factory_boot_asset_urls(
+    factory_base: &str,
+    schematic: &str,
+    version: &str,
+    arch: &str,
+) -> (String, String) {
+    let v = norm_version(version);
+    let base = factory_base.trim_end_matches('/');
+    (
+        format!("{base}/image/{schematic}/{v}/kernel-{arch}"),
+        format!("{base}/image/{schematic}/{v}/initramfs-{arch}.xz"),
+    )
+}
+
+/// Download the factory schematic kernel + initramfs into `asset_dir` and
+/// return them as kexec assets. Unlike [`resolve_factory_assets`] this does
+/// **not** pull the OCI metal-installer (`vmlinuz.efi`); `kexec -l` cannot
+/// load PE32+ on legacy BIOS boxes.
+pub async fn resolve_factory_boot_assets(
+    factory_base: &str,
+    schematic: &str,
+    version: &str,
+    arch: &str,
+    asset_dir: &Path,
+) -> Result<KexecAssets, AppError> {
+    let (kurl, iurl) = factory_boot_asset_urls(factory_base, schematic, version, arch);
+    let dir = asset_dir
+        .join("factory")
+        .join(schematic)
+        .join(norm_version(version))
+        .join(arch);
+    let kernel = dir.join(format!("kernel-{arch}"));
+    let initramfs = dir.join(format!("initramfs-{arch}.xz"));
+    download_file(&kurl, &kernel).await?;
+    download_file(&iurl, &initramfs).await?;
+    Ok(KexecAssets {
+        kernel_path: kernel.to_string_lossy().to_string(),
+        initramfs_path: initramfs.to_string_lossy().to_string(),
+    })
+}
+
 /// Resolve a locally-provisioned **custom** installer asset pair.
 ///
 /// The stock v1.13.10 installer kernel (`6.18.48-talos`) carries `bnx2x.ko`
@@ -680,6 +725,26 @@ mod tests {
         );
         assert!(k.ends_with("/v1.13.7/vmlinuz-amd64"));
         assert!(i.ends_with("/v1.13.7/initramfs-amd64.xz"));
+    }
+
+    #[test]
+    fn factory_boot_asset_urls_are_kexec_bzimage_not_efi() {
+        let (k, i) = factory_boot_asset_urls(
+            "https://factory.talos.dev",
+            "abc123schematic",
+            "v1.13.10",
+            "amd64",
+        );
+        assert_eq!(
+            k,
+            "https://factory.talos.dev/image/abc123schematic/v1.13.10/kernel-amd64"
+        );
+        assert_eq!(
+            i,
+            "https://factory.talos.dev/image/abc123schematic/v1.13.10/initramfs-amd64.xz"
+        );
+        assert!(!k.contains("vmlinuz.efi"));
+        assert!(!i.contains("metal-installer"));
     }
 
     #[test]

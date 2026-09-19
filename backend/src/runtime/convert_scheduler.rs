@@ -22,7 +22,7 @@ use crate::controllers::convert::{
 use crate::db::pool::DbPool;
 use crate::db::repos::{self, provision_job::ProvisionJob};
 use crate::integration::kexec;
-use crate::integration::network_capture::render_node_network_yaml;
+use crate::integration::network_capture::{network_usable, render_node_network_yaml, NetworkCapture};
 use crate::integration::ssh::SshClient;
 use crate::integration::talosctl::TalosctlClient;
 use crate::utils::secrets;
@@ -329,6 +329,9 @@ async fn step_node_phase(
                 Ok(true) => match do_install(pool, jwt_secret, factory, metal_pxe, sshc, payload, cluster_id, &node, is_first_cp).await {
                     Ok(()) => {
                         payload.set_state(&node.name, "reboot", "waiting for Talos on disk", "");
+                        if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == node.name) {
+                            s.attempts = 0;
+                        }
                         payload.log(&format!("{} install issued; waiting for boot", node.name));
                     }
                     Err(e) => fail_node(payload, &node.name, "install", &e.to_string()),
@@ -346,12 +349,56 @@ async fn step_node_phase(
                     payload.set_state(&node.name, "recover", "etcd recover + bootstrap", "");
                     payload.log(&format!("{} booted; recovering etcd + bootstrap", node.name));
                 } else {
-                    payload.set_state(&node.name, "done", "joined / booted", "");
-                    payload.log(&format!("{} booted as Talos; done", node.name));
+                    payload.set_state(&node.name, "configure", "apply captured machine config", "");
+                    payload.log(&format!("{} Talos apid up; pushing captured network config", node.name));
+                    if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == node.name) {
+                        s.attempts = 0;
+                    }
                 }
             }
-            Ok(false) => payload.log(&format!("{} still rebooting into Talos", node.name)),
+            Ok(false) => {
+                if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == node.name) {
+                    s.attempts += 1;
+                    if s.attempts > 60 {
+                        s.status = "failed".into();
+                        s.error = "Talos apid :50000 never came up after install (60 probes)".into();
+                        payload.log(&format!("PHASE FAILED: {} apid never came up after install", node.name));
+                    } else {
+                        payload.log(&format!("{} still rebooting into Talos", node.name));
+                    }
+                } else {
+                    payload.log(&format!("{} still rebooting into Talos", node.name));
+                }
+            }
             Err(e) => payload.log(&format!("{} probe: {e}", node.name)),
+        },
+        "configure" => match do_post_boot_apply(pool, jwt_secret, factory, sshc, payload, cluster_id, &node).await {
+            Ok(()) => {
+                payload.set_state(&node.name, "done", "machine config applied", "");
+                payload.log(&format!("{} captured network applied to running Talos", node.name));
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let attempts = payload
+                    .node_states
+                    .iter()
+                    .find(|s| s.name == node.name)
+                    .map(|s| s.attempts)
+                    .unwrap_or(0)
+                    + 1;
+                if attempts > 12 {
+                    fail_node(payload, &node.name, "configure", &msg);
+                } else {
+                    if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == node.name) {
+                        s.attempts = attempts;
+                        s.current_step = format!("apply-config retry {attempts}/12");
+                    }
+                    payload.log(&format!(
+                        "{} post-boot apply failed (attempt {attempts}): {msg}",
+                        node.name
+                    ));
+                }
+            }
         },
         "recover" => match do_first_cp_recover(pool, jwt_secret, sshc, payload, cluster_id, &node).await {
             Ok(()) => {
@@ -396,6 +443,49 @@ async fn step_node_phase(
     Ok(())
 }
 
+/// Disk-install image ref: operator override (local patched registry) wins,
+/// otherwise the factory metal-installer for this job's schematic (the 3
+/// required convert modules plus any extras).
+fn convert_disk_image(factory: &FactoryConfig, payload: &ConvertJobPayload) -> String {
+    if let Some(r) = payload.install_image_override.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        return r.to_string();
+    }
+    kexec::installer_image(
+        factory,
+        &payload.talos_version,
+        &payload.modules,
+        payload.schematic.as_deref(),
+    )
+    .ref_
+}
+
+/// Refresh the node's captured network over SSH immediately before kexec.
+/// Falls back to the payload snapshot if live capture fails.
+async fn refresh_node_network(sshc: &SshClient, payload: &mut ConvertJobPayload, node: &mut ConvertNodePlan) {
+    let cap = NetworkCapture::new(sshc.clone());
+    match cap.capture(&node.address).await {
+        Ok(res) => {
+            node.network = res.network.clone();
+            node.drivers = res.drivers.clone();
+            if let Some(p) = payload.nodes.iter_mut().find(|n| n.name == node.name) {
+                p.network = res.network;
+                p.drivers = res.drivers;
+                if !res.kubelet_cert.is_empty() {
+                    p.kubelet_cert = res.kubelet_cert;
+                    p.kubelet_key = res.kubelet_key;
+                }
+            }
+            payload.log(&format!("{} live network recaptured before kexec", node.name));
+        }
+        Err(e) => {
+            payload.log(&format!(
+                "{} live recapture failed ({e}); using payload snapshot",
+                node.name
+            ));
+        }
+    }
+}
+
 /// Resolve boot assets + kexec the node into the Talos installer.
 fn do_kexec<'a>(
     sshc: &'a SshClient,
@@ -406,61 +496,67 @@ fn do_kexec<'a>(
 ) -> impl std::future::Future<Output = ()> + 'a {
     async move {
         let arch = "amd64"; // TODO: detect per node
-        // Kexec BOOT vehicle selection:
-        //   1. CUSTOM asset (preferred for bnx2x fleets): stock release
-        //      vmlinuz-amd64 + a rebuilt initramfs whose rootfs carries the
-        //      bnx2x *firmware*. The stock initramfs has the signed bnx2x.ko
-        //      but an EMPTY /usr/lib/firmware/bnx2x, so the NIC loads but never
-        //      gets link. Grafting only firmware sidesteps the vermagic
-        //      (6.18.48-talos) + module.sig_enforce=1 wall that blocks
-        //      grafted .ko files.
-        //   2. STANDARD asset: straight from the release mirror. Fine for NICs
-        //      whose firmware ships in stock; not for bnx2x.
-        // The factory image (UEFI vmlinuz.efi) is NEVER the kexec vehicle —
-        // `kexec -l` can't load a PE32+ image. It remains the install *target*
-        // in do_install.
-    let image = if let Some(override_ref) = &payload.install_image_override {
-        kexec::InstallerImage { ref_: override_ref.clone(), has_modules: true }
-    } else {
-        kexec::installer_image(factory, &payload.talos_version, &payload.modules, payload.schematic.as_deref())
-    };
-        let asset_dir = std::path::PathBuf::from(&metal_pxe.asset_dir);
-        let assets = match kexec::resolve_custom_assets(&asset_dir, &payload.talos_version) {
-            Ok(a) => {
-                payload.log(&format!("{} using custom installer assets (bnx2x firmware grafted)", node.name));
-                Ok(a)
-            }
-            Err(_) => {
-                payload.log(&format!("{} custom assets absent; using standard installer assets", node.name));
-                kexec::resolve_standard_assets(
-                    &metal_pxe.mirror_base,
-                    &payload.talos_version,
-                    arch,
-                    &asset_dir,
-                )
-                .await
-            }
-        };
-    let append = kexec::kexec_append(&node.network, &node.name, "");
-    match assets {
-        Ok(a) => {
-            // A PREVIOUS attempt may have already kexec'd this node into the
-            // Talos installer (the transfer or kexec step failed after the
-            // reboot, or the job was retried). Detect it and skip straight to
-            // the install probe instead of re-sending 100MB+ of assets over a
-            // dead sshd.
-            let already_installer = probe_talos_up(&node.address).await.unwrap_or(false);
-            if already_installer {
-                payload.log(&format!("{} already in Talos installer (previous kexec landed); skipping transfer", node.name));
-            } else if let Err(e) = kexec::kexec_node(sshc, &node.address, &a, &append).await {
-                fail_node(payload, &node.name, "kexec", &e.to_string());
-                return;
-            }
-            payload.set_state(&node.name, "kexec", "kexec issued; node rebooting", "");
-            payload.log(&format!("{} kexec issued (install target {})", node.name, image.ref_));
+        let mut node = node.clone();
+        refresh_node_network(sshc, payload, &mut node).await;
+        if !network_usable(&node.network) {
+            fail_node(
+                payload,
+                &node.name,
+                "kexec",
+                "no usable captured network (need static IP + gateway) — refusing kexec",
+            );
+            return;
         }
-        Err(e) => fail_node(payload, &node.name, "resolve-installer", &e.to_string()),
-    }
+
+        let disk_image = convert_disk_image(factory, payload);
+        let asset_dir = std::path::PathBuf::from(&metal_pxe.asset_dir);
+
+        // Kexec BOOT vehicle: factory schematic kernel+initramfs (bzImage),
+        // which bakes in bnx2-bnx2x / iscsi-tools / nfs-utils. The factory
+        // *metal-installer* OCI (`vmlinuz.efi`) is NOT kexec-loadable on
+        // legacy BIOS; it remains the on-disk install target only.
+        // Stock+firmware-graft custom assets do NOT include iscsi/nfs and
+        // must not be preferred when a schematic is present.
+        let Some(schematic) = payload.schematic.as_deref() else {
+            fail_node(
+                payload,
+                &node.name,
+                "resolve-installer",
+                "convert requires a factory schematic (bnx2-bnx2x, iscsi-tools, nfs-utils)",
+            );
+            return;
+        };
+        let assets = kexec::resolve_factory_boot_assets(
+            &factory.normalized_base(),
+            schematic,
+            &payload.talos_version,
+            arch,
+            &asset_dir,
+        )
+        .await;
+        let append = kexec::kexec_append(&node.network, &node.name, "");
+        match assets {
+            Ok(a) => {
+                payload.log(&format!(
+                    "{} kexec assets: factory schematic {schematic} modules [{}]",
+                    node.name,
+                    payload.modules.join(", ")
+                ));
+                let already_installer = probe_talos_up(&node.address).await.unwrap_or(false);
+                if already_installer {
+                    payload.log(&format!(
+                        "{} already in Talos installer (previous kexec landed); skipping transfer",
+                        node.name
+                    ));
+                } else if let Err(e) = kexec::kexec_node(sshc, &node.address, &a, &append).await {
+                    fail_node(payload, &node.name, "kexec", &e.to_string());
+                    return;
+                }
+                payload.set_state(&node.name, "kexec", "kexec issued; node rebooting", "");
+                payload.log(&format!("{} kexec issued (install target {disk_image})", node.name));
+            }
+            Err(e) => fail_node(payload, &node.name, "resolve-installer", &e.to_string()),
+        }
     }
 }
 
@@ -520,7 +616,43 @@ async fn node_install_config(
     cluster_id: Uuid,
     node: &ConvertNodePlan,
 ) -> Result<String, AppError> {
-    let image = kexec::installer_image(factory, &payload.talos_version, &payload.modules, payload.schematic.as_deref());
+    node_machine_config(pool, jwt_secret, factory, sshc, payload, cluster_id, node, true).await
+}
+
+/// After the node has booted Talos from disk, push the captured-network
+/// machine config over apid (no install.wipe — that would re-image).
+async fn do_post_boot_apply(
+    pool: &DbPool,
+    jwt_secret: &str,
+    factory: &FactoryConfig,
+    sshc: &SshClient,
+    payload: &mut ConvertJobPayload,
+    cluster_id: Uuid,
+    node: &ConvertNodePlan,
+) -> Result<(), AppError> {
+    let cfg = node_machine_config(pool, jwt_secret, factory, sshc, payload, cluster_id, node, false).await?;
+    let ident = ensure_cluster_identity(sshc, payload).await?;
+    let tc = build_node_talosconfig(&ident, &node.address);
+    let endpoint = talos_endpoint(&node.address);
+    payload.log(&format!("{} applying captured machine config (no wipe)", node.name));
+    TalosctlClient::apply_config(&endpoint, &cfg, false, false, Some(&tc)).await
+}
+
+/// Build the machine config for a node. `with_install` includes the
+/// `machine.install` wipe/image block used by the live installer; the
+/// post-boot apply omits it so networking can be pushed without re-imaging.
+#[allow(clippy::too_many_arguments)]
+async fn node_machine_config(
+    pool: &DbPool,
+    jwt_secret: &str,
+    factory: &FactoryConfig,
+    sshc: &SshClient,
+    payload: &mut ConvertJobPayload,
+    cluster_id: Uuid,
+    node: &ConvertNodePlan,
+    with_install: bool,
+) -> Result<String, AppError> {
+    let image = convert_disk_image(factory, payload);
     let disk = "/dev/sda"; // overtake: install to the boot disk; ceph OSDs are sdb+
     let k8s_ca = stored_kubeconfig_ca(pool, jwt_secret, cluster_id).await.unwrap_or_default();
     let is_cp = node.role == "control-plane" || node.role == "controlplane";
@@ -533,7 +665,7 @@ async fn node_install_config(
         is_cp,
         &network_yaml,
         disk,
-        &image.ref_,
+        &image,
         &ident,
         &k8s_ca,
         // Overtake: true when the original cluster PKI was extracted, so the CP
@@ -541,6 +673,7 @@ async fn node_install_config(
         !ident.k8s_ca_crt.is_empty(),
         &node.kubelet_cert,
         &node.kubelet_key,
+        with_install,
     );
     // Debug: log the network section (where YAML decode errors land) so a
     // malformed block is visible in the job log without dumping the whole
@@ -582,6 +715,7 @@ fn build_install_config(
     full_identity: bool,
     kubelet_cert: &str,
     kubelet_key: &str,
+    with_install: bool,
 ) -> String {
     let mut cfg = String::new();
     cfg.push_str("version: v1alpha1\n");
@@ -608,21 +742,23 @@ fn build_install_config(
         cfg.push_str(&format!("    - crt: {ca_crt_b64}\n"));
     }
     cfg.push_str(&format!("  token: {}\n", ident.machine_token));
-    cfg.push_str("  install:\n");
-    cfg.push_str(&format!("    disk: {disk}\n"));
-    // Wipe only the install disk (/dev/sda). Talos does not touch the other
-    // disks (sdb..sdk hold ceph OSDs), so this is safe for the overtake.
-    cfg.push_str("    wipe: true\n");
-    cfg.push_str(&format!("    image: {image_ref}\n"));
-    // Enable serial console on the installed system so SOL (IPMI) works for
-    // debugging. The kexec boot has console=ttyS0 in its append line, but the
-    // GRUB config written by the installer does NOT inherit those params.
-    // NOTE: iLO4 SOL runs at 115200 baud; a bare console=ttyS0 defaults to
-    // 9600 and produces silent SOL after GRUB handoff. Always set the baud.
-    cfg.push_str("    extraKernelArgs:\n");
-    cfg.push_str("      - console=ttyS0,115200\n");
-    cfg.push_str("      - slab_nomerge\n");
-    cfg.push_str("      - pti=on\n");
+    if with_install {
+        cfg.push_str("  install:\n");
+        cfg.push_str(&format!("    disk: {disk}\n"));
+        // Wipe only the install disk (/dev/sda). Talos does not touch the other
+        // disks (sdb..sdk hold ceph OSDs), so this is safe for the overtake.
+        cfg.push_str("    wipe: true\n");
+        cfg.push_str(&format!("    image: {image_ref}\n"));
+        // Enable serial console on the installed system so SOL (IPMI) works for
+        // debugging. The kexec boot has console=ttyS0 in its append line, but the
+        // GRUB config written by the installer does NOT inherit those params.
+        // NOTE: iLO4 SOL runs at 115200 baud; a bare console=ttyS0 defaults to
+        // 9600 and produces silent SOL after GRUB handoff. Always set the baud.
+        cfg.push_str("    extraKernelArgs:\n");
+        cfg.push_str("      - console=ttyS0,115200\n");
+        cfg.push_str("      - slab_nomerge\n");
+        cfg.push_str("      - pti=on\n");
+    }
     // Cluster identity. For an OVERTAKE the CP must carry the ORIGINAL cluster
     // PKI (k8s CA + key, aggregator/front-proxy CA + key, service-account key)
     // so the static-pod apiserver (gated on secrets.KubernetesRoot, derived
@@ -1140,7 +1276,7 @@ mod tests {
         // `talosctl apply-config --dry-run`.
         let net = "    hostname: cp1\n    interfaces:\n      - interface: bond0\n        mtu: 1500\n";
         let k8s_ca = "-----BEGIN CERTIFICATE-----\nK8s\n-----END CERTIFICATE-----";
-        let cfg = build_install_config("controlplane", true, net, "/dev/sda", "factory.talos.dev/metal-installer/x:v1.13.10", &fake_ident(), k8s_ca, true, "", "");
+        let cfg = build_install_config("controlplane", true, net, "/dev/sda", "factory.talos.dev/metal-installer/x:v1.13.10", &fake_ident(), k8s_ca, true, "", "", true);
         // Root form: version + persist, NO apiVersion/kind/metadata.
         assert!(cfg.starts_with("version: v1alpha1\npersist: true\nmachine:\n"));
         assert!(!cfg.contains("apiVersion:"));
@@ -1198,9 +1334,38 @@ mod tests {
     }
 
     #[test]
+    fn post_boot_config_omits_install_wipe() {
+        let net = "    hostname: w1\n    interfaces:\n      - interface: bond0\n";
+        let cfg = build_install_config("worker", false, net, "/dev/sda", "img:v1", &fake_ident(), "", false, "", "", false);
+        assert!(cfg.contains("  network:\n    hostname: w1"));
+        assert!(!cfg.contains("  install:"));
+        assert!(!cfg.contains("wipe: true"));
+    }
+
+    #[test]
+    fn convert_disk_image_prefers_override_then_factory() {
+        let mut p = ConvertJobPayload::default();
+        p.talos_version = "v1.13.10".into();
+        p.modules = vec![
+            "siderolabs/bnx2-bnx2x".into(),
+            "siderolabs/iscsi-tools".into(),
+            "siderolabs/nfs-utils".into(),
+        ];
+        p.schematic = Some("schem1".into());
+        let factory = FactoryConfig::default();
+        let img = convert_disk_image(&factory, &p);
+        assert!(img.contains("factory.talos.dev/metal-installer/schem1:v1.13.10"));
+        p.install_image_override = Some("https://172.20.0.126:5000/talos-tls:talos-tls".into());
+        assert_eq!(
+            convert_disk_image(&factory, &p),
+            "https://172.20.0.126:5000/talos-tls:talos-tls"
+        );
+    }
+
+    #[test]
     fn build_install_config_worker_uses_accepted_cas() {
         let net = "    interfaces:\n      - interface: bond0\n";
-        let cfg = build_install_config("worker", false, net, "/dev/sda", "img:v1", &fake_ident(), "", false, "", "");
+        let cfg = build_install_config("worker", false, net, "/dev/sda", "img:v1", &fake_ident(), "", false, "", "", true);
         assert!(cfg.contains("  type: worker\n"));
         // Worker: acceptedCAs (crt only, base64-of-PEM), NO machine.ca / NO key.
         let crt_b64 = crate::controllers::provision::b64_le(&fake_ident().machine_ca_crt);

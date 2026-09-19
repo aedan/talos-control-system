@@ -409,6 +409,19 @@ fn address_for_bond(c: &NodeNetworkCapture, bond: &NodeNetworkBond) -> Option<(S
         .map(|i| (i.ip.clone(), i.cidr.clone()))
 }
 
+/// True when the capture has enough to kexec with a static IP (bond or NIC
+/// plus a default gateway). An empty capture must not be kexec'd — the
+/// installer would DHCP-drift or come up with no NIC and never reach :50000.
+pub fn network_usable(c: &NodeNetworkCapture) -> bool {
+    if c.gateway.trim().is_empty() {
+        return false;
+    }
+    if let Some(bond) = c.bonds.first() {
+        return address_for_bond(c, bond).is_some();
+    }
+    c.interfaces.iter().any(|i| !i.ip.is_empty())
+}
+
 /// `<parent>.<id>` -> (parent, id) for a VLAN interface name.
 fn parse_vlan_name(name: &str) -> Option<(String, u32)> {
     let idx = name.rfind('.')?;
@@ -604,5 +617,31 @@ openvswitch
         assert!(y.contains("mtu: 9000"));
         assert!(y.contains("192.168.1.50/24"));
         assert!(y.contains("gateway: 192.168.1.1"));
+    }
+
+    #[test]
+    fn network_usable_requires_gateway_and_ip() {
+        assert!(!network_usable(&NodeNetworkCapture::default()));
+        let mut c = NodeNetworkCapture {
+            interfaces: vec![NodeNetworkInterface {
+                name: "bond0".into(),
+                mtu: 1500,
+                ip: "172.20.0.72".into(),
+                cidr: "22".into(),
+                mac: String::new(),
+            }],
+            bonds: vec![NodeNetworkBond {
+                name: "bond0".into(),
+                mode: "802.3ad".into(),
+                slaves: vec!["eno49".into(), "eno50".into()],
+            }],
+            vlans: vec![],
+            gateway: "172.20.0.1".into(),
+            dns: vec!["172.20.0.126".into()],
+            ovs_bridges: vec![],
+        };
+        assert!(network_usable(&c));
+        c.gateway.clear();
+        assert!(!network_usable(&c));
     }
 }

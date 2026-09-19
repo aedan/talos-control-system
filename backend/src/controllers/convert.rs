@@ -15,11 +15,40 @@ use crate::config::Config;
 use crate::controllers::cluster::ClusterController;
 use crate::db::pool::DbPool;
 use crate::db::repos::{self};
-use crate::integration::network_capture::{NetworkCapture, NodeNetworkCapture};
+use crate::integration::network_capture::{network_usable, NetworkCapture, NodeNetworkCapture};
 use crate::integration::ssh::SshClient;
 use crate::AppError;
 
 pub const JOB_KIND: &str = "convert";
+
+/// Image Factory extensions that must be baked into BOTH the kexec installer
+/// (so the RAM OS has NIC/iSCSI/NFS) and the on-disk install image. A convert
+/// without these three does not come back on this hardware (bnx2x 10Gb, iSCSI
+/// root/tools, NFS). Extra operator-selected modules are kept on top.
+pub const REQUIRED_CONVERT_MODULES: &[&str] = &[
+    "siderolabs/bnx2-bnx2x",
+    "siderolabs/iscsi-tools",
+    "siderolabs/nfs-utils",
+];
+
+/// Union `mods` with [`REQUIRED_CONVERT_MODULES`], preserving operator extras
+/// and the required set. Dedupes by exact name.
+pub fn merge_required_convert_modules(mods: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for m in REQUIRED_CONVERT_MODULES {
+        out.push((*m).to_string());
+    }
+    for m in mods {
+        let t = m.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if !out.iter().any(|x| x == t) {
+            out.push(t.to_string());
+        }
+    }
+    out
+}
 
 // ── payload (persisted on the provision_job row) ──────────────────────────
 
@@ -386,45 +415,68 @@ impl ConvertController {
             .ok_or_else(|| AppError::NotFound("cluster not found".into()))?;
         let machines = repos::machine::list_by_cluster(&self.pool, cluster_id).await?;
         let mut plans = Vec::new();
-        let mut by_name: std::collections::HashMap<String, &crate::db::models::machine::Machine> =
+        let by_name: std::collections::HashMap<String, &crate::db::models::machine::Machine> =
             machines.iter().map(|m| (m.hostname.clone(), m)).collect();
 
-        // Control-plane first, then workers, preserving the requested order.
-        let ordered: Vec<&crate::db::models::machine::Machine> = body
-            .nodes
-            .iter()
-            .filter_map(|n| by_name.get(&n.name))
-            .cloned()
-            .collect();
-
+        // Always SSH-capture each selected node at start so the job payload
+        // holds live bonds/IPs/DNS. The wizard may send a preview snapshot;
+        // we do not trust it as the kexec/machine-config source of truth.
+        let capture = NetworkCapture::new(self.ssh.clone());
         for n in &body.nodes {
             let Some(m) = by_name.get(&n.name) else { continue };
+            if m.address.trim().is_empty() {
+                return Err(AppError::InvalidInput(format!(
+                    "node {}: no address recorded, cannot capture network",
+                    n.name
+                )));
+            }
+            let (network, drivers, kubelet_cert, kubelet_key) = match capture.capture(&m.address).await {
+                Ok(res) => {
+                    let drivers = if n.drivers.is_empty() {
+                        res.drivers
+                    } else {
+                        n.drivers.clone()
+                    };
+                    (res.network, drivers, res.kubelet_cert, res.kubelet_key)
+                }
+                Err(e) => {
+                    return Err(AppError::InvalidInput(format!(
+                        "node {}: SSH network capture failed before kexec ({e})",
+                        n.name
+                    )));
+                }
+            };
+            if !network_usable(&network) {
+                return Err(AppError::InvalidInput(format!(
+                    "node {}: captured network has no static IP/gateway (refusing kexec)",
+                    n.name
+                )));
+            }
             plans.push(ConvertNodePlan {
                 name: n.name.clone(),
                 role: n.role.clone(),
                 address: m.address.clone(),
-                network: n.network.clone(),
-                drivers: n.drivers.clone(),
-                kubelet_cert: n.kubelet_cert.clone(),
-                kubelet_key: n.kubelet_key.clone(),
+                network,
+                drivers,
+                kubelet_cert,
+                kubelet_key,
             });
         }
-        let _ = ordered; // (ordering is driven by body.nodes order)
+        let _ = by_name;
 
-        let schematic = if body.modules.is_empty() {
-            None
-        } else {
-            Some(crate::integration::image_factory::ImageFactoryClient::new(&self.factory.normalized_base())
-                .create_schematic(&body.modules)
-                .await?)
-        };
+        let modules = merge_required_convert_modules(&body.modules);
+        let schematic = Some(
+            crate::integration::image_factory::ImageFactoryClient::new(&self.factory.normalized_base())
+                .create_schematic(&modules)
+                .await?,
+        );
 
         let now = Utc::now();
         let payload = ConvertJobPayload {
             talos_version: body.talos_version,
             cluster_name: cluster.name.clone(),
             etcd_tls: false,
-            modules: body.modules.clone(),
+            modules,
             schematic,
             nodes: plans,
             phase: "snapshot".into(),
@@ -647,6 +699,24 @@ mod tests {
             p.log(&format!("step {i}"));
         }
         assert!(p.steps_log.len() <= 200);
+    }
+
+    #[test]
+    fn merge_required_always_includes_bnx2_iscsi_nfs() {
+        let m = merge_required_convert_modules(&[]);
+        assert_eq!(
+            m,
+            vec![
+                "siderolabs/bnx2-bnx2x".to_string(),
+                "siderolabs/iscsi-tools".to_string(),
+                "siderolabs/nfs-utils".to_string(),
+            ]
+        );
+        let m = merge_required_convert_modules(&["siderolabs/bnx2-bnx2x".into(), "siderolabs/i40e".into()]);
+        assert_eq!(m.len(), 4);
+        assert!(m.contains(&"siderolabs/nfs-utils".to_string()));
+        assert!(m.contains(&"siderolabs/i40e".to_string()));
+        assert_eq!(m.iter().filter(|x| *x == "siderolabs/bnx2-bnx2x").count(), 1);
     }
 
     #[test]

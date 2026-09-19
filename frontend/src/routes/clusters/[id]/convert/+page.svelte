@@ -29,16 +29,23 @@
 
   // ── setup ──────────────────────────────────────────────────────────
   let clusterName = $state('');
-  let talosVersion = $state('v1.13.7');
+  let talosVersion = $state('v1.13.10');
   // Explicit control-plane endpoint for worker-only overtakes (no CP node in
   // the plan). The backend defaults this to 127.0.0.1:6443 when empty and no
   // CP node is present, which breaks the join -- so for worker-only converts
   // the operator must supply the running CP address (e.g. 172.20.0.55).
   let cpEndpoint = $state('');
-  let knownVersions = $state<string[]>(['v1.13.7', 'v1.13.6', 'v1.13.5', 'v1.12.10', 'v1.12.9', 'v1.12.8']);
+  let knownVersions = $state<string[]>(['v1.13.10', 'v1.13.7', 'v1.13.6', 'v1.13.5', 'v1.12.10', 'v1.12.9']);
   let clusterTalos = $state('');
   let extensions = $state<FactoryExtensionItem[]>([]);
-  let selectedModules = $state<Set<string>>(new Set());
+  // bnx2-bnx2x + iscsi-tools + nfs-utils are required on this fleet's kexec
+  // image; the backend also merges them in if the client omits them.
+  const REQUIRED_CONVERT_MODULES = [
+    'siderolabs/bnx2-bnx2x',
+    'siderolabs/iscsi-tools',
+    'siderolabs/nfs-utils',
+  ];
+  let selectedModules = $state<Set<string>>(new Set(REQUIRED_CONVERT_MODULES));
   let factoryBusy = $state(false);
   let factoryError = $state('');
 
@@ -49,8 +56,10 @@
 
   function toggleModule(name: string) {
     const next = new Set(selectedModules);
-    if (next.has(name)) next.delete(name);
-    else next.add(name);
+    if (next.has(name)) {
+      if (REQUIRED_CONVERT_MODULES.includes(name)) return;
+      next.delete(name);
+    } else next.add(name);
     selectedModules = next;
   }
 
@@ -144,7 +153,7 @@
   const canContinue = $derived(!!preview && preview.canConvert && preview.blockers.length === 0);
 
   // ── confirm ────────────────────────────────────────────────────────
-  function orderNodes(): { name: string; role: string }[] {
+  function orderNodes(): ConvertNode[] {
     if (!preview) return [];
     return [...preview.nodes].sort((a, b) => {
       if (a.role === 'control-plane' && b.role !== 'control-plane') return -1;
@@ -168,7 +177,12 @@
       const res = await convertStart(cid, {
         talosVersion,
         modules: [...selectedModules],
-        nodes: orderNodes(),
+        nodes: orderNodes().map((n) => ({
+          name: n.name,
+          role: n.role,
+          network: n.network,
+          drivers: n.drivers,
+        })),
         controlPlaneEndpoint: cpEndpoint.trim() || undefined,
       });
       jobId = res.jobId;
@@ -298,7 +312,9 @@
         <p class="hint">Loading module catalog…</p>
       {:else}
         <p class="hint">
-          Image Factory modules baked into the installer. Select drivers your nodes need.
+          Image Factory modules baked into the kexec installer <em>and</em> the on-disk image.
+          <span class="mono">bnx2-bnx2x</span>, <span class="mono">iscsi-tools</span>, and
+          <span class="mono">nfs-utils</span> are required on this fleet (cannot be unchecked).
         </p>
         <div class="module-picker">
           {#each extensions as f (f.name)}
@@ -306,6 +322,7 @@
               <input
                 type="checkbox"
                 checked={selectedModules.has(f.name)}
+                disabled={REQUIRED_CONVERT_MODULES.includes(f.name)}
                 onchange={() => toggleModule(f.name)}
               />
               <span class="module-name mono">{shortName(f.name)}</span>
@@ -418,8 +435,9 @@
     <div class="confirm-card">
       <p class="confirm-lead">
         About to convert <strong>{preview.nodes.length} node(s)</strong> to Talos
-        <strong class="mono">{talosVersion}</strong>. Order: control-plane first (quorum-safe),
-        then workers, one at a time.
+        <strong class="mono">{talosVersion}</strong>. Each node’s live network is recaptured
+        over SSH immediately before kexec, then pushed as the Talos machine config once
+        apid is up. Order: control-plane first (quorum-safe), then workers, one at a time.
       </p>
 
       {#if selectedModules.size > 0}

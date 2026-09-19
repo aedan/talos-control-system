@@ -108,13 +108,20 @@ export async function convertStart(
   body: {
     talosVersion: string;
     modules: string[];
-    nodes: { name: string; role: string }[];
+    nodes: {
+      name: string;
+      role: string;
+      network?: ConvertNetwork;
+      drivers?: string[];
+    }[];
     /**
      * Explicit control-plane endpoint for worker-only overtakes (no CP node in
      * the plan), e.g. "172.20.0.55" or "https://172.20.0.55:6443". Omit when
      * the plan includes a control-plane node (it's derived from that node).
      */
     controlPlaneEndpoint?: string;
+    /** Optional local/patched install image (disk target). */
+    installImage?: string;
   }
 ): Promise<ConvertStartResult> {
   const res = await client.post(`/clusters/${id}/convert/start`, body);
