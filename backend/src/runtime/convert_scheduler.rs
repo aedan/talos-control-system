@@ -782,18 +782,6 @@ fn build_install_config(
         cfg.push_str(&format!("    - crt: {ca_crt_b64}\n"));
     }
     cfg.push_str(&format!("  token: {}\n", ident.machine_token));
-    if !is_cp {
-        // Phobos (and similar kubespray labs) may have no CNI DaemonSet.
-        // Talos kubelet stays NotReady/NetworkPluginNotReady until a CNI
-        // conflist exists. A host-local bridge is enough for the node to
-        // become Ready; a later CNI DS can replace it.
-        cfg.push_str("  files:\n");
-        cfg.push_str("    - path: /etc/cni/net.d/10-tcs-bridge.conflist\n");
-        cfg.push_str("      permissions: 0o644\n");
-        cfg.push_str("      op: create\n");
-        cfg.push_str("      content: |\n");
-        cfg.push_str("        {\"cniVersion\":\"0.3.1\",\"name\":\"tcs-bridge\",\"plugins\":[{\"type\":\"bridge\",\"bridge\":\"cni0\",\"isDefaultGateway\":true,\"ipMasq\":true,\"ipam\":{\"type\":\"host-local\",\"subnet\":\"10.244.0.0/16\",\"routes\":[{\"dst\":\"0.0.0.0/0\"}]}}]}\n");
-    }
     if with_install {
         cfg.push_str("  install:\n");
         cfg.push_str(&format!("    disk: {disk}\n"));
