@@ -105,7 +105,17 @@ export async function convertPreview(
 
 export async function convertStart(
   id: string,
-  body: { talosVersion: string; modules: string[]; nodes: { name: string; role: string }[] }
+  body: {
+    talosVersion: string;
+    modules: string[];
+    nodes: { name: string; role: string }[];
+    /**
+     * Explicit control-plane endpoint for worker-only overtakes (no CP node in
+     * the plan), e.g. "172.20.0.55" or "https://172.20.0.55:6443". Omit when
+     * the plan includes a control-plane node (it's derived from that node).
+     */
+    controlPlaneEndpoint?: string;
+  }
 ): Promise<ConvertStartResult> {
   const res = await client.post(`/clusters/${id}/convert/start`, body);
   return res as ConvertStartResult;

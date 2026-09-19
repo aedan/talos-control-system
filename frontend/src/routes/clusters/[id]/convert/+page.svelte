@@ -30,6 +30,11 @@
   // ── setup ──────────────────────────────────────────────────────────
   let clusterName = $state('');
   let talosVersion = $state('v1.13.7');
+  // Explicit control-plane endpoint for worker-only overtakes (no CP node in
+  // the plan). The backend defaults this to 127.0.0.1:6443 when empty and no
+  // CP node is present, which breaks the join -- so for worker-only converts
+  // the operator must supply the running CP address (e.g. 172.20.0.55).
+  let cpEndpoint = $state('');
   let knownVersions = $state<string[]>(['v1.13.7', 'v1.13.6', 'v1.13.5', 'v1.12.10', 'v1.12.9', 'v1.12.8']);
   let clusterTalos = $state('');
   let extensions = $state<FactoryExtensionItem[]>([]);
@@ -164,6 +169,7 @@
         talosVersion,
         modules: [...selectedModules],
         nodes: orderNodes(),
+        controlPlaneEndpoint: cpEndpoint.trim() || undefined,
       });
       jobId = res.jobId;
       step = 'monitor';
@@ -426,6 +432,26 @@
         <p class="hint">No Image Factory modules selected.</p>
       {/if}
 
+      {#if cpCount === 0 && workerCount > 0}
+        <div class="cp-endpoint-field">
+          <label class="form-label" for="cp-endpoint">Control-plane endpoint</label>
+          <input
+            id="cp-endpoint"
+            class="form-input mono"
+            type="text"
+            placeholder="172.20.0.55"
+            bind:value={cpEndpoint}
+            title="IP or host[:port] of the running Talos control plane the workers will join. Required for worker-only overtakes."
+          />
+          <p class="hint">
+            No control-plane node is in this plan (worker-only overtake). Enter the address of
+            the running control plane so the workers can join it. If left blank the backend
+            defaults to <span class="mono">127.0.0.1:6443</span> and the workers will never reach
+            the cluster.
+          </p>
+        </div>
+      {/if}
+
       <div class="warning-box">
         <strong>Warning</strong> — An etcd snapshot is taken first. During control-plane
         conversion the API server is briefly unavailable. Workers are drained before
@@ -437,7 +463,7 @@
       <Button variant="ghost" size="sm" title="Return to the preview" onclick={() => (step = 'preview')} disabled={busy}>
         Back
       </Button>
-      <Button variant="danger" size="sm" title="Start the in-place conversion" onclick={startConversion} disabled={busy}>
+      <Button variant="danger" size="sm" title="Start the in-place conversion" onclick={startConversion} disabled={busy || (cpCount === 0 && workerCount > 0 && cpEndpoint.trim() === '')}>
         {busy ? 'Starting…' : 'Start conversion'}
       </Button>
     </div>
