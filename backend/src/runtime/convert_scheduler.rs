@@ -363,6 +363,7 @@ async fn step_node_phase(
                 // :10250 means the node booted Talos; join is via the kubeadm
                 // bootstrap token injected into the live API.
                 let _ = inject_bootstrap_token(pool, jwt_secret, cluster_id, payload).await;
+                let _ = issue_kubelet_csrs(pool, jwt_secret, cluster_id, payload).await;
                 if kube_node_is_talos(pool, jwt_secret, cluster_id, &node.name).await {
                     payload.set_state(&node.name, "done", "joined Kubernetes as Talos", "");
                     payload.log(&format!("{} kubelet up and node OS is Talos; done (apid not required for worker-only)", node.name));
@@ -666,7 +667,8 @@ async fn do_post_boot_apply(
 ) -> Result<(), AppError> {
     let cfg = node_machine_config(pool, jwt_secret, factory, sshc, payload, cluster_id, node, false).await?;
     let k8s_ca = stored_kubeconfig_ca(pool, jwt_secret, cluster_id).await.unwrap_or_default();
-    let ident = ensure_cluster_identity(sshc, payload, &k8s_ca).await?;
+    let kube_server = stored_kubeconfig_server(pool, jwt_secret, cluster_id).await;
+    let ident = ensure_cluster_identity(sshc, payload, &k8s_ca, kube_server.as_deref()).await?;
     let tc = build_node_talosconfig(&ident, &node.address);
     let endpoint = talos_endpoint(&node.address);
     payload.log(&format!("{} applying captured machine config (no wipe)", node.name));
@@ -692,7 +694,8 @@ async fn node_machine_config(
     let k8s_ca = stored_kubeconfig_ca(pool, jwt_secret, cluster_id).await.unwrap_or_default();
     let is_cp = node.role == "control-plane" || node.role == "controlplane";
     let machine_type = if is_cp { "controlplane" } else { "worker" };
-    let ident = ensure_cluster_identity(sshc, payload, &k8s_ca).await?;
+    let kube_server = stored_kubeconfig_server(pool, jwt_secret, cluster_id).await;
+    let ident = ensure_cluster_identity(sshc, payload, &k8s_ca, kube_server.as_deref()).await?;
     let _ = inject_bootstrap_token(pool, jwt_secret, cluster_id, payload).await;
     let ident = payload.cluster_identity.clone().unwrap_or(ident);
     let network_yaml = render_node_network_yaml(&node.network, &node.name);
@@ -779,6 +782,18 @@ fn build_install_config(
         cfg.push_str(&format!("    - crt: {ca_crt_b64}\n"));
     }
     cfg.push_str(&format!("  token: {}\n", ident.machine_token));
+    if !is_cp {
+        // Phobos (and similar kubespray labs) may have no CNI DaemonSet.
+        // Talos kubelet stays NotReady/NetworkPluginNotReady until a CNI
+        // conflist exists. A host-local bridge is enough for the node to
+        // become Ready; a later CNI DS can replace it.
+        cfg.push_str("  files:\n");
+        cfg.push_str("    - path: /etc/cni/net.d/10-tcs-bridge.conflist\n");
+        cfg.push_str("      permissions: 0o644\n");
+        cfg.push_str("      op: create\n");
+        cfg.push_str("      content: |\n");
+        cfg.push_str("        {\"cniVersion\":\"0.3.1\",\"name\":\"tcs-bridge\",\"plugins\":[{\"type\":\"bridge\",\"bridge\":\"cni0\",\"isDefaultGateway\":true,\"ipMasq\":true,\"ipam\":{\"type\":\"host-local\",\"subnet\":\"10.244.0.0/16\",\"routes\":[{\"dst\":\"0.0.0.0/0\"}]}}]}\n");
+    }
     if with_install {
         cfg.push_str("  install:\n");
         cfg.push_str(&format!("    disk: {disk}\n"));
@@ -891,6 +906,7 @@ async fn ensure_cluster_identity(
     sshc: &SshClient,
     payload: &mut ConvertJobPayload,
     k8s_ca: &str,
+    kube_server: Option<&str>,
 ) -> Result<ConvertClusterIdentity, AppError> {
     if let Some(ident) = &payload.cluster_identity {
         return Ok(ident.clone());
@@ -924,7 +940,16 @@ async fn ensure_cluster_identity(
     // (payload.control_plane_endpoint) -- without it the endpoint would default
     // to 127.0.0.1:6443 and the workers could never join the cluster plane
     // (kubelet/apiserver can't reach the CP -> node stuck "rebooting into Talos").
-    let endpoint = if !cp_addr.is_empty() {
+    // Prefer the kubeconfig server URL: it is the API the cluster actually
+    // serves (phobos: 172.20.0.38). A random CP IP (e.g. infra02 .55) can
+    // present a kube-apiserver cert but reject bootstrap tokens (401).
+    let endpoint = if let Some(s) = kube_server.map(str::trim).filter(|s| !s.is_empty()) {
+        if s.starts_with("https://") || s.starts_with("http://") {
+            s.replace("http://", "https://")
+        } else {
+            format!("https://{s}")
+        }
+    } else if !cp_addr.is_empty() {
         format!("https://{cp_addr}:6443")
     } else if let Some(ref explicit) = payload.control_plane_endpoint {
         let e = explicit.trim();
@@ -980,16 +1005,38 @@ async fn ensure_cluster_identity(
         .find(|n| n.address != cp_addr)
         .map(|n| n.address.clone())
         .unwrap_or_else(|| cp_addr.clone());
-    let orig = if source_cp.is_empty() {
-        // Worker-only: harvest PKI from the named live kubeadm CP (SSH).
-        if let Some(host) = explicit_cp_host(payload) {
-            extract_original_identity(sshc, &host).await
-        } else {
-            None
+    let mut harvest_hosts: Vec<String> = Vec::new();
+    if !source_cp.is_empty() {
+        harvest_hosts.push(source_cp.clone());
+    }
+    if let Some(h) = explicit_cp_host(payload) {
+        harvest_hosts.push(h);
+    }
+    if let Some(s) = kube_server {
+        if let Some(h) = s
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .split(':')
+            .next()
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+        {
+            harvest_hosts.push(h.to_string());
         }
-    } else {
-        extract_original_identity(sshc, &source_cp).await
-    };
+    }
+    harvest_hosts.sort();
+    harvest_hosts.dedup();
+    let mut orig: Option<OriginalIdentity> = None;
+    for h in &harvest_hosts {
+        if let Some(o) = extract_original_identity(sshc, h).await {
+            let has_key = !o.k8s_ca_key.is_empty();
+            orig = Some(o);
+            if has_key {
+                break;
+            }
+        }
+    }
 
     let ident = ConvertClusterIdentity {
         machine_ca_crt: machine_ca.pem().to_string(),
@@ -1141,6 +1188,171 @@ async fn inject_bootstrap_token(
     Ok(())
 }
 
+/// Approve + issue kubelet client CSRs for this job's bootstrap token.
+/// kubespray's controller-manager often leaves `kubernetes.io/kube-apiserver-client-kubelet`
+/// CSRs Approved-but-not-Issued; we sign them with the harvested cluster CA.
+async fn issue_kubelet_csrs(
+    pool: &DbPool,
+    jwt_secret: &str,
+    cluster_id: Uuid,
+    payload: &mut ConvertJobPayload,
+) -> Result<(), AppError> {
+    let Some(ident) = payload.cluster_identity.clone() else {
+        return Ok(());
+    };
+    let Some((id, _)) = parse_kubeadm_token(&ident.kube_token) else {
+        return Ok(());
+    };
+    let requestor = format!("system:bootstrap:{id}");
+    let Some(kc) = stored_kubeconfig_yaml(pool, jwt_secret, cluster_id).await else {
+        return Ok(());
+    };
+    let tmpdir = std::path::PathBuf::from("/var/lib/tcs/talosctl-tmp");
+    let _ = tokio::fs::create_dir_all(&tmpdir).await;
+    let kc_path = tmpdir.join(format!("kubeconfig.{}.csr", std::process::id()));
+    tokio::fs::write(&kc_path, &kc)
+        .await
+        .map_err(|e| AppError::Internal(format!("write kubeconfig: {e}")))?;
+    let out = tokio::process::Command::new("kubectl")
+        .env("TCS_INTERNAL", "1")
+        .args(["--kubeconfig", &kc_path.to_string_lossy(), "get", "csr", "-o", "json"])
+        .output()
+        .await
+        .map_err(|e| AppError::Network(format!("kubectl get csr: {e}")))?;
+    if !out.status.success() {
+        let _ = tokio::fs::remove_file(&kc_path).await;
+        return Ok(());
+    }
+    let list: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or(serde_json::json!({}));
+    let items = list.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let ca_key = ident.k8s_ca_key.clone();
+    let ca_crt = ident.k8s_ca_crt.clone();
+    for item in items {
+        let name = item.pointer("/metadata/name").and_then(|v| v.as_str()).unwrap_or("");
+        let user = item.pointer("/spec/username").and_then(|v| v.as_str()).unwrap_or("");
+        if user != requestor || name.is_empty() {
+            continue;
+        }
+        if item.pointer("/status/certificate").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false) {
+            continue;
+        }
+        let _ = tokio::process::Command::new("kubectl")
+            .env("TCS_INTERNAL", "1")
+            .args(["--kubeconfig", &kc_path.to_string_lossy(), "certificate", "approve", name])
+            .output()
+            .await;
+        if ca_key.trim().is_empty() || ca_crt.trim().is_empty() {
+            payload.log(&format!("approved kubelet CSR {name} (no harvested CA key to issue)"));
+            continue;
+        }
+        let req_b64 = item.pointer("/spec/request").and_then(|v| v.as_str()).unwrap_or("");
+        if req_b64.is_empty() {
+            continue;
+        }
+        match sign_kubelet_csr(name, req_b64, &ca_crt, &ca_key, &kc_path).await {
+            Ok(()) => payload.log(&format!("issued kubelet client cert for CSR {name}")),
+            Err(e) => payload.log(&format!("CSR {name} sign failed: {e}")),
+        }
+    }
+    let _ = tokio::fs::remove_file(&kc_path).await;
+    Ok(())
+}
+
+async fn sign_kubelet_csr(
+    name: &str,
+    req_b64: &str,
+    ca_crt: &str,
+    ca_key: &str,
+    kubeconfig: &std::path::Path,
+) -> Result<(), AppError> {
+    let tmpdir = std::path::PathBuf::from("/var/lib/tcs/talosctl-tmp");
+    let req_bytes = base64_decode(req_b64);
+    let csr_path = tmpdir.join(format!("{name}.csr"));
+    let crt_path = tmpdir.join(format!("{name}.crt"));
+    let ca_path = tmpdir.join(format!("{name}.ca.crt"));
+    let key_path = tmpdir.join(format!("{name}.ca.key"));
+    tokio::fs::write(&csr_path, req_bytes)
+        .await
+        .map_err(|e| AppError::Internal(format!("write csr: {e}")))?;
+    tokio::fs::write(&ca_path, ca_crt)
+        .await
+        .map_err(|e| AppError::Internal(format!("write ca: {e}")))?;
+    tokio::fs::write(&key_path, ca_key)
+        .await
+        .map_err(|e| AppError::Internal(format!("write ca key: {e}")))?;
+    let sign = tokio::process::Command::new("openssl")
+        .args([
+            "x509",
+            "-req",
+            "-in",
+            &csr_path.to_string_lossy(),
+            "-CA",
+            &ca_path.to_string_lossy(),
+            "-CAkey",
+            &key_path.to_string_lossy(),
+            "-CAcreateserial",
+            "-out",
+            &crt_path.to_string_lossy(),
+            "-days",
+            "365",
+        ])
+        .output()
+        .await
+        .map_err(|e| AppError::Internal(format!("openssl spawn: {e}")))?;
+    if !sign.status.success() {
+        let err = String::from_utf8_lossy(&sign.stderr);
+        return Err(AppError::Internal(format!("openssl x509 -req: {err}")));
+    }
+    let crt = tokio::fs::read(&crt_path)
+        .await
+        .map_err(|e| AppError::Internal(format!("read issued cert: {e}")))?;
+    let get = tokio::process::Command::new("kubectl")
+        .env("TCS_INTERNAL", "1")
+        .args(["--kubeconfig", &kubeconfig.to_string_lossy(), "get", "csr", name, "-o", "json"])
+        .output()
+        .await
+        .map_err(|e| AppError::Network(format!("kubectl get csr {name}: {e}")))?;
+    let mut doc: serde_json::Value = serde_json::from_slice(&get.stdout)
+        .map_err(|e| AppError::Internal(format!("csr json: {e}")))?;
+    let b64 = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(&crt)
+    };
+    if let Some(status) = doc.get_mut("status") {
+        status["certificate"] = serde_json::Value::String(b64);
+    }
+    let status_path = tmpdir.join(format!("{name}.status.json"));
+    tokio::fs::write(&status_path, serde_json::to_vec(&doc).unwrap_or_default())
+        .await
+        .map_err(|e| AppError::Internal(format!("write csr status: {e}")))?;
+    let put = tokio::process::Command::new("kubectl")
+        .env("TCS_INTERNAL", "1")
+        .args([
+            "--kubeconfig",
+            &kubeconfig.to_string_lossy(),
+            "replace",
+            "--raw",
+            &format!("/apis/certificates.k8s.io/v1/certificatesigningrequests/{name}/status"),
+            "-f",
+            &status_path.to_string_lossy(),
+        ])
+        .output()
+        .await
+        .map_err(|e| AppError::Network(format!("kubectl replace csr status: {e}")))?;
+    let _ = tokio::fs::remove_file(&csr_path).await;
+    let _ = tokio::fs::remove_file(&crt_path).await;
+    let _ = tokio::fs::remove_file(&ca_path).await;
+    let _ = tokio::fs::remove_file(&key_path).await;
+    let _ = tokio::fs::remove_file(&status_path).await;
+    if !put.status.success() {
+        return Err(AppError::Network(format!(
+            "csr status replace: {}",
+            String::from_utf8_lossy(&put.stderr)
+        )));
+    }
+    Ok(())
+}
+
 async fn kube_node_is_talos(
     pool: &DbPool,
     jwt_secret: &str,
@@ -1215,11 +1427,12 @@ async fn extract_original_identity(sshc: &SshClient, source_cp: &str) -> Option<
     // round-trip. PEM files are multi-line; markers make parsing robust.
     let cmd = r#"
 emit() { echo "BEGIN $1"; cat "$2" 2>/dev/null; echo "END $1"; }
-emit K8S_CA_CRT /etc/kubernetes/pki/ca.crt
-emit K8S_CA_KEY /etc/kubernetes/pki/ca.key
-emit AGG_CA_CRT /etc/kubernetes/pki/front-proxy-ca.crt
-emit AGG_CA_KEY /etc/kubernetes/pki/front-proxy-ca.key
-emit SA_KEY /etc/kubernetes/pki/sa.key
+emitfirst() { echo "BEGIN $1"; for f in $2 $3; do [ -f "$f" ] && cat "$f" && break; done; echo "END $1"; }
+emitfirst K8S_CA_CRT /etc/kubernetes/ssl/ca.crt /etc/kubernetes/pki/ca.crt
+emitfirst K8S_CA_KEY /etc/kubernetes/ssl/ca.key /etc/kubernetes/pki/ca.key
+emitfirst AGG_CA_CRT /etc/kubernetes/ssl/front-proxy-ca.crt /etc/kubernetes/pki/front-proxy-ca.crt
+emitfirst AGG_CA_KEY /etc/kubernetes/ssl/front-proxy-ca.key /etc/kubernetes/pki/front-proxy-ca.key
+emitfirst SA_KEY /etc/kubernetes/ssl/sa.key /etc/kubernetes/pki/sa.key
 echo "BEGIN K8S_VERSION"
 grep -oE 'image: registry.k8s.io/kube-apiserver:v[0-9.]+' /etc/kubernetes/manifests/kube-apiserver.yaml 2>/dev/null | head -1 | sed 's#.*kube-apiserver:##'
 echo "END K8S_VERSION"
@@ -1290,7 +1503,8 @@ async fn do_first_cp_recover(
     // talosconfig from the generated identity (already created during do_install;
     // cached in the payload, so no SSH re-extraction happens here).
     let k8s_ca = stored_kubeconfig_ca(pool, jwt_secret, cluster_id).await.unwrap_or_default();
-    let tc = build_node_talosconfig(&ensure_cluster_identity(sshc, payload, &k8s_ca).await?, &node.address);
+    let kube_server = stored_kubeconfig_server(pool, jwt_secret, cluster_id).await;
+    let tc = build_node_talosconfig(&ensure_cluster_identity(sshc, payload, &k8s_ca, kube_server.as_deref()).await?, &node.address);
     let endpoint = talos_endpoint(&node.address);
     let how = if payload.etcd_tls { "TLS etcd" } else { "plain etcd" };
     payload.set_state(&node.name, "recover", &format!("bootstrap --recover-from ({how})"), "");
@@ -1325,6 +1539,15 @@ async fn stored_kubeconfig_ca(pool: &DbPool, jwt_secret: &str, cluster_id: Uuid)
         .and_then(|kc| kc.clusters.into_iter().next())
         .and_then(|cl| cl.cluster.certificate_authority_data)
         .and_then(|b64| String::from_utf8(base64_decode(&b64)).ok())
+}
+
+async fn stored_kubeconfig_server(pool: &DbPool, jwt_secret: &str, cluster_id: Uuid) -> Option<String> {
+    let plain = stored_kubeconfig_yaml(pool, jwt_secret, cluster_id).await?;
+    crate::integration::kubernetes::parse_kubeconfig(&plain)
+        .ok()
+        .and_then(|kc| kc.clusters.into_iter().next())
+        .map(|cl| cl.cluster.server)
+        .filter(|s| !s.trim().is_empty())
 }
 
 fn base64_decode(s: &str) -> Vec<u8> {
