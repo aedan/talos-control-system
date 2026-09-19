@@ -105,13 +105,10 @@ async fn run_one(
         }
     }
 
-    let failed = payload.node_states.iter().any(|s| s.status == "failed");
-    if failed && payload.phase != "done" {
-        let msg = payload.last_error();
-        finish(pool, job.id, &payload, "failed", msg.as_deref()).await?;
-    } else {
-        ConvertController::save_job(pool, job.id, "running", &payload, None).await?;
-    }
+    // A single node failure must not abort the rest of the fleet convert.
+    // Failed nodes are skipped by step_node_phase; the job finishes complete
+    // once every node is done/failed/skipped.
+    ConvertController::save_job(pool, job.id, "running", &payload, None).await?;
     Ok(())
 }
 
