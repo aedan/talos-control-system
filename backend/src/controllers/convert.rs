@@ -127,6 +127,10 @@ pub struct ConvertJobPayload {
     /// deriving the join endpoint; empty when a CP node is present in the plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_plane_endpoint: Option<String>,
+    /// True after the kubeadm bootstrap token from clusterIdentity.kubeToken
+    /// has been applied as a kube-system Secret (worker-only overtake).
+    #[serde(default)]
+    pub bootstrap_token_injected: bool,
     pub steps_log: Vec<String>,
 }
 
@@ -498,6 +502,7 @@ impl ConvertController {
             cluster_identity: None,
             install_image_override: body.install_image.clone(),
             control_plane_endpoint: body.control_plane_endpoint.clone(),
+            bootstrap_token_injected: false,
             steps_log: vec![format!("{now} convert job created ({} nodes)", body.nodes.len())],
         };
 

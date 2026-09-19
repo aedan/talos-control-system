@@ -343,8 +343,10 @@ async fn step_node_phase(
                 Err(e) => payload.log(&format!("{} install probe: {e} (waiting)", node.name)),
             }
         }
-        "reboot" => match probe_talos_up(&node.address).await {
-            Ok(true) => {
+        "reboot" => {
+            let apid = probe_talos_up(&node.address).await.unwrap_or(false);
+            let kubelet = probe_tcp(&node.address, 10250).await;
+            if apid {
                 if is_first_cp {
                     payload.set_state(&node.name, "recover", "etcd recover + bootstrap", "");
                     payload.log(&format!("{} booted; recovering etcd + bootstrap", node.name));
@@ -355,23 +357,45 @@ async fn step_node_phase(
                         s.attempts = 0;
                     }
                 }
-            }
-            Ok(false) => {
-                if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == node.name) {
-                    s.attempts += 1;
-                    if s.attempts > 60 {
-                        s.status = "failed".into();
-                        s.error = "Talos apid :50000 never came up after install (60 probes)".into();
-                        payload.log(&format!("PHASE FAILED: {} apid never came up after install", node.name));
+            } else if kubelet && !is_first_cp {
+                // Worker-only overtake: there is no Talos CP/trustd to issue a
+                // machine cert, so apid (:50000) never listens. Kubelet on
+                // :10250 means the node booted Talos; join is via the kubeadm
+                // bootstrap token injected into the live API.
+                let _ = inject_bootstrap_token(pool, jwt_secret, cluster_id, payload).await;
+                if kube_node_is_talos(pool, jwt_secret, cluster_id, &node.name).await {
+                    payload.set_state(&node.name, "done", "joined Kubernetes as Talos", "");
+                    payload.log(&format!("{} kubelet up and node OS is Talos; done (apid not required for worker-only)", node.name));
+                } else {
+                    let attempts = bump_attempts(payload, &node.name);
+                    if attempts > 120 {
+                        fail_node(
+                            payload,
+                            &node.name,
+                            "reboot",
+                            "Talos kubelet is up but the node never joined Kubernetes (check bootstrap token + cluster CA)",
+                        );
                     } else {
-                        payload.log(&format!("{} still rebooting into Talos", node.name));
+                        payload.log(&format!(
+                            "{} Talos kubelet up (no apid — expected without a Talos CP); waiting for Kubernetes join ({attempts}/120)",
+                            node.name
+                        ));
                     }
+                }
+            } else {
+                let attempts = bump_attempts(payload, &node.name);
+                if attempts > 120 {
+                    fail_node(
+                        payload,
+                        &node.name,
+                        "reboot",
+                        "Talos apid :50000 and kubelet :10250 never came up after install",
+                    );
                 } else {
                     payload.log(&format!("{} still rebooting into Talos", node.name));
                 }
             }
-            Err(e) => payload.log(&format!("{} probe: {e}", node.name)),
-        },
+        }
         "configure" => match do_post_boot_apply(pool, jwt_secret, factory, sshc, payload, cluster_id, &node).await {
             Ok(()) => {
                 payload.set_state(&node.name, "done", "machine config applied", "");
@@ -560,6 +584,15 @@ fn do_kexec<'a>(
     }
 }
 
+fn bump_attempts(payload: &mut ConvertJobPayload, name: &str) -> u32 {
+    if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == name) {
+        s.attempts = s.attempts.saturating_add(1);
+        s.attempts
+    } else {
+        1
+    }
+}
+
 /// Probe: is the node's Talos API reachable (TCP connect)?
 /// The Talos apid listens on port 50000 (constants.ApidPort) in BOTH the
 /// installer/maintenance phase and once the system is installed. Ports 5000/
@@ -568,11 +601,12 @@ fn do_kexec<'a>(
 /// `connect(address)` targets TCP/80, which Talos never opens, so we must
 /// append the explicit port.
 async fn probe_talos_up(address: &str) -> Result<bool, AppError> {
-    let host = talos_endpoint(address);
-    match tokio::net::TcpStream::connect(&host).await {
-        Ok(_) => Ok(true),
-        Err(_) => Ok(false),
-    }
+    Ok(probe_tcp(address, 50000).await)
+}
+
+async fn probe_tcp(address: &str, port: u16) -> bool {
+    let host = address.split(':').next().unwrap_or(address);
+    tokio::net::TcpStream::connect((host, port)).await.is_ok()
 }
 
 /// The Talos apid endpoint for a node address. apid listens on port 50000
@@ -631,7 +665,8 @@ async fn do_post_boot_apply(
     node: &ConvertNodePlan,
 ) -> Result<(), AppError> {
     let cfg = node_machine_config(pool, jwt_secret, factory, sshc, payload, cluster_id, node, false).await?;
-    let ident = ensure_cluster_identity(sshc, payload).await?;
+    let k8s_ca = stored_kubeconfig_ca(pool, jwt_secret, cluster_id).await.unwrap_or_default();
+    let ident = ensure_cluster_identity(sshc, payload, &k8s_ca).await?;
     let tc = build_node_talosconfig(&ident, &node.address);
     let endpoint = talos_endpoint(&node.address);
     payload.log(&format!("{} applying captured machine config (no wipe)", node.name));
@@ -657,7 +692,9 @@ async fn node_machine_config(
     let k8s_ca = stored_kubeconfig_ca(pool, jwt_secret, cluster_id).await.unwrap_or_default();
     let is_cp = node.role == "control-plane" || node.role == "controlplane";
     let machine_type = if is_cp { "controlplane" } else { "worker" };
-    let ident = ensure_cluster_identity(sshc, payload).await?;
+    let ident = ensure_cluster_identity(sshc, payload, &k8s_ca).await?;
+    let _ = inject_bootstrap_token(pool, jwt_secret, cluster_id, payload).await;
+    let ident = payload.cluster_identity.clone().unwrap_or(ident);
     let network_yaml = render_node_network_yaml(&node.network, &node.name);
 
     let cfg = build_install_config(
@@ -853,6 +890,7 @@ fn build_install_config(
 async fn ensure_cluster_identity(
     sshc: &SshClient,
     payload: &mut ConvertJobPayload,
+    k8s_ca: &str,
 ) -> Result<ConvertClusterIdentity, AppError> {
     if let Some(ident) = &payload.cluster_identity {
         return Ok(ident.clone());
@@ -943,7 +981,12 @@ async fn ensure_cluster_identity(
         .map(|n| n.address.clone())
         .unwrap_or_else(|| cp_addr.clone());
     let orig = if source_cp.is_empty() {
-        None
+        // Worker-only: harvest PKI from the named live kubeadm CP (SSH).
+        if let Some(host) = explicit_cp_host(payload) {
+            extract_original_identity(sshc, &host).await
+        } else {
+            None
+        }
     } else {
         extract_original_identity(sshc, &source_cp).await
     };
@@ -954,7 +997,7 @@ async fn ensure_cluster_identity(
         cluster_id: b64_random(32),
         cluster_secret: b64_random(32),
         machine_token: bootstrap_token(),
-        kube_token: bootstrap_token(),
+        kube_token: kubeadm_join_token(),
         cluster_name: cluster_name.to_string(),
         control_plane_endpoint: endpoint,
         admin_cert,
@@ -964,7 +1007,11 @@ async fn ensure_cluster_identity(
         // Original identity (empty if extraction unavailable -> config falls
         // back to a fresh-identity CP, which cannot serve foreign etcd; the
         // overtake requires the original PKI, so extraction must succeed).
-        k8s_ca_crt: orig.as_ref().map(|o| o.k8s_ca_crt.clone()).unwrap_or_default(),
+        k8s_ca_crt: orig
+            .as_ref()
+            .map(|o| o.k8s_ca_crt.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| k8s_ca.to_string()),
         k8s_ca_key: orig.as_ref().map(|o| o.k8s_ca_key.clone()).unwrap_or_default(),
         aggregator_ca_crt: orig.as_ref().map(|o| o.aggregator_ca_crt.clone()).unwrap_or_default(),
         aggregator_ca_key: orig.as_ref().map(|o| o.aggregator_ca_key.clone()).unwrap_or_default(),
@@ -981,6 +1028,155 @@ async fn ensure_cluster_identity(
     };
     payload.cluster_identity = Some(ident.clone());
     Ok(ident)
+}
+
+/// kubeadm bootstrap token: `[a-z0-9]{6}.[a-z0-9]{16}`. The provision
+/// `bootstrap_token()` helper emits unpadded hex of 22 raw bytes and is
+/// rejected by kube-apiserver's bootstrap authenticator.
+fn kubeadm_join_token() -> String {
+    const A: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut s = String::with_capacity(23);
+    for i in 0..23 {
+        if i == 6 {
+            s.push('.');
+            continue;
+        }
+        s.push(A[fastrand::usize(..A.len())] as char);
+    }
+    s
+}
+
+fn parse_kubeadm_token(token: &str) -> Option<(&str, &str)> {
+    let (id, secret) = token.split_once('.')?;
+    if id.len() == 6
+        && secret.len() == 16
+        && id.chars().all(|c| c.is_ascii_alphanumeric())
+        && secret.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        Some((id, secret))
+    } else {
+        None
+    }
+}
+
+fn explicit_cp_host(payload: &ConvertJobPayload) -> Option<String> {
+    let e = payload.control_plane_endpoint.as_deref()?.trim();
+    if e.is_empty() {
+        return None;
+    }
+    let host = e
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split(':')
+        .next()
+        .unwrap_or(e)
+        .trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+/// Apply the job's kubeadm bootstrap token as a kube-system Secret so a
+/// converted Talos worker can CSR-join the still-kubeadm API.
+async fn inject_bootstrap_token(
+    pool: &DbPool,
+    jwt_secret: &str,
+    cluster_id: Uuid,
+    payload: &mut ConvertJobPayload,
+) -> Result<(), AppError> {
+    if payload.bootstrap_token_injected {
+        return Ok(());
+    }
+    let Some(ident) = payload.cluster_identity.clone() else {
+        return Ok(());
+    };
+    let Some((id, secret)) = parse_kubeadm_token(&ident.kube_token) else {
+        payload.log(&format!(
+            "bootstrap token {:?} is not kubeadm 6.16 form; not injecting",
+            ident.kube_token
+        ));
+        return Ok(());
+    };
+    let Some(kc) = stored_kubeconfig_yaml(pool, jwt_secret, cluster_id).await else {
+        payload.log("no stored kubeconfig; cannot inject bootstrap token");
+        return Ok(());
+    };
+    let exp = (chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339();
+    let yaml = format!(
+        "apiVersion: v1\nkind: Secret\nmetadata:\n  name: bootstrap-token-{id}\n  namespace: kube-system\ntype: bootstrap.kubernetes.io/token\nstringData:\n  description: tcs convert overtake\n  token-id: {id}\n  token-secret: {secret}\n  expiration: {exp}\n  usage-bootstrap-authentication: \"true\"\n  usage-bootstrap-signing: \"true\"\n  auth-extra-groups: system:bootstrappers:nodes\n"
+    );
+    let tmpdir = std::path::PathBuf::from("/var/lib/tcs/talosctl-tmp");
+    let _ = tokio::fs::create_dir_all(&tmpdir).await;
+    let kc_path = tmpdir.join(format!("kubeconfig.{}.inject", std::process::id()));
+    let sec_path = tmpdir.join(format!("bootstrap.{}.yaml", std::process::id()));
+    tokio::fs::write(&kc_path, kc)
+        .await
+        .map_err(|e| AppError::Internal(format!("write kubeconfig: {e}")))?;
+    tokio::fs::write(&sec_path, yaml)
+        .await
+        .map_err(|e| AppError::Internal(format!("write bootstrap secret: {e}")))?;
+    let out = tokio::process::Command::new("kubectl")
+        .env("TCS_INTERNAL", "1")
+        .args([
+            "--kubeconfig",
+            &kc_path.to_string_lossy(),
+            "apply",
+            "-f",
+            &sec_path.to_string_lossy(),
+        ])
+        .output()
+        .await
+        .map_err(|e| AppError::Network(format!("kubectl spawn: {e}")))?;
+    let _ = tokio::fs::remove_file(&kc_path).await;
+    let _ = tokio::fs::remove_file(&sec_path).await;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        payload.log(&format!("bootstrap token inject failed: {err}"));
+        return Err(AppError::Network(format!("kubectl apply bootstrap token: {err}")));
+    }
+    payload.bootstrap_token_injected = true;
+    payload.log(&format!("injected kubeadm bootstrap token {id}.**** into kube-system"));
+    Ok(())
+}
+
+async fn kube_node_is_talos(
+    pool: &DbPool,
+    jwt_secret: &str,
+    cluster_id: Uuid,
+    node: &str,
+) -> bool {
+    let Some(kc) = stored_kubeconfig_yaml(pool, jwt_secret, cluster_id).await else {
+        return false;
+    };
+    let tmpdir = std::path::PathBuf::from("/var/lib/tcs/talosctl-tmp");
+    let _ = tokio::fs::create_dir_all(&tmpdir).await;
+    let kc_path = tmpdir.join(format!("kubeconfig.{}.os", std::process::id()));
+    if tokio::fs::write(&kc_path, kc).await.is_err() {
+        return false;
+    }
+    let out = tokio::process::Command::new("kubectl")
+        .env("TCS_INTERNAL", "1")
+        .args([
+            "--kubeconfig",
+            &kc_path.to_string_lossy(),
+            "get",
+            "node",
+            node,
+            "-o",
+            "jsonpath={.status.nodeInfo.osImage}",
+        ])
+        .output()
+        .await;
+    let _ = tokio::fs::remove_file(&kc_path).await;
+    match out {
+        Ok(o) if o.status.success() => {
+            let s = String::from_utf8_lossy(&o.stdout);
+            s.to_ascii_lowercase().contains("talos")
+        }
+        _ => false,
+    }
 }
 
 /// The original (kubeadm) cluster identity extracted from a running old CP.
@@ -1083,17 +1279,18 @@ emit ETCD_SERVER_KEY /etc/ssl/etcd/ssl/member-$(hostname)-key.pem
 /// or they simply overwrite on join, which etcd handles). Plain etcd
 /// (kubeadm): single-member fresh list, same mechanism.
 async fn do_first_cp_recover(
-    _pool: &DbPool,
-    _jwt_secret: &str,
+    pool: &DbPool,
+    jwt_secret: &str,
     sshc: &SshClient,
     payload: &mut ConvertJobPayload,
-    _cluster_id: Uuid,
+    cluster_id: Uuid,
     node: &ConvertNodePlan,
 ) -> Result<(), AppError> {
     let path = payload.etcd_snapshot_path.clone().ok_or_else(|| AppError::Internal("no etcd snapshot path".into()))?;
     // talosconfig from the generated identity (already created during do_install;
     // cached in the payload, so no SSH re-extraction happens here).
-    let tc = build_node_talosconfig(&ensure_cluster_identity(sshc, payload).await?, &node.address);
+    let k8s_ca = stored_kubeconfig_ca(pool, jwt_secret, cluster_id).await.unwrap_or_default();
+    let tc = build_node_talosconfig(&ensure_cluster_identity(sshc, payload, &k8s_ca).await?, &node.address);
     let endpoint = talos_endpoint(&node.address);
     let how = if payload.etcd_tls { "TLS etcd" } else { "plain etcd" };
     payload.set_state(&node.name, "recover", &format!("bootstrap --recover-from ({how})"), "");
@@ -1115,10 +1312,14 @@ fn build_node_talosconfig(ident: &ConvertClusterIdentity, node_address: &str) ->
     )
 }
 
-async fn stored_kubeconfig_ca(pool: &DbPool, jwt_secret: &str, cluster_id: Uuid) -> Option<String> {
+async fn stored_kubeconfig_yaml(pool: &DbPool, jwt_secret: &str, cluster_id: Uuid) -> Option<String> {
     let c = repos::cluster::get(pool, cluster_id).await.ok().flatten()?;
     let enc = c.kubeconfig.as_deref()?;
-    let plain = secrets::decrypt(jwt_secret, enc).ok()?;
+    secrets::decrypt(jwt_secret, enc).ok()
+}
+
+async fn stored_kubeconfig_ca(pool: &DbPool, jwt_secret: &str, cluster_id: Uuid) -> Option<String> {
+    let plain = stored_kubeconfig_yaml(pool, jwt_secret, cluster_id).await?;
     crate::integration::kubernetes::parse_kubeconfig(&plain)
         .ok()
         .and_then(|kc| kc.clusters.into_iter().next())
@@ -1213,6 +1414,17 @@ mod tests {
         p.node_states[0].status = "failed".into();
         p.node_states[0].error = "boom".into();
         assert_eq!(p.last_error().as_deref(), Some("node cp1 failed: boom"));
+    }
+
+    #[test]
+    fn kubeadm_join_token_is_6_16() {
+        for _ in 0..20 {
+            let t = kubeadm_join_token();
+            assert!(parse_kubeadm_token(&t).is_some(), "bad token {t}");
+        }
+        assert!(parse_kubeadm_token("abcdef.0123456789abcdef").is_some());
+        assert!(parse_kubeadm_token("c9278af922e2.94d1e5f396a4d978f6394cc0d4c58e0").is_none());
+        assert!(parse_kubeadm_token("aabbcc.short").is_none());
     }
 
     #[test]
