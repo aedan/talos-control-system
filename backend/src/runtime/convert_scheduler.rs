@@ -94,7 +94,7 @@ async fn run_one(
         "snapshot" => step_snapshot(pool, sqlite_path, jwt_secret, &sshc, &mut payload, cluster_id).await?,
         "control-plane" => step_node_phase(pool, jwt_secret, &sshc, factory, metal_pxe, &mut payload, cluster_id, "control-plane").await?,
         "workers" => step_node_phase(pool, jwt_secret, &sshc, factory, metal_pxe, &mut payload, cluster_id, "workers").await?,
-        "adopt" => step_adopt(pool, &mut payload, cluster_id).await?,
+        "adopt" => step_adopt(pool, jwt_secret, &mut payload, cluster_id).await?,
         "done" => {
             finish(pool, job.id, &payload, "complete", None).await?;
             return Ok(());
@@ -1601,12 +1601,24 @@ fn base64_decode(s: &str) -> Vec<u8> {
 /// Phase: mark machines as Talos + running so existing machinery takes over.
 async fn step_adopt(
     pool: &DbPool,
+    jwt_secret: &str,
     payload: &mut ConvertJobPayload,
     cluster_id: Uuid,
 ) -> Result<(), AppError> {
-    let machines = repos::machine::list_by_cluster(pool, cluster_id).await?;
+    persist_convert_talosconfig(pool, jwt_secret, cluster_id, payload).await;
+    let done: std::collections::HashSet<String> = payload
+        .node_states
+        .iter()
+        .filter(|s| s.status == "done")
+        .map(|s| s.name.clone())
+        .collect();
     let names: Vec<String> = payload.nodes.iter().map(|n| n.name.clone()).collect();
+    let machines = repos::machine::list_by_cluster(pool, cluster_id).await?;
     for name in names {
+        if !done.is_empty() && !done.contains(&name) {
+            payload.log(&format!("skip adopt {name} (not done)"));
+            continue;
+        }
         if let Some(pos) = machines.iter().position(|m| m.hostname == name) {
             let mut m = machines[pos].clone();
             m.os_type = Some("talos".into());
@@ -1619,6 +1631,81 @@ async fn step_adopt(
     payload.phase = "done".into();
     payload.log("adopt complete");
     Ok(())
+}
+
+/// Persist the convert job's admin talosconfig on the cluster so TCS can
+/// probe/manage converted nodes (without this, the status reconciler marks
+/// every Talos machine offline).
+async fn persist_convert_talosconfig(
+    pool: &DbPool,
+    jwt_secret: &str,
+    cluster_id: Uuid,
+    payload: &ConvertJobPayload,
+) {
+    let Some(ident) = payload.cluster_identity.as_ref() else {
+        return;
+    };
+    let mut endpoints: Vec<String> = payload
+        .nodes
+        .iter()
+        .filter(|n| n.role == "control-plane" || n.role == "controlplane")
+        .map(|n| n.address.clone())
+        .filter(|a| !a.is_empty())
+        .collect();
+    if endpoints.is_empty() {
+        if let Some(h) = payload.control_plane_endpoint.as_deref() {
+            let host = h
+                .trim()
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split(':')
+                .next()
+                .unwrap_or("")
+                .to_string();
+            if !host.is_empty() {
+                endpoints.push(host);
+            }
+        }
+    }
+    if endpoints.is_empty() {
+        return;
+    }
+    let yaml = build_cluster_talosconfig(ident, &endpoints);
+    match crate::utils::secrets::encrypt(jwt_secret, &yaml) {
+        Ok(enc) => {
+            if crate::db::repos::cluster::set_talosconfig(pool, cluster_id, &enc)
+                .await
+                .is_ok()
+            {
+                tracing::info!(cluster_id = %cluster_id, "saved convert talosconfig on cluster");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "encrypt convert talosconfig failed"),
+    }
+}
+
+fn build_cluster_talosconfig(ident: &ConvertClusterIdentity, endpoints: &[String]) -> String {
+    let ca = crate::controllers::provision::b64_le(&ident.machine_ca_crt);
+    let crt = crate::controllers::provision::b64_le(&ident.admin_cert);
+    let key = crate::controllers::provision::b64_le(&ident.admin_key);
+    let name = ident.cluster_name.replace('-', "_");
+    let eps: String = endpoints
+        .iter()
+        .map(|e| {
+            let host = e.split(':').next().unwrap_or(e);
+            format!("      - https://{host}:50000\n")
+        })
+        .collect();
+    let nodes: String = endpoints
+        .iter()
+        .map(|e| {
+            let host = e.split(':').next().unwrap_or(e);
+            format!("      - {host}\n")
+        })
+        .collect();
+    format!(
+        "context: {name}\ncontexts:\n  {name}:\n    endpoints:\n{eps}    nodes:\n{nodes}    ca: {ca}\n    crt: {crt}\n    key: {key}\n"
+    )
 }
 
 async fn finish(

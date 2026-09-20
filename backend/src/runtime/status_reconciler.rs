@@ -238,7 +238,13 @@ async fn probe_and_update(
 
     let talosconfig = match &cluster.talosconfig {
         Some(enc) => Some(secrets::decrypt(jwt_secret, enc)?),
-        None => None,
+        None => {
+            // Convert/overtake can mark os_type=talos before a cluster
+            // talosconfig exists. Probing without credentials always fails and
+            // would flap every node to offline. Leave status alone until
+            // talosconfig is attached.
+            return Ok(());
+        }
     };
 
     // Prefer the SideroLink tunnel IP, then the LAN address. The IPv6 overlay
