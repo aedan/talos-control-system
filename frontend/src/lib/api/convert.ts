@@ -45,6 +45,7 @@ export interface ConvertNode {
   recommendedModules: string[];
   network: ConvertNetwork;
   bmcAddress?: string;
+  bmcUsername?: string;
   bmcType?: string;
   installDisk?: string;
   macAddress?: string;

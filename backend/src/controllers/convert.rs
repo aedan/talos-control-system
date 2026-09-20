@@ -251,6 +251,8 @@ pub struct PreviewNode {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub bmc_address: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub bmc_username: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub bmc_type: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub install_disk: String,
@@ -364,6 +366,7 @@ impl ConvertController {
                     kubelet_cert: String::new(),
                     kubelet_key: String::new(),
                     bmc_address: m.bmc_address.clone(),
+                    bmc_username: m.bmc_username.clone(),
                     bmc_type: m.bmc_type.clone(),
                     install_disk: m.install_disk.clone(),
                     mac_address: m.mac_address.clone(),
@@ -380,7 +383,16 @@ impl ConvertController {
                     if m.machine_type == "control-plane" || m.machine_type == "controlplane" {
                         cp_nodes.push(m.hostname.clone());
                     }
-                    let _ = persist_capture_inventory(&self.pool, m, &res).await;
+                    let stored_user = persist_capture_inventory(
+                        &self.pool,
+                        &self.ssh,
+                        &self.jwt_secret,
+                        m,
+                        &res,
+                    )
+                    .await
+                    .ok()
+                    .flatten();
                     let mac = res
                         .network
                         .interfaces
@@ -405,6 +417,15 @@ impl ConvertController {
                         } else {
                             res.bmc.address.clone()
                         },
+                        bmc_username: stored_user
+                            .or_else(|| {
+                                if m.bmc_username.is_empty() {
+                                    None
+                                } else {
+                                    Some(m.bmc_username.clone())
+                                }
+                            })
+                            .unwrap_or_default(),
                         bmc_type: if res.bmc.bmc_type.is_empty() {
                             m.bmc_type.clone()
                         } else {
@@ -434,6 +455,7 @@ impl ConvertController {
                         kubelet_cert: String::new(),
                         kubelet_key: String::new(),
                         bmc_address: m.bmc_address.clone(),
+                        bmc_username: m.bmc_username.clone(),
                         bmc_type: m.bmc_type.clone(),
                         install_disk: m.install_disk.clone(),
                         mac_address: m.mac_address.clone(),
@@ -498,7 +520,14 @@ impl ConvertController {
                     } else {
                         n.drivers.clone()
                     };
-                    let _ = persist_capture_inventory(&self.pool, m, &res).await;
+                    let _ = persist_capture_inventory(
+                        &self.pool,
+                        &self.ssh,
+                        &self.jwt_secret,
+                        m,
+                        &res,
+                    )
+                    .await;
                     (res.network, drivers, res.kubelet_cert, res.kubelet_key, res.install_disk, res.bmc)
                 }
                 Err(e) => {
@@ -732,13 +761,17 @@ pub struct NodeIn {
     pub kubelet_key: String,
 }
 
-/// Write captured BMC / install disk / MAC onto the machine row so TCS
-/// inventory matches the live node (no BMC user/password is stored here).
+/// Write captured BMC / install disk / MAC onto the machine row.
+/// If TCS has no BMC username+password yet, create in-band admin user `tcs`
+/// with a random password and store it encrypted. Returns the BMC username
+/// that TCS will use (existing or `tcs`).
 async fn persist_capture_inventory(
     pool: &DbPool,
+    ssh: &crate::integration::ssh::SshClient,
+    jwt_secret: &str,
     machine: &crate::db::models::machine::Machine,
     res: &crate::integration::network_capture::CaptureResult,
-) -> Result<(), AppError> {
+) -> Result<Option<String>, AppError> {
     let mut m = machine.clone();
     let mut dirty = false;
     if !res.bmc.address.is_empty() && m.bmc_address != res.bmc.address {
@@ -765,11 +798,33 @@ async fn persist_capture_inventory(
             dirty = true;
         }
     }
+    if !m.has_bmc() && !m.address.trim().is_empty() {
+        let pw = crate::integration::bmc::random_bmc_password();
+        match crate::integration::bmc::provision_tcs_bmc_user(ssh, &m.address, &pw).await {
+            Ok(_) => {
+                m.bmc_username = crate::integration::bmc::TCS_BMC_USER.to_string();
+                m.bmc_password_enc = Some(crate::utils::secrets::encrypt(jwt_secret, &pw)?);
+                dirty = true;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    host = %m.address,
+                    error = %e,
+                    "could not create in-band BMC user tcs; address still saved"
+                );
+            }
+        }
+    }
     if dirty {
         m.updated_at = Utc::now();
         repos::machine::update(pool, &m).await?;
     }
-    Ok(())
+    let user = if m.bmc_username.is_empty() {
+        None
+    } else {
+        Some(m.bmc_username)
+    };
+    Ok(user)
 }
 
 fn os_image_for(m: &crate::db::models::machine::Machine) -> String {

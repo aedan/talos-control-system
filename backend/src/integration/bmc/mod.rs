@@ -1,5 +1,6 @@
 //! BMC power and boot control — Redfish primary, IPMI fallback.
 
+mod inband;
 mod ipmi;
 mod nics;
 mod redfish;
@@ -7,6 +8,7 @@ mod redfish;
 use crate::db::models::machine::Machine;
 use crate::AppError;
 
+pub use inband::{provision_tcs_bmc_user, random_bmc_password, TCS_BMC_USER};
 pub use ipmi::IpmiClient;
 pub use nics::{NicInfo, NicKind, pick_primary_mac};
 pub use redfish::RedfishClient;

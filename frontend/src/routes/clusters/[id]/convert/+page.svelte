@@ -411,7 +411,7 @@
             </td>
             <td class="mono">{n.drivers.length ? n.drivers.join(', ') : '—'}</td>
             <td class="mono">{n.recommendedModules.length ? n.recommendedModules.map(shortName).join(', ') : '—'}</td>
-            <td class="mono">{n.bmcAddress ? `${n.bmcAddress}${n.bmcType && n.bmcType !== 'auto' ? ' · ' + n.bmcType : ''}` : '—'}</td>
+            <td class="mono">{n.bmcAddress ? `${n.bmcAddress}${n.bmcUsername ? ' · ' + n.bmcUsername : ''}${n.bmcType && n.bmcType !== 'auto' ? ' · ' + n.bmcType : ''}` : '—'}</td>
             <td class="mono">{n.installDisk || '—'}</td>
             <td class="mono net">{summarizeNetwork(n)}</td>
           </tr>

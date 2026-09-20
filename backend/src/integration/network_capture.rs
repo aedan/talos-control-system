@@ -108,7 +108,7 @@ echo "==OVS=="; ovs-vsctl list-br 2>/dev/null
 echo "==LSMOD=="; lsmod 2>/dev/null | awk 'NR>1{print $1}'
 echo "==KUBELET_CERT=="; cat /var/lib/kubelet/pki/kubelet-client-current.pem 2>/dev/null || cat /var/lib/kubelet/pki/kubelet.crt 2>/dev/null
 echo "==KUBELET_KEY=="; cat /var/lib/kubelet/pki/kubelet-client-current.key 2>/dev/null || cat /var/lib/kubelet/pki/kubelet.key 2>/dev/null
-echo "==BMC=="; ipmitool lan print 1 2>/dev/null || ipmitool lan print 2>/dev/null || ipmitool lan print 2>/dev/null
+echo "==BMC=="; modprobe ipmi_devintf 2>/dev/null; modprobe ipmi_si 2>/dev/null; ipmitool lan print 1 2>/dev/null || ipmitool lan print 2>/dev/null || ipmitool lan print 2>/dev/null
 echo "==MCINFO=="; ipmitool mc info 2>/dev/null
 echo "==BOOTDISK=="; {
   src=$(findmnt -n -o SOURCE / 2>/dev/null)
