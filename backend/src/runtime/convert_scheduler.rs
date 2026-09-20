@@ -313,8 +313,23 @@ async fn step_node_phase(
             Ok(true) => {
                 payload.set_state(&node.name, "install", "talosctl install to disk", "");
                 payload.log(&format!("{} Talos live installer up; installing to disk", node.name));
+                if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == node.name) {
+                    s.attempts = 0;
+                }
             }
-            Ok(false) => payload.log(&format!("{} still booting into installer; re-probe next tick", node.name)),
+            Ok(false) => {
+                let attempts = bump_attempts(payload, &node.name);
+                if attempts > 60 {
+                    fail_node(
+                        payload,
+                        &node.name,
+                        "kexec",
+                        "Talos installer :50000 never came up after kexec",
+                    );
+                } else {
+                    payload.log(&format!("{} still booting into installer; re-probe next tick", node.name));
+                }
+            }
             Err(e) => payload.log(&format!("{} probe: {e} (waiting for reboot)", node.name)),
         },
         "install" => {
