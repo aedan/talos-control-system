@@ -38,14 +38,22 @@
   let knownVersions = $state<string[]>(['v1.13.10', 'v1.13.7', 'v1.13.6', 'v1.13.5', 'v1.12.10', 'v1.12.9']);
   let clusterTalos = $state('');
   let extensions = $state<FactoryExtensionItem[]>([]);
-  // bnx2-bnx2x + iscsi-tools + nfs-utils are required on this fleet's kexec
-  // image; the backend also merges them in if the client omits them.
-  const REQUIRED_CONVERT_MODULES = [
-    'siderolabs/bnx2-bnx2x',
-    'siderolabs/iscsi-tools',
-    'siderolabs/nfs-utils',
+  /** Operator-facing presets. Hardware Analyze also ticks modules from captured drivers. */
+  const MODULE_PRESETS: { id: string; label: string; hint: string; modules: string[] }[] = [
+    {
+      id: '10g-bnx2',
+      label: '10Gb Broadcom NICs',
+      hint: 'bnx2 / bnx2x firmware — needed on most 10Gb Broadcom bonds',
+      modules: ['siderolabs/bnx2-bnx2x'],
+    },
+    {
+      id: 'genestack-storage',
+      label: 'Genestack storage',
+      hint: 'Longhorn + Ceph need iSCSI and NFS in the installer and on disk',
+      modules: ['siderolabs/iscsi-tools', 'siderolabs/nfs-utils'],
+    },
   ];
-  let selectedModules = $state<Set<string>>(new Set(REQUIRED_CONVERT_MODULES));
+  let selectedModules = $state<Set<string>>(new Set());
   let factoryBusy = $state(false);
   let factoryError = $state('');
 
@@ -56,10 +64,26 @@
 
   function toggleModule(name: string) {
     const next = new Set(selectedModules);
-    if (next.has(name)) {
-      if (REQUIRED_CONVERT_MODULES.includes(name)) return;
-      next.delete(name);
-    } else next.add(name);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    selectedModules = next;
+  }
+
+  function presetActive(id: string): boolean {
+    const p = MODULE_PRESETS.find((x) => x.id === id);
+    if (!p) return false;
+    return p.modules.every((m) => selectedModules.has(m));
+  }
+
+  function togglePreset(id: string) {
+    const p = MODULE_PRESETS.find((x) => x.id === id);
+    if (!p) return;
+    const on = !presetActive(id);
+    const next = new Set(selectedModules);
+    for (const m of p.modules) {
+      if (on) next.add(m);
+      else next.delete(m);
+    }
     selectedModules = next;
   }
 
@@ -106,6 +130,14 @@
       });
       preview = res;
       clusterName = res.clusterName || clusterName;
+      // Union captured-driver recommendations into the operator's selection
+      // (presets stay; hardware adds 10Gb/iSCSI/NFS when those drivers are live).
+      const next = new Set(selectedModules);
+      for (const node of res.nodes) {
+        for (const m of node.recommendedModules) next.add(m);
+      }
+      selectedModules = next;
+      usedRecommended = true;
       step = 'preview';
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to analyze cluster';
@@ -313,16 +345,29 @@
       {:else}
         <p class="hint">
           Image Factory modules baked into the kexec installer <em>and</em> the on-disk image.
-          <span class="mono">bnx2-bnx2x</span>, <span class="mono">iscsi-tools</span>, and
-          <span class="mono">nfs-utils</span> are required on this fleet (cannot be unchecked).
+          Pick what this environment needs — Analyze will also tick modules from live NIC/storage
+          drivers. Nothing is forced.
         </p>
+        <div class="preset-row">
+          {#each MODULE_PRESETS as p (p.id)}
+            <button
+              type="button"
+              class="preset-btn"
+              class:on={presetActive(p.id)}
+              title={p.hint}
+              onclick={() => togglePreset(p.id)}
+            >
+              <span class="preset-label">{p.label}</span>
+              <span class="preset-hint">{p.hint}</span>
+            </button>
+          {/each}
+        </div>
         <div class="module-picker">
           {#each extensions as f (f.name)}
             <label class="module-option" title={f.description || f.ref || ''}>
               <input
                 type="checkbox"
                 checked={selectedModules.has(f.name)}
-                disabled={REQUIRED_CONVERT_MODULES.includes(f.name)}
                 onchange={() => toggleModule(f.name)}
               />
               <span class="module-name mono">{shortName(f.name)}</span>
@@ -447,7 +492,11 @@
           {/each}
         </div>
       {:else}
-        <p class="hint">No Image Factory modules selected.</p>
+        <p class="hint">
+          No Image Factory modules selected — stock installer only. 10Gb Broadcom bonds usually
+          need <span class="mono">bnx2-bnx2x</span>; Genestack Longhorn/Ceph need
+          <span class="mono">iscsi-tools</span> and <span class="mono">nfs-utils</span>.
+        </p>
       {/if}
 
       {#if cpCount === 0 && workerCount > 0}
@@ -672,6 +721,28 @@
     font-size: 0.8rem;
     min-width: 0;
   }
+
+  .preset-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 0.5rem;
+    margin: 0 0 0.85rem;
+  }
+  .preset-btn {
+    text-align: left;
+    padding: 0.55rem 0.7rem;
+    border: 1px solid var(--tcs-border);
+    border-radius: 6px;
+    background: var(--tcs-background);
+    color: var(--tcs-text);
+    cursor: pointer;
+  }
+  .preset-btn.on {
+    border-color: var(--tcs-accent, #3b82f6);
+    background: rgba(59, 130, 246, 0.1);
+  }
+  .preset-label { display: block; font-size: 0.85rem; font-weight: 600; }
+  .preset-hint { display: block; font-size: 0.75rem; color: var(--tcs-text-muted); margin-top: 0.15rem; line-height: 1.35; }
 
   .module-picker {
     display: grid;

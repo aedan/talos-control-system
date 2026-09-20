@@ -548,37 +548,47 @@ fn do_kexec<'a>(
         let disk_image = convert_disk_image(factory, payload);
         let asset_dir = std::path::PathBuf::from(&metal_pxe.asset_dir);
 
-        // Kexec BOOT vehicle: factory schematic kernel+initramfs (bzImage),
-        // which bakes in bnx2-bnx2x / iscsi-tools / nfs-utils. The factory
-        // *metal-installer* OCI (`vmlinuz.efi`) is NOT kexec-loadable on
-        // legacy BIOS; it remains the on-disk install target only.
-        // Stock+firmware-graft custom assets do NOT include iscsi/nfs and
-        // must not be preferred when a schematic is present.
-        let Some(schematic) = payload.schematic.as_deref() else {
-            fail_node(
-                payload,
-                &node.name,
-                "resolve-installer",
-                "convert requires a factory schematic (bnx2-bnx2x, iscsi-tools, nfs-utils)",
-            );
-            return;
+        // Kexec BOOT vehicle: factory schematic kernel+initramfs (bzImage)
+        // when the operator selected Image Factory modules (10Gb NIC firmware,
+        // iSCSI/NFS for Genestack, …). The factory *metal-installer* OCI
+        // (`vmlinuz.efi`) is NOT kexec-loadable on legacy BIOS. No schematic
+        // → stock release kernel+initramfs.
+        let assets = if let Some(schematic) = payload.schematic.as_deref() {
+            match kexec::resolve_factory_boot_assets(
+                &factory.normalized_base(),
+                schematic,
+                &payload.talos_version,
+                arch,
+                &asset_dir,
+            )
+            .await
+            {
+                Ok(a) => {
+                    payload.log(&format!(
+                        "{} kexec assets: factory schematic {schematic} modules [{}]",
+                        node.name,
+                        payload.modules.join(", ")
+                    ));
+                    Ok(a)
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            payload.log(&format!(
+                "{} kexec assets: stock installer (no Image Factory modules)",
+                node.name
+            ));
+            kexec::resolve_standard_assets(
+                &metal_pxe.mirror_base,
+                &payload.talos_version,
+                arch,
+                &asset_dir,
+            )
+            .await
         };
-        let assets = kexec::resolve_factory_boot_assets(
-            &factory.normalized_base(),
-            schematic,
-            &payload.talos_version,
-            arch,
-            &asset_dir,
-        )
-        .await;
         let append = kexec::kexec_append(&node.network, &node.name, "");
         match assets {
             Ok(a) => {
-                payload.log(&format!(
-                    "{} kexec assets: factory schematic {schematic} modules [{}]",
-                    node.name,
-                    payload.modules.join(", ")
-                ));
                 let already_installer = probe_talos_up(&node.address).await.unwrap_or(false);
                 if already_installer {
                     payload.log(&format!(

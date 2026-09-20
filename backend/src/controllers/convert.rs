@@ -21,23 +21,11 @@ use crate::AppError;
 
 pub const JOB_KIND: &str = "convert";
 
-/// Image Factory extensions that must be baked into BOTH the kexec installer
-/// (so the RAM OS has NIC/iSCSI/NFS) and the on-disk install image. A convert
-/// without these three does not come back on this hardware (bnx2x 10Gb, iSCSI
-/// root/tools, NFS). Extra operator-selected modules are kept on top.
-pub const REQUIRED_CONVERT_MODULES: &[&str] = &[
-    "siderolabs/bnx2-bnx2x",
-    "siderolabs/iscsi-tools",
-    "siderolabs/nfs-utils",
-];
-
-/// Union `mods` with [`REQUIRED_CONVERT_MODULES`], preserving operator extras
-/// and the required set. Dedupes by exact name.
-pub fn merge_required_convert_modules(mods: &[String]) -> Vec<String> {
+/// Deduped, trimmed operator module list. Empty is allowed: start() then
+/// fills from captured-driver recommendations, or kexec uses the stock
+/// installer when nothing applies.
+pub fn normalize_convert_modules(mods: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for m in REQUIRED_CONVERT_MODULES {
-        out.push((*m).to_string());
-    }
     for m in mods {
         let t = m.trim();
         if t.is_empty() {
@@ -349,11 +337,10 @@ impl ConvertController {
             }
             match capture.capture(&m.address).await {
                 Ok(res) => {
-                    let recommended = if modules.is_empty() {
-                        recommend_modules(&res.drivers)
-                    } else {
-                        modules.clone()
-                    };
+                    // Always recommend from *this node's* captured drivers so
+                    // the wizard can pre-select 10Gb NIC / iSCSI / NFS modules
+                    // independently of what the operator already ticked.
+                    let recommended = recommend_modules(&res.drivers);
                     if m.machine_type == "control-plane" || m.machine_type == "controlplane" {
                         cp_nodes.push(m.hostname.clone());
                     }
@@ -468,12 +455,25 @@ impl ConvertController {
         }
         let _ = by_name;
 
-        let modules = merge_required_convert_modules(&body.modules);
-        let schematic = Some(
-            crate::integration::image_factory::ImageFactoryClient::new(&self.factory.normalized_base())
-                .create_schematic(&modules)
-                .await?,
-        );
+        let mut modules = normalize_convert_modules(&body.modules);
+        if modules.is_empty() {
+            for p in &plans {
+                for m in recommend_modules(&p.drivers) {
+                    if !modules.iter().any(|x| x == &m) {
+                        modules.push(m);
+                    }
+                }
+            }
+        }
+        let schematic = if modules.is_empty() {
+            None
+        } else {
+            Some(
+                crate::integration::image_factory::ImageFactoryClient::new(&self.factory.normalized_base())
+                    .create_schematic(&modules)
+                    .await?,
+            )
+        };
 
         let now = Utc::now();
         let payload = ConvertJobPayload {
@@ -707,21 +707,28 @@ mod tests {
     }
 
     #[test]
-    fn merge_required_always_includes_bnx2_iscsi_nfs() {
-        let m = merge_required_convert_modules(&[]);
+    fn normalize_dedups_and_keeps_operator_order() {
+        let m = normalize_convert_modules(&[
+            " siderolabs/bnx2-bnx2x ".into(),
+            "siderolabs/iscsi-tools".into(),
+            "siderolabs/bnx2-bnx2x".into(),
+            "".into(),
+        ]);
         assert_eq!(
             m,
             vec![
                 "siderolabs/bnx2-bnx2x".to_string(),
                 "siderolabs/iscsi-tools".to_string(),
-                "siderolabs/nfs-utils".to_string(),
             ]
         );
-        let m = merge_required_convert_modules(&["siderolabs/bnx2-bnx2x".into(), "siderolabs/i40e".into()]);
-        assert_eq!(m.len(), 4);
+        assert!(normalize_convert_modules(&[]).is_empty());
+    }
+
+    #[test]
+    fn recommend_iscsi_and_nfs_from_storage_drivers() {
+        let m = recommend_modules(&["iscsi_tcp".into(), "nfs".into()]);
+        assert!(m.contains(&"siderolabs/iscsi-tools".to_string()));
         assert!(m.contains(&"siderolabs/nfs-utils".to_string()));
-        assert!(m.contains(&"siderolabs/i40e".to_string()));
-        assert_eq!(m.iter().filter(|x| *x == "siderolabs/bnx2-bnx2x").count(), 1);
     }
 
     #[test]
