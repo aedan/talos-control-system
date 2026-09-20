@@ -59,6 +59,8 @@ export interface ConvertPreview {
   etcd: ConvertEtcd;
   canConvert: boolean;
   blockers: string[];
+  /** kubeconfig cluster.server — prefer this as controlPlaneEndpoint. */
+  kubeconfigServer?: string;
 }
 
 export interface ConvertJobNode {

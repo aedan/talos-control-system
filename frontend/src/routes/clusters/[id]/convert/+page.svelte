@@ -138,6 +138,10 @@
       }
       selectedModules = next;
       usedRecommended = true;
+      selectedNames = new Set(res.nodes.filter((n) => n.sshOk).map((n) => n.name));
+      if (!cpEndpoint.trim() && res.kubeconfigServer) {
+        cpEndpoint = res.kubeconfigServer.replace(/^https?:\/\//, '');
+      }
       step = 'preview';
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to analyze cluster';
@@ -182,16 +186,35 @@
 
   const cpCount = $derived((preview?.nodes || []).filter((n) => n.role === 'control-plane').length);
   const workerCount = $derived((preview?.nodes || []).filter((n) => n.role === 'worker').length);
-  const canContinue = $derived(!!preview && preview.canConvert && preview.blockers.length === 0);
+  let selectedNames = $state<Set<string>>(new Set());
+  const selectedSshOk = $derived(
+    (preview?.nodes || []).filter((n) => n.sshOk && selectedNames.has(n.name)).length
+  );
+  const canContinue = $derived(!!preview && selectedSshOk >= 1);
+
+  function toggleNode(name: string, sshOk: boolean) {
+    if (!sshOk) return;
+    const next = new Set(selectedNames);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    selectedNames = next;
+  }
+
+  function selectAllSsh() {
+    if (!preview) return;
+    selectedNames = new Set(preview.nodes.filter((n) => n.sshOk).map((n) => n.name));
+  }
 
   // ── confirm ────────────────────────────────────────────────────────
   function orderNodes(): ConvertNode[] {
     if (!preview) return [];
-    return [...preview.nodes].sort((a, b) => {
-      if (a.role === 'control-plane' && b.role !== 'control-plane') return -1;
-      if (b.role === 'control-plane' && a.role !== 'control-plane') return 1;
-      return a.name.localeCompare(b.name);
-    });
+    return [...preview.nodes]
+      .filter((n) => n.sshOk && selectedNames.has(n.name))
+      .sort((a, b) => {
+        if (a.role === 'control-plane' && b.role !== 'control-plane') return -1;
+        if (b.role === 'control-plane' && a.role !== 'control-plane') return 1;
+        return a.name.localeCompare(b.name);
+      });
   }
 
   async function startConversion() {
@@ -407,13 +430,14 @@
         <p class="subtitle">
           {preview.clusterName} · Talos {preview.talosVersion} ·
           {preview.nodes.length} node(s) ({cpCount} control-plane, {workerCount} worker)
+          · {selectedSshOk} selected
         </p>
       </div>
     </div>
 
-    {#if !preview.canConvert || preview.blockers.length > 0}
+    {#if preview.blockers.length > 0}
       <div class="blockers-panel">
-        <strong>This cluster cannot be converted yet.</strong>
+        <strong>Cannot convert until these are fixed.</strong>
         <ul>
           {#each preview.blockers as b (b)}
             <li>{b}</li>
@@ -422,9 +446,15 @@
       </div>
     {/if}
 
+    <p class="hint">
+      Tick the SSH-ok nodes to convert. Unreachable nodes are skipped (they cannot be kexec'd).
+      <button type="button" class="linkish" onclick={selectAllSsh}>Select all reachable</button>
+    </p>
+
     <table class="data-table preview-table">
       <thead>
         <tr>
+          <th></th>
           <th>Node</th>
           <th>Role</th>
           <th>OS</th>
@@ -436,7 +466,16 @@
       </thead>
       <tbody>
         {#each preview.nodes as n (n.name)}
-          <tr>
+          <tr class:dim={!n.sshOk}>
+            <td>
+              <input
+                type="checkbox"
+                disabled={!n.sshOk}
+                checked={n.sshOk && selectedNames.has(n.name)}
+                onchange={() => toggleNode(n.name, n.sshOk)}
+                title={n.sshOk ? 'Include in convert' : n.sshError || 'SSH unreachable'}
+              />
+            </td>
             <td class="mono">{n.name}</td>
             <td><span class="status-badge role">{n.role}</span></td>
             <td>{n.osType === 'talos' ? 'Talos Linux' : n.osImage || '—'}</td>
@@ -479,7 +518,7 @@
 
     <div class="confirm-card">
       <p class="confirm-lead">
-        About to convert <strong>{preview.nodes.length} node(s)</strong> to Talos
+        About to convert <strong>{orderNodes().length} node(s)</strong> to Talos
         <strong class="mono">{talosVersion}</strong>. Each node’s live network is recaptured
         over SSH immediately before kexec, then pushed as the Talos machine config once
         apid is up. Order: control-plane first (quorum-safe), then workers, one at a time.
@@ -511,10 +550,11 @@
             title="IP or host[:port] of the running Talos control plane the workers will join. Required for worker-only overtakes."
           />
           <p class="hint">
-            No control-plane node is in this plan (worker-only overtake). Enter the address of
-            the running control plane so the workers can join it. If left blank the backend
-            defaults to <span class="mono">127.0.0.1:6443</span> and the workers will never reach
-            the cluster.
+            Worker-only overtake. Prefill is the kubeconfig API
+            {#if preview.kubeconfigServer}
+              (<span class="mono">{preview.kubeconfigServer}</span>)
+            {/if}
+            — use that, not a random CP IP (some CPs 401 bootstrap tokens).
           </p>
         </div>
       {/if}
@@ -743,6 +783,11 @@
   }
   .preset-label { display: block; font-size: 0.85rem; font-weight: 600; }
   .preset-hint { display: block; font-size: 0.75rem; color: var(--tcs-text-muted); margin-top: 0.15rem; line-height: 1.35; }
+  .linkish {
+    background: none; border: none; padding: 0; color: var(--tcs-accent, #3b82f6);
+    cursor: pointer; font-size: inherit;
+  }
+  tr.dim { opacity: 0.55; }
 
   .module-picker {
     display: grid;

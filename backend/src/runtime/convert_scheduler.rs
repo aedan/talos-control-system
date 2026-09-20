@@ -340,17 +340,22 @@ async fn step_node_phase(
             match probe_talos_up(&node.address).await {
                 Ok(true) => match do_install(pool, jwt_secret, factory, metal_pxe, sshc, payload, cluster_id, &node, is_first_cp).await {
                     Ok(()) => {
-                        payload.set_state(&node.name, "reboot", "waiting for Talos on disk", "");
+                        payload.set_state(&node.name, "reboot", "waiting for installer to reboot", "");
                         if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == node.name) {
                             s.attempts = 0;
+                            s.installer_gone = false;
                         }
-                        payload.log(&format!("{} install issued; waiting for boot", node.name));
+                        payload.log(&format!("{} install issued; waiting for installer apid to drop, then disk boot", node.name));
                     }
                     Err(e) => fail_node(payload, &node.name, "install", &e.to_string()),
                 },
                 Ok(false) => {
                     payload.set_state(&node.name, "reboot", "waiting for Talos on disk", "");
-                    payload.log(&format!("{} installer no longer up; assuming install completed, waiting for boot", node.name));
+                    if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == node.name) {
+                        s.installer_gone = true;
+                        s.attempts = 0;
+                    }
+                    payload.log(&format!("{} installer no longer up; waiting for installed Talos apid", node.name));
                 }
                 Err(e) => payload.log(&format!("{} install probe: {e} (waiting)", node.name)),
             }
@@ -358,54 +363,72 @@ async fn step_node_phase(
         "reboot" => {
             let apid = probe_talos_up(&node.address).await.unwrap_or(false);
             let kubelet = probe_tcp(&node.address, 10250).await;
-            if apid {
-                if is_first_cp {
-                    payload.set_state(&node.name, "recover", "etcd recover + bootstrap", "");
-                    payload.log(&format!("{} booted; recovering etcd + bootstrap", node.name));
+            let installer_gone = payload
+                .node_states
+                .iter()
+                .find(|s| s.name == node.name)
+                .map(|s| s.installer_gone)
+                .unwrap_or(false);
+            if apid && !installer_gone {
+                // Still the live installer (apply-config often returns without
+                // rebooting). Do not recover/configure until apid has dropped.
+                let attempts = bump_attempts(payload, &node.name);
+                if attempts > 60 {
+                    fail_node(
+                        payload,
+                        &node.name,
+                        "reboot",
+                        "installer apid never dropped after apply-config",
+                    );
                 } else {
-                    payload.set_state(&node.name, "configure", "apply captured machine config", "");
-                    payload.log(&format!("{} Talos apid up; pushing captured network config", node.name));
-                    if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == node.name) {
+                    payload.log(&format!(
+                        "{} installer still up; waiting for reboot off disk ({attempts}/60)",
+                        node.name
+                    ));
+                }
+            } else if !apid {
+                if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == node.name) {
+                    if !s.installer_gone {
+                        s.installer_gone = true;
                         s.attempts = 0;
+                        payload.log(&format!("{} installer apid dropped; waiting for Talos on disk", node.name));
                     }
                 }
-            } else if kubelet && !is_first_cp {
-                // Worker-only overtake: there is no Talos CP/trustd to issue a
-                // machine cert, so apid (:50000) never listens. Kubelet on
-                // :10250 means the node booted Talos; join is via the kubeadm
-                // bootstrap token injected into the live API.
-                let _ = inject_bootstrap_token(pool, jwt_secret, cluster_id, payload).await;
-                let _ = issue_kubelet_csrs(pool, jwt_secret, cluster_id, payload).await;
-                if kube_node_is_talos(pool, jwt_secret, cluster_id, &node.name).await {
-                    payload.set_state(&node.name, "done", "joined Kubernetes as Talos", "");
-                    payload.log(&format!("{} kubelet up and node OS is Talos; done (apid not required for worker-only)", node.name));
-                } else {
-                    let attempts = bump_attempts(payload, &node.name);
-                    if attempts > 120 {
-                        fail_node(
-                            payload,
-                            &node.name,
-                            "reboot",
-                            "Talos kubelet is up but the node never joined Kubernetes (check bootstrap token + cluster CA)",
-                        );
-                    } else {
-                        payload.log(&format!(
-                            "{} Talos kubelet up (no apid — expected without a Talos CP); waiting for Kubernetes join ({attempts}/120)",
-                            node.name
-                        ));
-                    }
-                }
-            } else {
                 let attempts = bump_attempts(payload, &node.name);
                 if attempts > 120 {
                     fail_node(
                         payload,
                         &node.name,
                         "reboot",
-                        "Talos apid :50000 and kubelet :10250 never came up after install",
+                        "Talos apid :50000 never came back after install reboot",
                     );
+                } else if kubelet && !is_first_cp {
+                    // fall through below via nested - actually kubelet while apid down
+                    let _ = inject_bootstrap_token(pool, jwt_secret, cluster_id, payload).await;
+                    let _ = issue_kubelet_csrs(pool, jwt_secret, cluster_id, payload).await;
+                    if kube_node_is_talos(pool, jwt_secret, cluster_id, &node.name).await {
+                        payload.set_state(&node.name, "done", "joined Kubernetes as Talos", "");
+                        payload.log(&format!("{} kubelet up and node OS is Talos; done (apid not required for worker-only)", node.name));
+                    } else {
+                        payload.log(&format!("{} still rebooting into Talos (kubelet up, waiting join) ({attempts}/120)", node.name));
+                    }
                 } else {
                     payload.log(&format!("{} still rebooting into Talos", node.name));
+                }
+            } else {
+                // apid up AND installer has gone down once → installed OS.
+                if is_first_cp {
+                    payload.set_state(&node.name, "recover", "etcd recover + bootstrap", "");
+                    payload.log(&format!("{} installed Talos apid up; recovering etcd + bootstrap", node.name));
+                    if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == node.name) {
+                        s.attempts = 0;
+                    }
+                } else {
+                    payload.set_state(&node.name, "configure", "apply captured machine config", "");
+                    payload.log(&format!("{} Talos apid up; pushing captured network config", node.name));
+                    if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == node.name) {
+                        s.attempts = 0;
+                    }
                 }
             }
         }
@@ -450,7 +473,10 @@ async fn step_node_phase(
                 // retries; cap attempts so a genuine fault fails instead of looping.
                 let transient = msg.contains("not ready for recovery")
                     || msg.contains("FailedPrecondition")
-                    || msg.contains("etcd service is not ready");
+                    || msg.contains("etcd service is not ready")
+                    || msg.contains("connection refused")
+                    || msg.contains("Unavailable")
+                    || msg.contains("dial tcp");
                 if transient {
                     if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == node.name) {
                         s.attempts += 1;
@@ -1614,7 +1640,7 @@ mod tests {
             ConvertNodePlan { name: "w1".into(), role: "worker".into(), address: "10.0.0.3".into(), network: Default::default(), drivers: vec![], kubelet_cert: String::new(), kubelet_key: String::new() },
         ];
         p.node_states = p.nodes.iter().map(|n| crate::controllers::convert::ConvertNodeState {
-            name: n.name.clone(), role: n.role.clone(), status: "pending".into(), current_step: "".into(), error: "".into(), attempts: 0,
+            name: n.name.clone(), role: n.role.clone(), status: "pending".into(), current_step: "".into(), error: "".into(), attempts: 0, installer_gone: false,
         }).collect();
         p
     }

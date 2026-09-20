@@ -70,6 +70,11 @@ pub struct ConvertNodeState {
     /// bounds the retry loop so a genuine fault fails instead of looping.
     #[serde(default)]
     pub attempts: u32,
+    /// After `talosctl install`, :50000 is still the *installer* until it
+    /// reboots. Set once we have observed apid down so the next apid-up is
+    /// the installed OS (needed before etcd recover).
+    #[serde(default)]
+    pub installer_gone: bool,
 }
 
 fn default_cluster_name() -> String {
@@ -256,6 +261,11 @@ pub struct ConvertPreview {
     pub etcd: PreviewEtcd,
     pub can_convert: bool,
     pub blockers: Vec<String>,
+    /// kubeconfig cluster.server (e.g. https://172.20.0.38:6443). The
+    /// operator should use this as the control-plane endpoint; a random CP
+    /// IP may 401 bootstrap tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kubeconfig_server: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -315,6 +325,14 @@ impl ConvertController {
 
         let mut nodes = Vec::new();
         let mut blockers = Vec::new();
+        let kubeconfig_server = cluster.kubeconfig.as_deref().and_then(|enc| {
+            crate::utils::secrets::decrypt(&self.jwt_secret, enc)
+                .ok()
+                .and_then(|plain| crate::integration::kubernetes::parse_kubeconfig(&plain).ok())
+                .and_then(|kc| kc.clusters.into_iter().next())
+                .map(|cl| cl.cluster.server)
+                .filter(|s| !s.trim().is_empty())
+        });
         let mut cp_nodes = Vec::new();
 
         for m in &machines {
@@ -359,7 +377,8 @@ impl ConvertController {
                     });
                 }
                 Err(e) => {
-                    blockers.push(format!("node {}: ssh unreachable ({})", m.hostname, e));
+                    // Unreachable nodes are skipped in the picker, not a hard
+                    // blocker — convert the SSH-ok subset.
                     nodes.push(PreviewNode {
                         name: m.hostname.clone(),
                         role: m.machine_type.clone(),
@@ -377,7 +396,11 @@ impl ConvertController {
             }
         }
 
-        let can_convert = blockers.is_empty() && !nodes.is_empty() && cp_nodes.iter().count() >= 1;
+        let ssh_ok = nodes.iter().filter(|n| n.ssh_ok).count();
+        if ssh_ok == 0 {
+            blockers.push("no SSH-reachable nodes — convert needs SSH to recapture network and kexec".into());
+        }
+        let can_convert = ssh_ok >= 1;
 
         Ok(ConvertPreview {
             cluster_name: cluster.name,
@@ -390,6 +413,7 @@ impl ConvertController {
             },
             can_convert,
             blockers,
+            kubeconfig_server,
         })
     }
 
@@ -495,6 +519,7 @@ impl ConvertController {
                     current_step: String::new(),
                     error: String::new(),
                     attempts: 0,
+                    installer_gone: false,
                 })
                 .collect(),
             etcd_snapshot_path: None,
