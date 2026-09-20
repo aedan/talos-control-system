@@ -145,6 +145,15 @@ export async function convertCancel(id: string): Promise<{ ok: boolean }> {
   return res as { ok: boolean };
 }
 
+/** BMC installer recover for ping-only Talos nodes (no SSH / no apid). */
+export async function convertRecover(
+  id: string,
+  body: { hostnames: string[]; isoUrl?: string }
+): Promise<ConvertStartResult> {
+  const res = await client.post(`/clusters/${id}/convert/recover`, body);
+  return res as ConvertStartResult;
+}
+
 export async function fetchFactoryExtensions(version: string): Promise<FactoryExtensionItem[]> {
   const res = (await client.get(
     `/factory/extensions?version=${encodeURIComponent(version)}`

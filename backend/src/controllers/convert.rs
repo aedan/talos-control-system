@@ -130,6 +130,15 @@ pub struct ConvertJobPayload {
     /// has been applied as a kube-system Secret (worker-only overtake).
     #[serde(default)]
     pub bootstrap_token_injected: bool,
+    /// BMC installer recover: skip SSH kexec, boot the factory ISO/PXE, then
+    /// apply-config in maintenance. Used when the node is ping-only (no SSH,
+    /// no apid) after a bad STATE rewrite.
+    #[serde(default)]
+    pub bmc_recover: bool,
+    /// HTTP URL the BMC fetches as virtual CD (iLO RIBCL / Redfish). Empty
+    /// falls back to PXE bootdev.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installer_iso_url: Option<String>,
     pub steps_log: Vec<String>,
 }
 
@@ -625,6 +634,8 @@ impl ConvertController {
             install_image_override: body.install_image.clone(),
             control_plane_endpoint: body.control_plane_endpoint.clone(),
             bootstrap_token_injected: false,
+            bmc_recover: false,
+            installer_iso_url: None,
             steps_log: vec![format!("{now} convert job created ({} nodes)", body.nodes.len())],
         };
 
@@ -702,6 +713,142 @@ impl ConvertController {
         Ok(())
     }
 
+    /// Queue a BMC-installer recover for ping-only Talos workers using the
+    /// last convert job's identity + captured network (no SSH required).
+    pub async fn start_recover(
+        &self,
+        user: &str,
+        cluster_id: Uuid,
+        body: RecoverBody,
+    ) -> Result<Uuid, AppError> {
+        if body.hostnames.is_empty() {
+            return Err(AppError::InvalidInput("hostnames required".into()));
+        }
+        let history = self
+            .pool
+            .fetch_all_as::<repos::provision_job::ProvisionJob>(
+                "SELECT * FROM provision_jobs WHERE cluster_id = ? AND kind = ? ORDER BY created_at DESC LIMIT 20",
+                &[
+                    crate::db::pool::SqlVal::Uuid(cluster_id),
+                    crate::db::pool::SqlVal::text(JOB_KIND),
+                ],
+            )
+            .await?;
+        if history.is_empty() {
+            return Err(AppError::NotFound("no convert job to recover from".into()));
+        }
+        for j in &history {
+            if j.status == "running" {
+                let _ = repos::provision_job::update_status(
+                    &self.pool,
+                    j.id,
+                    "cancelled",
+                    Some("superseded by BMC recover"),
+                    None,
+                )
+                .await;
+            }
+        }
+        let mut last_payload = ConvertJobPayload::default();
+        for j in &history {
+            let p: ConvertJobPayload =
+                serde_json::from_str(j.payload.as_deref().unwrap_or("{}")).unwrap_or_default();
+            if p.cluster_identity.is_some() {
+                last_payload = p;
+                break;
+            }
+        }
+        if last_payload.cluster_identity.is_none() {
+            return Err(AppError::InvalidInput(
+                "no convert job has a cluster identity; cannot recover".into(),
+            ));
+        }
+        // Prefer the original (non-recover) node list so we still have every
+        // captured bond/IP even after a previous recover job ran a subset.
+        let mut node_catalog = last_payload.nodes.clone();
+        for j in &history {
+            let p: ConvertJobPayload =
+                serde_json::from_str(j.payload.as_deref().unwrap_or("{}")).unwrap_or_default();
+            for n in p.nodes {
+                if !node_catalog.iter().any(|e| e.name == n.name) {
+                    node_catalog.push(n);
+                }
+            }
+        }
+        last_payload.nodes = node_catalog;
+        let machines = repos::machine::list_by_cluster(&self.pool, cluster_id).await?;
+        let mut plans = Vec::new();
+        let mut states = Vec::new();
+        for hn in &body.hostnames {
+            let plan = last_payload
+                .nodes
+                .iter()
+                .find(|n| n.name == *hn)
+                .cloned()
+                .ok_or_else(|| {
+                    AppError::InvalidInput(format!(
+                        "{hn}: not in last convert job (need captured network)"
+                    ))
+                })?;
+            if !network_usable(&plan.network) {
+                return Err(AppError::InvalidInput(format!(
+                    "{hn}: last convert capture has no usable network"
+                )));
+            }
+            let Some(m) = machines.iter().find(|m| m.hostname == *hn) else {
+                return Err(AppError::NotFound(format!("{hn}: machine not in cluster")));
+            };
+            if !m.has_bmc() {
+                return Err(AppError::InvalidInput(format!(
+                    "{hn}: BMC not configured (needed for installer recover)"
+                )));
+            }
+            states.push(ConvertNodeState {
+                name: hn.clone(),
+                role: plan.role.clone(),
+                status: "pending".into(),
+                current_step: "bmc-installer".into(),
+                error: String::new(),
+                attempts: 0,
+                installer_gone: false,
+            });
+            plans.push(plan);
+        }
+        let now = Utc::now();
+        let mut payload = last_payload;
+        payload.bmc_recover = true;
+        payload.installer_iso_url = body.iso_url.filter(|s| !s.trim().is_empty());
+        payload.nodes = plans;
+        payload.node_states = states;
+        payload.phase = "workers".into();
+        payload.current_index = 0;
+        payload.steps_log.clear();
+        payload.log("BMC installer recover queued");
+        let id = Uuid::new_v4();
+        let job = repos::provision_job::ProvisionJob {
+            id,
+            cluster_id: Some(cluster_id),
+            kind: JOB_KIND.into(),
+            status: "running".into(),
+            desired_workers: 0,
+            payload: Some(serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into())),
+            error: None,
+            created_by: Some(user.to_string()),
+            created_at: now,
+            updated_at: now,
+        };
+        repos::provision_job::create(&self.pool, &job).await?;
+        crate::utils::audit::log_action(
+            &self.pool,
+            user,
+            "start_convert_recover",
+            &id.to_string(),
+            &cluster_id.to_string(),
+        )
+        .await;
+        Ok(id)
+    }
+
     /// Active convert jobs (driven by the scheduler).
     pub fn active_jobs(pool: &DbPool) -> impl std::future::Future<Output = Result<Vec<repos::provision_job::ProvisionJob>, AppError>> + '_ {
         async move {
@@ -744,6 +891,16 @@ pub struct StartBody {
     /// the running cluster plane.
     #[serde(default)]
     pub control_plane_endpoint: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoverBody {
+    pub hostnames: Vec<String>,
+    /// Optional HTTP ISO for iLO/Redfish virtual media. When omitted the
+    /// scheduler PXE-boots instead (only works if TCS owns DHCP).
+    #[serde(default)]
+    pub iso_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

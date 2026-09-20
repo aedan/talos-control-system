@@ -1,5 +1,6 @@
 //! BMC power and boot control — Redfish primary, IPMI fallback.
 
+mod ilo;
 mod inband;
 mod ipmi;
 mod nics;
@@ -34,6 +35,9 @@ impl PowerState {
 pub enum BootTarget {
     Pxe,
     Disk,
+    /// One-shot virtual CD/DVD (iLO/iDRAC ISO). Used to recover a node whose
+    /// disk Talos is ping-only (no apid) without fighting MAAS for PXE.
+    Cdrom,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,9 +193,30 @@ impl BmcSession {
 
     pub async fn mount_iso(&self, iso_url: &str, media: &str) -> Result<(), AppError> {
         if let Some(rf) = &self.redfish {
-            return rf.mount_iso(iso_url, media).await;
+            match rf.mount_iso(iso_url, media).await {
+                Ok(()) => return Ok(()),
+                Err(e) => tracing::debug!(error = %e, "Redfish mount_iso failed; trying iLO RIBCL"),
+            }
         }
-        Err(AppError::Internal("ISO mount only supported via Redfish".into()))
+        Err(AppError::Internal(
+            "ISO mount needs Redfish or an iLO RIBCL session (pass BMC creds via mount_iso_with_creds)"
+                .into(),
+        ))
+    }
+
+    /// Redfish first, then HP iLO 4 RIBCL (no Redfish on older iLO).
+    pub async fn mount_iso_with_creds(
+        &self,
+        creds: &BmcCredentials,
+        iso_url: &str,
+        media: &str,
+    ) -> Result<(), AppError> {
+        if let Some(rf) = &self.redfish {
+            if rf.mount_iso(iso_url, media).await.is_ok() {
+                return Ok(());
+            }
+        }
+        ilo::insert_virtual_media(creds, iso_url).await
     }
 
     pub async fn unmount_iso(&self, media: &str) -> Result<(), AppError> {
@@ -199,6 +224,19 @@ impl BmcSession {
             return rf.unmount_iso(media).await;
         }
         Err(AppError::Internal("ISO unmount only supported via Redfish".into()))
+    }
+
+    pub async fn unmount_iso_with_creds(
+        &self,
+        creds: &BmcCredentials,
+        media: &str,
+    ) -> Result<(), AppError> {
+        if let Some(rf) = &self.redfish {
+            if rf.unmount_iso(media).await.is_ok() {
+                return Ok(());
+            }
+        }
+        ilo::eject_virtual_media(creds).await
     }
 
     /// Host (and BMC) NIC MACs from Redfish EthernetInterfaces and/or

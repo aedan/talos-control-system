@@ -289,6 +289,7 @@ impl RedfishClient {
         let boot_target = match target {
             BootTarget::Pxe => "Pxe",
             BootTarget::Disk => "Hdd",
+            BootTarget::Cdrom => "Cd",
         };
         let enabled = if once { "Once" } else { "Continuous" };
         let body = serde_json::json!({

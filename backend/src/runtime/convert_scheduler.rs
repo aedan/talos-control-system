@@ -305,9 +305,15 @@ async fn step_node_phase(
 
     match cur.as_str() {
         "pending" => {
-            payload.set_state(&node.name, "kexec", "transferring installer + kexec", "");
-            payload.log(&format!("kexec-ing {} into Talos installer", node.name));
-            do_kexec(sshc, factory, metal_pxe, payload, &node).await;
+            if payload.bmc_recover {
+                payload.set_state(&node.name, "kexec", "bmc boot installer", "");
+                payload.log(&format!("{} BMC-booting Talos installer (no SSH kexec)", node.name));
+                do_bmc_installer_boot(pool, jwt_secret, payload, cluster_id, &node).await;
+            } else {
+                payload.set_state(&node.name, "kexec", "transferring installer + kexec", "");
+                payload.log(&format!("kexec-ing {} into Talos installer", node.name));
+                do_kexec(sshc, factory, metal_pxe, payload, &node).await;
+            }
         }
         "kexec" => match probe_talos_up(&node.address).await {
             Ok(true) => {
@@ -319,7 +325,8 @@ async fn step_node_phase(
             }
             Ok(false) => {
                 let attempts = bump_attempts(payload, &node.name);
-                if attempts > 60 {
+                let cap = if payload.bmc_recover { 120 } else { 60 };
+                if attempts > cap {
                     fail_node(
                         payload,
                         &node.name,
@@ -547,6 +554,97 @@ async fn refresh_node_network(sshc: &SshClient, payload: &mut ConvertJobPayload,
             ));
         }
     }
+}
+
+/// Boot the Talos installer via BMC (virtual CD or PXE) when SSH kexec is
+/// impossible — ping-only nodes after a bad STATE rewrite.
+async fn do_bmc_installer_boot(
+    pool: &DbPool,
+    jwt_secret: &str,
+    payload: &mut ConvertJobPayload,
+    cluster_id: Uuid,
+    node: &ConvertNodePlan,
+) {
+    let machines = match repos::machine::list_by_cluster(pool, cluster_id).await {
+        Ok(m) => m,
+        Err(e) => {
+            fail_node(payload, &node.name, "bmc", &format!("list machines: {e}"));
+            return;
+        }
+    };
+    let Some(machine) = machines.iter().find(|m| m.hostname == node.name) else {
+        fail_node(payload, &node.name, "bmc", "machine row not found");
+        return;
+    };
+    if !machine.has_bmc() {
+        fail_node(payload, &node.name, "bmc", "BMC not configured");
+        return;
+    }
+    let enc = match machine.bmc_password_enc.as_ref() {
+        Some(e) => e,
+        None => {
+            fail_node(payload, &node.name, "bmc", "no BMC password");
+            return;
+        }
+    };
+    let plain = match secrets::decrypt(jwt_secret, enc) {
+        Ok(p) => p,
+        Err(e) => {
+            fail_node(payload, &node.name, "bmc", &format!("decrypt BMC: {e}"));
+            return;
+        }
+    };
+    let creds = match crate::integration::bmc::BmcCredentials::from_machine(
+        machine, &plain, 15, "lanplus",
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            fail_node(payload, &node.name, "bmc", &format!("{e}"));
+            return;
+        }
+    };
+    let sess = match crate::integration::bmc::BmcSession::connect(&creds).await {
+        Ok(s) => s,
+        Err(e) => {
+            fail_node(payload, &node.name, "bmc", &format!("BMC connect: {e}"));
+            return;
+        }
+    };
+    if let Some(iso) = payload
+        .installer_iso_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        match sess.mount_iso_with_creds(&creds, iso, "CD").await {
+            Ok(()) => payload.log(&format!("{} mounted installer ISO", node.name)),
+            Err(e) => {
+                fail_node(payload, &node.name, "bmc", &format!("mount ISO: {e}"));
+                return;
+            }
+        }
+        if let Err(e) = sess
+            .set_boot(crate::integration::bmc::BootTarget::Cdrom, true)
+            .await
+        {
+            payload.log(&format!("{} set boot cdrom failed ({e}); ISO boot_once may still apply", node.name));
+        }
+    } else if let Err(e) = sess
+        .set_boot(crate::integration::bmc::BootTarget::Pxe, true)
+        .await
+    {
+        fail_node(payload, &node.name, "bmc", &format!("set PXE: {e}"));
+        return;
+    }
+    let action = match sess.get_power_state().await {
+        Ok(crate::integration::bmc::PowerState::On) => "cycle",
+        _ => "on",
+    };
+    if let Err(e) = sess.power(action).await {
+        fail_node(payload, &node.name, "bmc", &format!("power {action}: {e}"));
+        return;
+    }
+    payload.log(&format!("{} BMC power {action}; waiting for installer :50000", node.name));
 }
 
 /// Resolve boot assets + kexec the node into the Talos installer.

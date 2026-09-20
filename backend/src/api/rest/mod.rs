@@ -122,6 +122,7 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .route("/clusters/:id/convert/start", post(handlers::convert_start))
         .route("/clusters/:id/convert", get(handlers::convert_status))
         .route("/clusters/:id/convert/cancel", post(handlers::convert_cancel))
+        .route("/clusters/:id/convert/recover", post(handlers::convert_recover))
         .route("/clusters/:id/siderolink", get(handlers::get_cluster_siderolink))
         .route("/clusters/:id/siderolink/enable", post(handlers::enable_cluster_siderolink))
         .route("/clusters/:id/siderolink/disable", post(handlers::disable_cluster_siderolink))
@@ -335,6 +336,8 @@ pub fn create_rest_router(state: AppState, _branding: &BrandingConfig) -> Router
         .merge(protected_routes);
 
     Router::new()
+        // Unauthenticated: iLO/iDRAC virtual-media fetch of factory ISOs.
+        .route("/tcs-pxe/*path", get(handlers::serve_tcs_pxe_file))
         .nest("/api", api_routes)
         .fallback(static_server::serve_static)
         .layer(cors)

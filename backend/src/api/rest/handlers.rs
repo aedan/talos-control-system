@@ -30,6 +30,50 @@ pub async fn health_check() -> Json<HealthResponse> {
     })
 }
 
+/// GET /tcs-pxe/*path — public factory ISO/kernel tree under metal.pxe.asset_dir.
+/// iLO4 virtual media cannot authenticate; keep this path unauthenticated and
+/// confined to the PXE asset directory.
+pub async fn serve_tcs_pxe_file(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::body::Body;
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    if path.contains("..") || path.starts_with('/') {
+        return Err((StatusCode::BAD_REQUEST, "invalid path".into()));
+    }
+    let root = std::path::PathBuf::from(&state.config.metal.pxe.asset_dir);
+    let full = root.join(&path);
+    let Ok(canon) = tokio::fs::canonicalize(&full).await else {
+        return Err((StatusCode::NOT_FOUND, "not found".into()));
+    };
+    let Ok(root_canon) = tokio::fs::canonicalize(&root).await else {
+        return Err((StatusCode::NOT_FOUND, "not found".into()));
+    };
+    if !canon.starts_with(&root_canon) {
+        return Err((StatusCode::FORBIDDEN, "path escapes asset dir".into()));
+    }
+    let data = tokio::fs::read(&canon)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, "not found".into()))?;
+    let ctype = if path.ends_with(".iso") {
+        "application/x-iso9660-image"
+    } else if path.ends_with(".xz") || path.ends_with(".zst") {
+        "application/octet-stream"
+    } else {
+        "application/octet-stream"
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, ctype),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        Body::from(data),
+    )
+        .into_response())
+}
+
 /// Public: which auth entrypoints the login UI should show.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -4503,6 +4547,7 @@ pub async fn machine_boot_device(
     let target = match payload.target.to_ascii_lowercase().as_str() {
         "pxe" => crate::integration::bmc::BootTarget::Pxe,
         "disk" | "hdd" => crate::integration::bmc::BootTarget::Disk,
+        "cdrom" | "cd" | "dvd" => crate::integration::bmc::BootTarget::Cdrom,
         other => {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -4581,7 +4626,7 @@ pub async fn machine_mount_iso(
     let sess = crate::integration::bmc::BmcSession::connect(&creds)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    sess.mount_iso(&payload.iso_url, &payload.media)
+    sess.mount_iso_with_creds(&creds, &payload.iso_url, &payload.media)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     crate::utils::audit::log_action(
@@ -4634,7 +4679,7 @@ pub async fn machine_unmount_iso(
     let sess = crate::integration::bmc::BmcSession::connect(&creds)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    sess.unmount_iso(&payload.media)
+    sess.unmount_iso_with_creds(&creds, &payload.media)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     crate::utils::audit::log_action(
@@ -5313,6 +5358,29 @@ pub async fn convert_status(
         Ok(s) => serde_json::to_value(s)
             .map(Json)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        Err(e) if matches!(e, crate::AppError::NotFound(_)) => {
+            Err((StatusCode::NOT_FOUND, e.to_string()))
+        }
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+pub async fn convert_recover(
+    State(state): State<AppState>,
+    Path(cluster_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(body): Json<crate::controllers::convert::RecoverBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" && claims.role != "operator" {
+        return Err((StatusCode::FORBIDDEN, "operator or admin required".into()));
+    }
+    let c = crate::controllers::ConvertController::new(state.db_pool.clone(), &state.config);
+    match c.start_recover(&claims.sub, cluster_id, body).await {
+        Ok(id) => Ok((
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "jobId": id, "status": "running", "mode": "bmc-recover" })),
+        )),
         Err(e) if matches!(e, crate::AppError::NotFound(_)) => {
             Err((StatusCode::NOT_FOUND, e.to_string()))
         }

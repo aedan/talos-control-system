@@ -148,6 +148,12 @@ impl IpmiClient {
             BootTarget::Disk => {
                 let _ = self.run(&["chassis", "bootdev", "disk"]).await?;
             }
+            BootTarget::Cdrom => {
+                // options=efiboot: iLO4/UEFI hosts ignore a legacy CDROM bootdev.
+                let _ = self
+                    .run(&["chassis", "bootdev", "cdrom", "options=efiboot"])
+                    .await?;
+            }
         }
         Ok(())
     }
