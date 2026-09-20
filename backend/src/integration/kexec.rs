@@ -325,11 +325,11 @@ pub fn kexec_command(kernel_remote: &str, initramfs_remote: &str, append: &str) 
     if initramfs_remote.is_empty() {
         // Factory UEFI combined image: no separate initrd.
         format!(
-            "kexec -l {kernel_remote} --append='{append}' && kexec -e"
+            "PATH=/usr/sbin:/usr/bin:/sbin:/bin kexec -l {kernel_remote} --append='{append}' && PATH=/usr/sbin:/usr/bin:/sbin:/bin kexec -e"
         )
     } else {
         format!(
-            "kexec -l {kernel_remote} --initrd={initramfs_remote} --append='{append}' && kexec -e"
+            "PATH=/usr/sbin:/usr/bin:/sbin:/bin kexec -l {kernel_remote} --initrd={initramfs_remote} --append='{append}' && PATH=/usr/sbin:/usr/bin:/sbin:/bin kexec -e"
         )
     }
 }
@@ -750,7 +750,7 @@ mod tests {
     #[test]
     fn kexec_command_shape_separate_initrd() {
         let c = kexec_command("/tmp/vmlinuz", "/tmp/initramfs.xz", "console=ttyS0");
-        assert!(c.starts_with("kexec -l /tmp/vmlinuz"));
+        assert!(c.contains("kexec -l /tmp/vmlinuz"));
         assert!(c.contains("--initrd=/tmp/initramfs.xz"));
         assert!(c.ends_with("kexec -e"));
     }
@@ -758,7 +758,7 @@ mod tests {
     #[test]
     fn kexec_command_shape_combined_efi_no_initrd() {
         let c = kexec_command("/tmp/vmlinuz.efi", "", "console=ttyS0 talos.platform=metal");
-        assert!(c.starts_with("kexec -l /tmp/vmlinuz.efi"));
+        assert!(c.contains("kexec -l /tmp/vmlinuz.efi"));
         assert!(!c.contains("--initrd="));
         assert!(c.ends_with("kexec -e"));
     }
