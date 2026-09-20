@@ -56,6 +56,12 @@ pub struct ConvertNodePlan {
     /// Existing kubelet client key (PEM).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub kubelet_key: String,
+    #[serde(default)]
+    pub install_disk: String,
+    #[serde(default)]
+    pub bmc_address: String,
+    #[serde(default)]
+    pub bmc_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -242,6 +248,14 @@ pub struct PreviewNode {
     pub kubelet_cert: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub kubelet_key: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub bmc_address: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub bmc_type: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub install_disk: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mac_address: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -349,6 +363,10 @@ impl ConvertController {
                     network: NodeNetworkCapture::default(),
                     kubelet_cert: String::new(),
                     kubelet_key: String::new(),
+                    bmc_address: m.bmc_address.clone(),
+                    bmc_type: m.bmc_type.clone(),
+                    install_disk: m.install_disk.clone(),
+                    mac_address: m.mac_address.clone(),
                 });
                 blockers.push(format!("node {}: no address recorded", m.hostname));
                 continue;
@@ -362,6 +380,14 @@ impl ConvertController {
                     if m.machine_type == "control-plane" || m.machine_type == "controlplane" {
                         cp_nodes.push(m.hostname.clone());
                     }
+                    let _ = persist_capture_inventory(&self.pool, m, &res).await;
+                    let mac = res
+                        .network
+                        .interfaces
+                        .iter()
+                        .find(|i| !i.mac.is_empty())
+                        .map(|i| i.mac.clone())
+                        .unwrap_or_else(|| m.mac_address.clone());
                     nodes.push(PreviewNode {
                         name: m.hostname.clone(),
                         role: m.machine_type.clone(),
@@ -374,6 +400,22 @@ impl ConvertController {
                         network: res.network,
                         kubelet_cert: res.kubelet_cert,
                         kubelet_key: res.kubelet_key,
+                        bmc_address: if res.bmc.address.is_empty() {
+                            m.bmc_address.clone()
+                        } else {
+                            res.bmc.address.clone()
+                        },
+                        bmc_type: if res.bmc.bmc_type.is_empty() {
+                            m.bmc_type.clone()
+                        } else {
+                            res.bmc.bmc_type.clone()
+                        },
+                        install_disk: if res.install_disk.is_empty() {
+                            m.install_disk.clone()
+                        } else {
+                            res.install_disk.clone()
+                        },
+                        mac_address: mac,
                     });
                 }
                 Err(e) => {
@@ -391,6 +433,10 @@ impl ConvertController {
                         network: NodeNetworkCapture::default(),
                         kubelet_cert: String::new(),
                         kubelet_key: String::new(),
+                        bmc_address: m.bmc_address.clone(),
+                        bmc_type: m.bmc_type.clone(),
+                        install_disk: m.install_disk.clone(),
+                        mac_address: m.mac_address.clone(),
                     });
                 }
             }
@@ -445,14 +491,15 @@ impl ConvertController {
                     n.name
                 )));
             }
-            let (network, drivers, kubelet_cert, kubelet_key) = match capture.capture(&m.address).await {
+            let (network, drivers, kubelet_cert, kubelet_key, install_disk, bmc) = match capture.capture(&m.address).await {
                 Ok(res) => {
                     let drivers = if n.drivers.is_empty() {
-                        res.drivers
+                        res.drivers.clone()
                     } else {
                         n.drivers.clone()
                     };
-                    (res.network, drivers, res.kubelet_cert, res.kubelet_key)
+                    let _ = persist_capture_inventory(&self.pool, m, &res).await;
+                    (res.network, drivers, res.kubelet_cert, res.kubelet_key, res.install_disk, res.bmc)
                 }
                 Err(e) => {
                     return Err(AppError::InvalidInput(format!(
@@ -475,6 +522,9 @@ impl ConvertController {
                 drivers,
                 kubelet_cert,
                 kubelet_key,
+                install_disk,
+                bmc_address: bmc.address,
+                bmc_type: bmc.bmc_type,
             });
         }
         let _ = by_name;
@@ -498,6 +548,24 @@ impl ConvertController {
                     .await?,
             )
         };
+        if let Ok(fm) = serde_json::to_string(&modules) {
+            let mut c = cluster.clone();
+            c.factory_modules = Some(fm);
+            c.talos_version = body.talos_version.clone();
+            c.updated_at = Utc::now();
+            let _ = repos::cluster::update(&self.pool, &c).await;
+            let _ = self
+                .pool
+                .execute(
+                    "UPDATE clusters SET talos_version = ?, updated_at = ? WHERE id = ?",
+                    &[
+                        crate::db::pool::SqlVal::text(&body.talos_version),
+                        crate::db::pool::SqlVal::DateTime(c.updated_at),
+                        crate::db::pool::SqlVal::Uuid(cluster_id),
+                    ],
+                )
+                .await;
+        }
 
         let now = Utc::now();
         let payload = ConvertJobPayload {
@@ -662,6 +730,46 @@ pub struct NodeIn {
     pub kubelet_cert: String,
     #[serde(default)]
     pub kubelet_key: String,
+}
+
+/// Write captured BMC / install disk / MAC onto the machine row so TCS
+/// inventory matches the live node (no BMC user/password is stored here).
+async fn persist_capture_inventory(
+    pool: &DbPool,
+    machine: &crate::db::models::machine::Machine,
+    res: &crate::integration::network_capture::CaptureResult,
+) -> Result<(), AppError> {
+    let mut m = machine.clone();
+    let mut dirty = false;
+    if !res.bmc.address.is_empty() && m.bmc_address != res.bmc.address {
+        m.bmc_address = res.bmc.address.clone();
+        dirty = true;
+    }
+    if !res.bmc.bmc_type.is_empty() && res.bmc.bmc_type != "auto" && m.bmc_type != res.bmc.bmc_type {
+        m.bmc_type = res.bmc.bmc_type.clone();
+        dirty = true;
+    }
+    if !res.install_disk.is_empty() && m.install_disk != res.install_disk {
+        m.install_disk = res.install_disk.clone();
+        dirty = true;
+    }
+    if let Some(mac) = res
+        .network
+        .interfaces
+        .iter()
+        .find(|i| !i.mac.is_empty())
+        .map(|i| i.mac.clone())
+    {
+        if m.mac_address.trim().is_empty() {
+            m.mac_address = mac;
+            dirty = true;
+        }
+    }
+    if dirty {
+        m.updated_at = Utc::now();
+        repos::machine::update(pool, &m).await?;
+    }
+    Ok(())
 }
 
 fn os_image_for(m: &crate::db::models::machine::Machine) -> String {

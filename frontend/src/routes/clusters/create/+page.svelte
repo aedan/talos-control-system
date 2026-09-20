@@ -4,6 +4,7 @@
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
   import Button from '$lib/components/Button.svelte';
+  import FactoryModulesPicker from '$lib/components/FactoryModulesPicker.svelte';
   import Spinner from '$lib/components/Spinner.svelte';
   import type { FactoryExtension } from '$lib/api/types';
 
@@ -485,37 +486,14 @@
 
         <div class="form-group">
           <label>System extensions (modules)</label>
-          <p class="hint">
-            Optional. Bake Talos system extensions into every node's image (e.g.
-            <code>siderolabs/bnx2-bnx2x</code> for Broadcom 10G NICs). Nodes are upgraded to a
-            factory image that includes them. Leave empty for the default image.
-          </p>
-          {#if factoryError}
-            <p class="hint error">{factoryError}</p>
-          {:else if factoryBusy}
-            <p class="hint">Loading module catalog…</p>
-          {:else}
-            <div class="module-picker">
-              {#each factoryExtensions as f (f.name)}
-                <label class="module-option" title={f.description || f.ref || ''}>
-                  <input type="checkbox" checked={selectedModules.has(f.name)} onchange={() => toggleModule(f.name)} />
-                  <span class="mono">{shortModuleName(f.name)}</span>
-                  {#if f.author}<span class="hint"> · {f.author}</span>{/if}
-                </label>
-              {/each}
-              {#if factoryExtensions.length === 0}
-                <p class="hint">No modules returned for {talosVersion}.</p>
-              {/if}
-            </div>
-            {#if selectedModules.size > 0}
-              <p class="hint">
-                Selected:
-                {#each [...selectedModules].sort() as m (m)}
-                  <span class="module-chip mono">{shortModuleName(m)}</span>
-                {/each}
-              </p>
-            {/if}
-          {/if}
+          <FactoryModulesPicker
+            extensions={factoryExtensions}
+            selected={selectedModules}
+            busy={factoryBusy}
+            error={factoryError}
+            version={talosVersion}
+            onchange={(next) => (selectedModules = next)}
+          />
         </div>
       </div>
 

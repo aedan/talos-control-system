@@ -738,7 +738,11 @@ async fn node_machine_config(
     with_install: bool,
 ) -> Result<String, AppError> {
     let image = convert_disk_image(factory, payload);
-    let disk = "/dev/sda"; // overtake: install to the boot disk; ceph OSDs are sdb+
+    let disk = if node.install_disk.trim().is_empty() {
+        "/dev/sda"
+    } else {
+        node.install_disk.trim()
+    };
     let k8s_ca = stored_kubeconfig_ca(pool, jwt_secret, cluster_id).await.unwrap_or_default();
     let is_cp = node.role == "control-plane" || node.role == "controlplane";
     let machine_type = if is_cp { "controlplane" } else { "worker" };
@@ -1635,9 +1639,9 @@ mod tests {
         let mut p = ConvertJobPayload::default();
         p.phase = "control-plane".into();
         p.nodes = vec![
-            ConvertNodePlan { name: "cp1".into(), role: "control-plane".into(), address: "10.0.0.1".into(), network: Default::default(), drivers: vec![], kubelet_cert: String::new(), kubelet_key: String::new() },
-            ConvertNodePlan { name: "cp2".into(), role: "control-plane".into(), address: "10.0.0.2".into(), network: Default::default(), drivers: vec![], kubelet_cert: String::new(), kubelet_key: String::new() },
-            ConvertNodePlan { name: "w1".into(), role: "worker".into(), address: "10.0.0.3".into(), network: Default::default(), drivers: vec![], kubelet_cert: String::new(), kubelet_key: String::new() },
+            ConvertNodePlan { name: "cp1".into(), role: "control-plane".into(), address: "10.0.0.1".into(), ..Default::default() },
+            ConvertNodePlan { name: "cp2".into(), role: "control-plane".into(), address: "10.0.0.2".into(), ..Default::default() },
+            ConvertNodePlan { name: "w1".into(), role: "worker".into(), address: "10.0.0.3".into(), ..Default::default() },
         ];
         p.node_states = p.nodes.iter().map(|n| crate::controllers::convert::ConvertNodeState {
             name: n.name.clone(), role: n.role.clone(), status: "pending".into(), current_step: "".into(), error: "".into(), attempts: 0, installer_gone: false,

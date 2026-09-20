@@ -4,17 +4,17 @@
   import { onMount, onDestroy } from 'svelte';
   import { success, error as notifyError } from '$lib/stores/notifications';
   import Button from '$lib/components/Button.svelte';
+  import FactoryModulesPicker from '$lib/components/FactoryModulesPicker.svelte';
   import { client } from '$lib/api/client';
+  import type { FactoryExtension } from '$lib/api/types';
   import {
     convertPreview,
     convertStart,
     convertStatus,
     convertCancel,
-    fetchFactoryExtensions,
     type ConvertPreview,
     type ConvertStatus,
     type ConvertNode,
-    type FactoryExtensionItem,
   } from '$lib/api/convert';
   import { formatBytes } from '$lib/api/types';
 
@@ -37,22 +37,7 @@
   let cpEndpoint = $state('');
   let knownVersions = $state<string[]>(['v1.13.10', 'v1.13.7', 'v1.13.6', 'v1.13.5', 'v1.12.10', 'v1.12.9']);
   let clusterTalos = $state('');
-  let extensions = $state<FactoryExtensionItem[]>([]);
-  /** Operator-facing presets. Hardware Analyze also ticks modules from captured drivers. */
-  const MODULE_PRESETS: { id: string; label: string; hint: string; modules: string[] }[] = [
-    {
-      id: '10g-bnx2',
-      label: '10Gb Broadcom NICs',
-      hint: 'bnx2 / bnx2x firmware — needed on most 10Gb Broadcom bonds',
-      modules: ['siderolabs/bnx2-bnx2x'],
-    },
-    {
-      id: 'genestack-storage',
-      label: 'Genestack storage',
-      hint: 'Longhorn + Ceph need iSCSI and NFS in the installer and on disk',
-      modules: ['siderolabs/iscsi-tools', 'siderolabs/nfs-utils'],
-    },
-  ];
+  let extensions = $state<FactoryExtension[]>([]);
   let selectedModules = $state<Set<string>>(new Set());
   let factoryBusy = $state(false);
   let factoryError = $state('');
@@ -60,31 +45,6 @@
   function shortName(full: string): string {
     const i = full.indexOf('/');
     return i >= 0 ? full.slice(i + 1) : full;
-  }
-
-  function toggleModule(name: string) {
-    const next = new Set(selectedModules);
-    if (next.has(name)) next.delete(name);
-    else next.add(name);
-    selectedModules = next;
-  }
-
-  function presetActive(id: string): boolean {
-    const p = MODULE_PRESETS.find((x) => x.id === id);
-    if (!p) return false;
-    return p.modules.every((m) => selectedModules.has(m));
-  }
-
-  function togglePreset(id: string) {
-    const p = MODULE_PRESETS.find((x) => x.id === id);
-    if (!p) return;
-    const on = !presetActive(id);
-    const next = new Set(selectedModules);
-    for (const m of p.modules) {
-      if (on) next.add(m);
-      else next.delete(m);
-    }
-    selectedModules = next;
   }
 
   async function loadClusterMeta() {
@@ -105,7 +65,8 @@
     factoryBusy = true;
     factoryError = '';
     try {
-      extensions = await fetchFactoryExtensions(version);
+      const res = await client.get(`/factory/extensions?version=${encodeURIComponent(version)}`);
+      extensions = ((res as { extensions: FactoryExtension[] }).extensions) || [];
     } catch (e: unknown) {
       factoryError = e instanceof Error ? e.message : 'Failed to load module catalog';
       extensions = [];
@@ -359,57 +320,17 @@
           </select>
         </label>
       </div>
-      <p class="hint">Target Talos version for the installer image.</p>
+      <p class="hint">Target Talos version for the installer image. Analyze will recapture each node’s network, BMC (ipmitool in-band), and boot disk into TCS inventory.</p>
 
-      {#if factoryError}
-        <p class="hint error">{factoryError}</p>
-      {:else if factoryBusy}
-        <p class="hint">Loading module catalog…</p>
-      {:else}
-        <p class="hint">
-          Image Factory modules baked into the kexec installer <em>and</em> the on-disk image.
-          Pick what this environment needs — Analyze will also tick modules from live NIC/storage
-          drivers. Nothing is forced.
-        </p>
-        <div class="preset-row">
-          {#each MODULE_PRESETS as p (p.id)}
-            <button
-              type="button"
-              class="preset-btn"
-              class:on={presetActive(p.id)}
-              title={p.hint}
-              onclick={() => togglePreset(p.id)}
-            >
-              <span class="preset-label">{p.label}</span>
-              <span class="preset-hint">{p.hint}</span>
-            </button>
-          {/each}
-        </div>
-        <div class="module-picker">
-          {#each extensions as f (f.name)}
-            <label class="module-option" title={f.description || f.ref || ''}>
-              <input
-                type="checkbox"
-                checked={selectedModules.has(f.name)}
-                onchange={() => toggleModule(f.name)}
-              />
-              <span class="module-name mono">{shortName(f.name)}</span>
-              {#if f.author}<span class="module-author mono"> · {f.author}</span>{/if}
-            </label>
-          {/each}
-          {#if extensions.length === 0}
-            <p class="hint">No modules returned for {talosVersion}.</p>
-          {/if}
-        </div>
-        {#if selectedModules.size > 0}
-          <p class="hint">
-            Modules:
-            {#each [...selectedModules].sort() as m (m)}
-              <span class="module-chip mono">{shortName(m)}</span>
-            {/each}
-          </p>
-        {/if}
-      {/if}
+      <label>System extensions (modules)</label>
+      <FactoryModulesPicker
+        {extensions}
+        selected={selectedModules}
+        busy={factoryBusy}
+        error={factoryError}
+        version={talosVersion}
+        onchange={(next) => (selectedModules = next)}
+      />
     </div>
 
     <div class="form-actions">
@@ -461,6 +382,8 @@
           <th>SSH</th>
           <th>Drivers</th>
           <th>Recommended modules</th>
+          <th>BMC</th>
+          <th>Install disk</th>
           <th>Network</th>
         </tr>
       </thead>
@@ -488,6 +411,8 @@
             </td>
             <td class="mono">{n.drivers.length ? n.drivers.join(', ') : '—'}</td>
             <td class="mono">{n.recommendedModules.length ? n.recommendedModules.map(shortName).join(', ') : '—'}</td>
+            <td class="mono">{n.bmcAddress ? `${n.bmcAddress}${n.bmcType && n.bmcType !== 'auto' ? ' · ' + n.bmcType : ''}` : '—'}</td>
+            <td class="mono">{n.installDisk || '—'}</td>
             <td class="mono net">{summarizeNetwork(n)}</td>
           </tr>
         {/each}

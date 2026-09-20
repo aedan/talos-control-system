@@ -44,6 +44,10 @@ export interface ConvertNode {
   drivers: string[];
   recommendedModules: string[];
   network: ConvertNetwork;
+  bmcAddress?: string;
+  bmcType?: string;
+  installDisk?: string;
+  macAddress?: string;
 }
 
 export interface ConvertEtcd {

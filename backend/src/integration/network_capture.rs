@@ -52,6 +52,17 @@ pub struct NodeNetworkCapture {
     pub ovs_bridges: Vec<String>,
 }
 
+/// In-band BMC facts from `ipmitool lan print` / `mc info` on the node.
+/// No BMC username/password is required for this query.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeBmcCapture {
+    pub address: String,
+    pub mac: String,
+    /// `ilo`, `idrac`, or `auto`.
+    pub bmc_type: String,
+}
+
 /// Capture result: networking + active kernel module (driver) names.
 #[derive(Debug, Clone)]
 pub struct CaptureResult {
@@ -61,6 +72,9 @@ pub struct CaptureResult {
     pub kubelet_cert: String,
     /// Existing kubelet client key (PEM). Empty if not found.
     pub kubelet_key: String,
+    pub bmc: NodeBmcCapture,
+    /// Block device Talos should install to (e.g. `/dev/sda`), from the live root.
+    pub install_disk: String,
 }
 
 pub struct NetworkCapture {
@@ -94,6 +108,15 @@ echo "==OVS=="; ovs-vsctl list-br 2>/dev/null
 echo "==LSMOD=="; lsmod 2>/dev/null | awk 'NR>1{print $1}'
 echo "==KUBELET_CERT=="; cat /var/lib/kubelet/pki/kubelet-client-current.pem 2>/dev/null || cat /var/lib/kubelet/pki/kubelet.crt 2>/dev/null
 echo "==KUBELET_KEY=="; cat /var/lib/kubelet/pki/kubelet-client-current.key 2>/dev/null || cat /var/lib/kubelet/pki/kubelet.key 2>/dev/null
+echo "==BMC=="; ipmitool lan print 1 2>/dev/null || ipmitool lan print 2>/dev/null || ipmitool lan print 2>/dev/null
+echo "==MCINFO=="; ipmitool mc info 2>/dev/null
+echo "==BOOTDISK=="; {
+  src=$(findmnt -n -o SOURCE / 2>/dev/null)
+  pk=$(lsblk -no PKNAME "$src" 2>/dev/null | head -1)
+  if [ -n "$pk" ]; then echo "/dev/$pk"
+  elif [ -n "$src" ]; then echo "$src" | sed -E 's/p?[0-9]+$//'
+  fi
+}
 echo "==END==""#
     }
 
@@ -265,7 +288,66 @@ pub fn parse_capture(text: &str) -> CaptureResult {
     let kubelet_cert = section(text, "KUBELET_CERT");
     let kubelet_key = section(text, "KUBELET_KEY");
 
-    CaptureResult { network: net, drivers, kubelet_cert, kubelet_key }
+    let mut bmc = parse_ipmitool_lan_print(&section(text, "BMC"));
+    let detected = parse_ipmitool_mc_info(&section(text, "MCINFO"));
+    if bmc.bmc_type.is_empty() || bmc.bmc_type == "auto" {
+        bmc.bmc_type = detected;
+    }
+    let install_disk = section(text, "BOOTDISK")
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| l.starts_with("/dev/"))
+        .unwrap_or("")
+        .to_string();
+
+    CaptureResult {
+        network: net,
+        drivers,
+        kubelet_cert,
+        kubelet_key,
+        bmc,
+        install_disk,
+    }
+}
+
+/// Parse `ipmitool lan print` (in-band, no BMC credentials).
+pub fn parse_ipmitool_lan_print(text: &str) -> NodeBmcCapture {
+    let mut out = NodeBmcCapture::default();
+    for line in text.lines() {
+        let l = line.trim();
+        let Some((k, v)) = l.split_once(':') else { continue };
+        let key = k.trim().to_ascii_lowercase();
+        let val = v.trim();
+        if val.is_empty() {
+            continue;
+        }
+        if key == "ip address" && val != "0.0.0.0" {
+            out.address = val.to_string();
+        } else if key == "mac address" {
+            out.mac = val.to_ascii_lowercase();
+        }
+    }
+    if out.bmc_type.is_empty() {
+        out.bmc_type = "auto".into();
+    }
+    out
+}
+
+/// Map `ipmitool mc info` Manufacturer Name → TCS bmc_type.
+pub fn parse_ipmitool_mc_info(text: &str) -> String {
+    for line in text.lines() {
+        if !line.to_ascii_lowercase().contains("manufacturer") {
+            continue;
+        }
+        let low = line.to_ascii_lowercase();
+        if low.contains("hewlett") || low.contains("hpe") || low.contains(" hp") {
+            return "ilo".into();
+        }
+        if low.contains("dell") {
+            return "idrac".into();
+        }
+    }
+    "auto".into()
 }
 
 /// Render the captured per-node networking as a Talos `machine.network` YAML
@@ -475,6 +557,33 @@ openvswitch
         assert_eq!(r.network.ovs_bridges, vec!["br-int", "br-ex"]);
         assert!(r.drivers.contains(&"bnx2x".to_string()));
         assert!(r.drivers.contains(&"bonding".to_string()));
+        assert!(r.bmc.address.is_empty());
+        assert!(r.install_disk.is_empty());
+    }
+
+    #[test]
+    fn parse_ipmitool_lan_print_ip_and_mac() {
+        let t = "\
+Set in Progress         : Set Complete
+IP Address Source       : Static Address
+IP Address              : 172.20.8.29
+Subnet Mask             : 255.255.255.0
+MAC Address             : 9c:dc:71:70:d0:51
+Default Gateway IP      : 172.20.8.1
+";
+        let b = parse_ipmitool_lan_print(t);
+        assert_eq!(b.address, "172.20.8.29");
+        assert_eq!(b.mac, "9c:dc:71:70:d0:51");
+    }
+
+    #[test]
+    fn parse_mc_info_hpe_and_dell() {
+        assert_eq!(
+            parse_ipmitool_mc_info("Manufacturer Name         : Hewlett-Packard"),
+            "ilo"
+        );
+        assert_eq!(parse_ipmitool_mc_info("Manufacturer Name         : Dell Inc."), "idrac");
+        assert_eq!(parse_ipmitool_mc_info("nope"), "auto");
     }
 
     #[test]
