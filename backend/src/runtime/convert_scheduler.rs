@@ -306,9 +306,23 @@ async fn step_node_phase(
     match cur.as_str() {
         "pending" => {
             if payload.bmc_recover {
-                payload.set_state(&node.name, "kexec", "bmc boot installer", "");
-                payload.log(&format!("{} BMC-booting Talos installer (no SSH kexec)", node.name));
-                do_bmc_installer_boot(pool, jwt_secret, payload, cluster_id, &node).await;
+                // Nodes that still have apid (wrong CA / stale identity) can
+                // take apply-config --insecure without PXE. Ping-only nodes
+                // have no :50000 and fall through to BMC installer boot.
+                match probe_talos_up(&node.address).await {
+                    Ok(true) => {
+                        payload.set_state(&node.name, "install", "insecure apply-config (apid up)", "");
+                        payload.log(&format!(
+                            "{} apid is up; applying worker config --insecure (skip BMC)",
+                            node.name
+                        ));
+                    }
+                    _ => {
+                        payload.set_state(&node.name, "kexec", "bmc boot installer", "");
+                        payload.log(&format!("{} BMC-booting Talos installer (no SSH kexec)", node.name));
+                        do_bmc_installer_boot(pool, jwt_secret, payload, cluster_id, &node).await;
+                    }
+                }
             } else {
                 payload.set_state(&node.name, "kexec", "transferring installer + kexec", "");
                 payload.log(&format!("kexec-ing {} into Talos installer", node.name));
