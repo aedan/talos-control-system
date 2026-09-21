@@ -328,8 +328,18 @@ pub fn kexec_command(kernel_remote: &str, initramfs_remote: &str, append: &str) 
             "PATH=/usr/sbin:/usr/bin:/sbin:/bin kexec -l {kernel_remote} --append='{append}' && PATH=/usr/sbin:/usr/bin:/sbin:/bin kexec -e"
         )
     } else {
+        // Factory `initramfs-*.xz` is often zstd (magic 28 b5 2f fd), not xz.
+        // kexec 2.0.28 on Ubuntu 24.04 loads it as-is; the kernel then boots
+        // with ip= (ping) and no userspace if it does not decompress that
+        // blob. Always expand to a raw cpio before -l.
         format!(
-            "PATH=/usr/sbin:/usr/bin:/sbin:/bin kexec -l {kernel_remote} --initrd={initramfs_remote} --append='{append}' && PATH=/usr/sbin:/usr/bin:/sbin:/bin kexec -e"
+            "PATH=/usr/sbin:/usr/bin:/sbin:/bin; \
+RAW=/tmp/tcs-kexec-initramfs.raw; \
+magic=$(od -An -tx1 -N4 {initramfs_remote} 2>/dev/null | tr -d ' \\n'); \
+if [ \"$magic\" = 28b52ffd ]; then zstd -d -f -c {initramfs_remote} > $RAW; \
+elif [ \"$magic\" = fd377a58 ]; then unxz -c {initramfs_remote} > $RAW; \
+else cp {initramfs_remote} $RAW; fi && \
+kexec -l {kernel_remote} --initrd=$RAW --append='{append}' && kexec -e"
         )
     }
 }
@@ -751,7 +761,8 @@ mod tests {
     fn kexec_command_shape_separate_initrd() {
         let c = kexec_command("/tmp/vmlinuz", "/tmp/initramfs.xz", "console=ttyS0");
         assert!(c.contains("kexec -l /tmp/vmlinuz"));
-        assert!(c.contains("--initrd=/tmp/initramfs.xz"));
+        assert!(c.contains("--initrd=$RAW"));
+        assert!(c.contains("28b52ffd"));
         assert!(c.ends_with("kexec -e"));
     }
 
