@@ -805,7 +805,48 @@ async fn do_install(
     _is_first_cp: bool,
 ) -> Result<(), AppError> {
     let cfg = node_install_config(pool, jwt_secret, factory, sshc, payload, cluster_id, node).await?;
-    TalosctlClient::apply_config_maintenance(&node.address, &cfg, true, None).await
+    TalosctlClient::apply_config_maintenance(&node.address, &cfg, true, None).await?;
+    if payload.bmc_recover {
+        // Next firmware boot must be disk: MAAS/iLO one-shot PXE otherwise
+        // loops, and power-cycle can leave the chassis off.
+        bmc_set_boot(
+            pool,
+            jwt_secret,
+            cluster_id,
+            node,
+            crate::integration::bmc::BootTarget::Disk,
+        )
+        .await;
+    }
+    Ok(())
+}
+
+async fn bmc_set_boot(
+    pool: &DbPool,
+    jwt_secret: &str,
+    cluster_id: Uuid,
+    node: &ConvertNodePlan,
+    target: crate::integration::bmc::BootTarget,
+) {
+    let Ok(machines) = repos::machine::list_by_cluster(pool, cluster_id).await else {
+        return;
+    };
+    let Some(machine) = machines.iter().find(|m| m.hostname == node.name) else {
+        return;
+    };
+    let Some(enc) = machine.bmc_password_enc.as_ref() else {
+        return;
+    };
+    let Ok(plain) = secrets::decrypt(jwt_secret, enc) else {
+        return;
+    };
+    let Ok(creds) = crate::integration::bmc::BmcCredentials::from_machine(machine, &plain, 15, "lanplus")
+    else {
+        return;
+    };
+    if let Ok(sess) = crate::integration::bmc::BmcSession::connect(&creds).await {
+        let _ = sess.set_boot(target, true).await;
+    }
 }
 
 /// Build the install machine config for a node (installer maintenance apply).
