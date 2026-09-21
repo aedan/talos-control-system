@@ -19,4 +19,5 @@ tcs-release.tar.gz
 tcs-release/
 dist/
 kronos-inventory.yaml
+HANDOFF-phobos-*.md
 tcs-release/
