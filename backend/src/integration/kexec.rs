@@ -339,7 +339,9 @@ magic=$(od -An -tx1 -N4 {initramfs_remote} 2>/dev/null | tr -d ' \\n'); \
 if [ \"$magic\" = 28b52ffd ]; then zstd -d -f -c {initramfs_remote} > $RAW; \
 elif [ \"$magic\" = fd377a58 ]; then unxz -c {initramfs_remote} > $RAW; \
 else cp {initramfs_remote} $RAW; fi && \
-kexec -l {kernel_remote} --initrd=$RAW --append='{append}' && kexec -e"
+kexec -c -l {kernel_remote} --initrd=$RAW --append='{append}' \
+  || kexec -l {kernel_remote} --initrd=$RAW --append='{append}'; \
+kexec -e"
         )
     }
 }
@@ -760,7 +762,7 @@ mod tests {
     #[test]
     fn kexec_command_shape_separate_initrd() {
         let c = kexec_command("/tmp/vmlinuz", "/tmp/initramfs.xz", "console=ttyS0");
-        assert!(c.contains("kexec -l /tmp/vmlinuz"));
+        assert!(c.contains("kexec -c -l /tmp/vmlinuz"));
         assert!(c.contains("--initrd=$RAW"));
         assert!(c.contains("28b52ffd"));
         assert!(c.ends_with("kexec -e"));

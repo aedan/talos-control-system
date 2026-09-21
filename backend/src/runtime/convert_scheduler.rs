@@ -311,9 +311,17 @@ async fn step_node_phase(
                 // have no :50000 and fall through to BMC installer boot.
                 match probe_talos_up(&node.address).await {
                     Ok(true) => {
-                        payload.set_state(&node.name, "install", "insecure apply-config (apid up)", "");
+                        // Already-installed Talos (wrong CA): apply captured
+                        // worker config without install.wipe. Wiping here would
+                        // destroy OSDs' sibling layout and is unnecessary.
+                        payload.set_state(
+                            &node.name,
+                            "configure",
+                            "insecure apply-config (apid up, no wipe)",
+                            "",
+                        );
                         payload.log(&format!(
-                            "{} apid is up; applying worker config --insecure (skip BMC)",
+                            "{} apid is up; applying worker config --insecure without wipe",
                             node.name
                         ));
                     }
@@ -960,6 +968,8 @@ fn build_install_config(
         // 9600 and produces silent SOL after GRUB handoff. Always set the baud.
         cfg.push_str("    extraKernelArgs:\n");
         cfg.push_str("      - console=ttyS0,115200\n");
+        // iLO4 SOL is often COM2 (ttyS1); ttyS0-only left SOL silent on phobos.
+        cfg.push_str("      - console=ttyS1,115200\n");
         cfg.push_str("      - slab_nomerge\n");
         cfg.push_str("      - pti=on\n");
     }
@@ -2041,6 +2051,8 @@ mod tests {
         let net = "    interfaces:\n      - interface: bond0\n";
         let cfg = build_install_config("worker", false, net, "/dev/sda", "img:v1", &fake_ident(), "", false, "", "", true);
         assert!(cfg.contains("  type: worker\n"));
+        assert!(cfg.contains("console=ttyS0,115200"));
+        assert!(cfg.contains("console=ttyS1,115200"));
         // Worker: acceptedCAs (crt only, base64-of-PEM), NO machine.ca / NO key.
         let crt_b64 = crate::controllers::provision::b64_le(&fake_ident().machine_ca_crt);
         assert!(cfg.contains(&format!("  acceptedCAs:\n    - crt: {crt_b64}\n")));
