@@ -29,6 +29,7 @@ Cluster identity that recover joined: infra02 talosconfig (machine CA from the
 | Recover `install.wipe` on a node that already has apid | Unnecessary reinstall | `bmc_recover` + apid up → `configure` without wipe (`a1fc3e3`). |
 | After installer, next boot still PXE | MAAS `netboot=true` loops; `power cycle` can leave chassis **off** | `set_boot(Disk)` after apply; **power on** if off (`69eca5b`). |
 | Rescue after `netboot=false` | BMC `bootdev pxe` but MAAS DHCP still localboots disk — **no rescue SSH** | Set `netboot=true` before rescue PXE; set false only after STATE is written. |
+| Parallel MAAS rescue | "Entering rescue mode" times out at **30 min**; abort/release storms | Serialize rescue; `machine abort` first; wait SSH up to 25 min. |
 | Worker YAML cloned from a CP spec | Leftover `eno3`/`enp3s0f*`; wrong bond slaves (`eno49` vs `eno1`) | Render **only** captured `node.network` (`render_node_network_yaml`). |
 | Convert HA lock 300s | Jobs cannot cancel after restart | Document: stop TCS and DELETE `ha_locks`. |
 
