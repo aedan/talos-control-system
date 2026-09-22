@@ -50,9 +50,12 @@ A node is converted when **all** of:
 - `talosctl --talosconfig <cluster> -n <ip> version` shows Server (when talosconfig exists).
 - TCS machine status `running` for Talos, not merely `:50000` open.
 
-## Still open on Phobos (takeover in progress)
+## Retry (fresh kubespray)
 
-- infra01 still kubeadm API — convert last.
-- Ubuntu leftovers worker06/09/11 (kubelet, no SSH) and worker32 (SSH).
-- Rescue SSH / PXE failures on some workers (MAAS never offered PXE).
-- `FAIL no apid` at 360s is often too short; many came up later.
+Lab was wiped after convert destroyed kube namespaces. Next convert should:
+
+1. Select **control planes first** (or include at least one CP) so etcd snapshot + identity harvest happen before workers.
+2. If a worker canary is required, use the **same cluster** convert job later so the machine CA is reused (`prior_identity_from_jobs`).
+3. Set `controlPlaneEndpoint` to the kubeconfig API server (not 127.0.0.1, not a CP that 401s bootstrap tokens).
+4. Pick factory modules (`bnx2-bnx2x`, `iscsi-tools`, `nfs-utils` as needed).
+5. Do not start a second convert while one is running.

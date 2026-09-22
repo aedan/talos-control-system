@@ -144,6 +144,17 @@ async fn step_snapshot(
     payload: &mut ConvertJobPayload,
     cluster_id: Uuid,
 ) -> Result<(), AppError> {
+    // Mint or reuse the Talos machine CA before any kexec so a worker canary
+    // and a later CP convert share one identity (payload may already hold a
+    // prior job's CA from start()).
+    if payload.cluster_identity.is_none() {
+        let k8s_ca = stored_kubeconfig_ca(pool, jwt_secret, cluster_id)
+            .await
+            .unwrap_or_default();
+        let kube_server = stored_kubeconfig_server(pool, jwt_secret, cluster_id).await;
+        let _ = ensure_cluster_identity(sshc, payload, &k8s_ca, kube_server.as_deref()).await;
+    }
+    persist_convert_talosconfig(pool, jwt_secret, cluster_id, payload).await;
     if payload.etcd_snapshot_path.is_some() {
         payload.phase = "control-plane".into();
         payload.log("snapshot done; moving to control-plane");
@@ -491,6 +502,7 @@ async fn step_node_phase(
         },
         "recover" => match do_first_cp_recover(pool, jwt_secret, sshc, payload, cluster_id, &node).await {
             Ok(()) => {
+                persist_convert_talosconfig(pool, jwt_secret, cluster_id, payload).await;
                 payload.set_state(&node.name, "done", "control plane up", "");
                 payload.log(&format!("{} control plane up (etcd recovered + bootstrapped)", node.name));
             }
@@ -806,18 +818,17 @@ async fn do_install(
 ) -> Result<(), AppError> {
     let cfg = node_install_config(pool, jwt_secret, factory, sshc, payload, cluster_id, node).await?;
     TalosctlClient::apply_config_maintenance(&node.address, &cfg, true, None).await?;
-    if payload.bmc_recover {
-        // Next firmware boot must be disk: MAAS/iLO one-shot PXE otherwise
-        // loops, and power-cycle can leave the chassis off.
-        bmc_set_boot(
-            pool,
-            jwt_secret,
-            cluster_id,
-            node,
-            crate::integration::bmc::BootTarget::Disk,
-        )
-        .await;
-    }
+    // Next firmware boot must be disk even on a normal kexec convert: a
+    // one-shot PXE/CD leftover (or MAAS netboot) otherwise loops, and a
+    // power-cycle can leave the chassis off.
+    bmc_set_boot(
+        pool,
+        jwt_secret,
+        cluster_id,
+        node,
+        crate::integration::bmc::BootTarget::Disk,
+    )
+    .await;
     Ok(())
 }
 
@@ -1919,6 +1930,16 @@ mod tests {
             !matches!(st, "done" | "failed" | "skipped")
         });
         assert!(next.is_none());
+    }
+
+    #[test]
+    fn prior_identity_reuses_first_non_empty_job() {
+        let empty = ConvertJobPayload::default();
+        let mut with = ConvertJobPayload::default();
+        with.cluster_identity = Some(fake_ident());
+        let got = crate::controllers::convert::prior_identity_from_jobs(&[empty.clone(), with]);
+        assert_eq!(got.unwrap().cluster_id, fake_ident().cluster_id);
+        assert!(crate::controllers::convert::prior_identity_from_jobs(&[empty]).is_none());
     }
 
     #[test]

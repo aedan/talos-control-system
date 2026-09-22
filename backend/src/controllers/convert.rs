@@ -217,6 +217,13 @@ pub struct ConvertClusterIdentity {
     pub etcd_server_key: String,
 }
 
+/// Latest convert job identity for this cluster, if any. A worker-only
+/// canary then a later CP convert MUST share this CA; minting a second
+/// identity is what split the Phobos fleet.
+pub fn prior_identity_from_jobs(payloads: &[ConvertJobPayload]) -> Option<ConvertClusterIdentity> {
+    payloads.iter().find_map(|p| p.cluster_identity.clone())
+}
+
 impl ConvertJobPayload {
     pub fn log(&mut self, line: &str) {
         self.steps_log.push(format!("{} {line}", Utc::now().to_rfc3339()));
@@ -505,6 +512,54 @@ impl ConvertController {
         let cluster = repos::cluster::get(&self.pool, cluster_id)
             .await?
             .ok_or_else(|| AppError::NotFound("cluster not found".into()))?;
+        let running = self
+            .pool
+            .fetch_optional_as::<repos::provision_job::ProvisionJob>(
+                "SELECT * FROM provision_jobs WHERE cluster_id = ? AND kind = ? AND status = 'running' LIMIT 1",
+                &[
+                    crate::db::pool::SqlVal::Uuid(cluster_id),
+                    crate::db::pool::SqlVal::text(JOB_KIND),
+                ],
+            )
+            .await?;
+        if running.is_some() {
+            return Err(AppError::InvalidInput(
+                "a convert job is already running for this cluster; cancel it first".into(),
+            ));
+        }
+        let worker_only = body.nodes.iter().all(|n| n.role == "worker");
+        if worker_only {
+            let has_ep = body
+                .control_plane_endpoint
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && !s.contains("127.0.0.1"))
+                .is_some();
+            if !has_ep {
+                return Err(AppError::InvalidInput(
+                    "worker-only convert requires controlPlaneEndpoint (kubeconfig API server, not 127.0.0.1)"
+                        .into(),
+                ));
+            }
+        }
+        let history = self
+            .pool
+            .fetch_all_as::<repos::provision_job::ProvisionJob>(
+                "SELECT * FROM provision_jobs WHERE cluster_id = ? AND kind = ? ORDER BY created_at DESC LIMIT 20",
+                &[
+                    crate::db::pool::SqlVal::Uuid(cluster_id),
+                    crate::db::pool::SqlVal::text(JOB_KIND),
+                ],
+            )
+            .await
+            .unwrap_or_default();
+        let mut prior_identities = Vec::new();
+        for j in &history {
+            let p: ConvertJobPayload =
+                serde_json::from_str(j.payload.as_deref().unwrap_or("{}")).unwrap_or_default();
+            prior_identities.push(p);
+        }
+        let prior_identity = prior_identity_from_jobs(&prior_identities);
         let machines = repos::machine::list_by_cluster(&self.pool, cluster_id).await?;
         let mut plans = Vec::new();
         let by_name: std::collections::HashMap<String, &crate::db::models::machine::Machine> =
@@ -630,13 +685,20 @@ impl ConvertController {
                 .collect(),
             etcd_snapshot_path: None,
             etcd_snapshot_size: 0,
-            cluster_identity: None,
+            cluster_identity: prior_identity.clone(),
             install_image_override: body.install_image.clone(),
             control_plane_endpoint: body.control_plane_endpoint.clone(),
             bootstrap_token_injected: false,
             bmc_recover: false,
             installer_iso_url: None,
-            steps_log: vec![format!("{now} convert job created ({} nodes)", body.nodes.len())],
+            steps_log: vec![
+                format!("{now} convert job created ({} nodes)", body.nodes.len()),
+                if prior_identity.is_some() {
+                    format!("{now} reusing Talos machine CA from previous convert job")
+                } else {
+                    format!("{now} will mint Talos machine CA once at snapshot (shared by all nodes)")
+                },
+            ],
         };
 
         let id = Uuid::new_v4();
