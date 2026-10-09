@@ -206,6 +206,9 @@
   let upgradeJobs = $state<UpgradeJob[]>([]);
   let upgradeJobsLoading = $state(false);
   let upgradeJobDetail = $state<any>(null);
+  const upgradeInProgress = $derived(
+    upgradeJobs.some((j) => j.status === 'pending' || j.status === 'running')
+  );
 
   // Human-readable description of what a job actually does, so a k8s-only
   // upgrade isn't shown as "apply this installer image". The raw image is kept
@@ -347,6 +350,7 @@
       loadMachines();
       loadUpgradeJobs();
       loadSiderolink();
+      void refreshClusterFacts();
     }, 15000);
   });
 
@@ -411,6 +415,10 @@
       talosVersions = res.talos.versions || [];
       k8sCurrent = res.k8s.current || '';
       k8sSupported = res.k8s.supported || [];
+      if (cluster && currentTalos) {
+        cluster.talosVersion = currentTalos;
+        cluster.talos_version = currentTalos;
+      }
       upgradeTalosVersion = currentTalos;
       upgradeK8sVersion = '';
       const noteBits: string[] = [];
@@ -429,6 +437,39 @@
       loadUpgradeTargets();
     }
   });
+
+  // Pull the stored cluster version forward without reloading the module
+  // form. Machine rows already refresh on the poll; this is the header and
+  // the upgrade panel's "current" tag.
+  async function refreshClusterFacts() {
+    try {
+      const c = (await client.get(`/clusters/${cid}`)) as {
+        talosVersion?: string;
+        controlPlaneVersion?: string;
+        status?: string;
+      };
+      if (!cluster) return;
+      if (c.status) cluster.status = c.status;
+      if (c.controlPlaneVersion) {
+        cluster.controlPlaneVersion = c.controlPlaneVersion;
+        cluster.control_plane_version = c.controlPlaneVersion;
+      }
+      const nextTalos = c.talosVersion || '';
+      const shown = cluster.talosVersion || cluster.talos_version || '';
+      if (nextTalos && nextTalos !== shown) {
+        const prevCurrent = currentTalos;
+        cluster.talosVersion = nextTalos;
+        cluster.talos_version = nextTalos;
+        const selectionFollowsCurrent = !upgradeTalosVersion || upgradeTalosVersion === prevCurrent;
+        currentTalos = nextTalos;
+        if (selectionFollowsCurrent && !upgradeInProgress) {
+          upgradeTalosVersion = nextTalos;
+        }
+      }
+    } catch {
+      // Polling is best-effort; the next tick retries.
+    }
+  }
 
   function upgradeSummary(): string {
     const parts: string[] = [];
@@ -523,8 +564,9 @@
         cluster.factoryModules = [...clusterModules];
         modulesDirty = false;
       }
-      await loadUpgradeTargets();
-      loadUpgradeJobs();
+      // Reload jobs before clearing `busy` so the button stays disabled for
+      // the in-progress job instead of snapping back to "Start".
+      await loadUpgradeJobs();
     } catch (e: unknown) {
       notifyError(e instanceof Error ? e.message : 'Failed to start cluster upgrade');
     } finally {
@@ -898,13 +940,22 @@
           <Button
             variant="primary"
             size="sm"
-            title="Queue the rolling upgrade described above"
+            title={upgradeInProgress
+              ? 'A rolling upgrade is already running for this cluster'
+              : 'Queue the rolling upgrade described above'}
             onclick={startClusterUpgrade}
-            disabled={busy || targetsBusy}
+            disabled={busy || targetsBusy || upgradeInProgress}
           >
-            Start rolling upgrade{upgradeSummary() === 'no change' ? '' : ` — ${upgradeSummary()}`}
+            {#if upgradeInProgress}
+              Upgrade in progress
+            {:else}
+              Start rolling upgrade{upgradeSummary() === 'no change' ? '' : ` — ${upgradeSummary()}`}
+            {/if}
           </Button>
         </div>
+        {#if upgradeInProgress}
+          <p class="hint">A rolling upgrade is already running. Wait for it to finish, or cancel it below, before starting another.</p>
+        {/if}
 
         <div class="upgrade-jobs">
           <h4>Upgrade jobs</h4>

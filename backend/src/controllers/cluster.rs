@@ -1860,11 +1860,16 @@ impl ClusterController {
             }
         }
 
-        if !versions.is_empty() {
+        // Persist only when every probed node agrees. A mixed fleet (a roll
+        // still in progress) must not overwrite the stored current version
+        // with a joined string the upgrade panel would treat as a new target.
+        if let Some(ver) = crate::utils::talos_version::consensus_talos_version(&versions) {
             if let Ok(Some(mut c)) = crate::db::repos::cluster::get(&self.pool, cluster_id).await {
-                c.talos_version = versions.join(", ");
-                c.updated_at = chrono::Utc::now();
-                let _ = crate::db::repos::cluster::update(&self.pool, &c).await;
+                if crate::utils::talos_version::normalize_talos_version(&c.talos_version) != ver {
+                    c.talos_version = ver;
+                    c.updated_at = chrono::Utc::now();
+                    let _ = crate::db::repos::cluster::update(&self.pool, &c).await;
+                }
             }
         }
 

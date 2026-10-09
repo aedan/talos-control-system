@@ -215,6 +215,14 @@ async fn transition_after_talos(
         .as_ref()
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
+    if let Some(ver) = job.target_talos_version.as_deref() {
+        // The cluster row is what the UI calls "current". Machine rows are
+        // updated per node as they come back; this is the fleet summary.
+        let cluster_id = targets.first().map(|t| t.cluster_id);
+        if let Some(cluster_id) = cluster_id {
+            refresh_talos_inventory(pool, cluster_id, ver).await;
+        }
+    }
     if has_k8s {
         upgrade_job::update_job_phase(pool, job.id, "k8s").await?;
         for t in targets {
@@ -226,6 +234,21 @@ async fn transition_after_talos(
         upgrade_job::update_job_status(pool, job.id, "completed", None).await?;
     }
     Ok(())
+}
+
+async fn refresh_talos_inventory(pool: &DbPool, cluster_id: Uuid, version: &str) {
+    let ver = crate::utils::talos_version::normalize_talos_version(version);
+    if ver.is_empty() {
+        return;
+    }
+    if let Ok(Some(mut c)) = repos::cluster::get(pool, cluster_id).await {
+        if crate::utils::talos_version::normalize_talos_version(&c.talos_version) == ver {
+            return;
+        }
+        c.talos_version = ver;
+        c.updated_at = chrono::Utc::now();
+        let _ = repos::cluster::update(pool, &c).await;
+    }
 }
 
 // ── Phase 2: in-place Kubernetes upgrade (no reboots) ──────────────────────

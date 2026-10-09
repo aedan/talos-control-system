@@ -3665,6 +3665,24 @@ pub async fn get_upgrade_targets(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Cluster not found".to_string()))?;
 
+    // The stored cluster version lags a finished roll: machine rows are probed
+    // live, but `clusters.talos_version` used to stay at the pre-upgrade tag.
+    // Report (and heal) the version the nodes actually agree on.
+    let mut talos_current = cluster.talos_version.clone();
+    if let Ok(machines) = crate::db::repos::machine::list_by_cluster(&state.db_pool, cluster_id).await {
+        if let Some(live) = crate::utils::talos_version::consensus_talos_version(
+            machines.iter().map(|m| m.talos_version.as_str()),
+        ) {
+            if crate::utils::talos_version::normalize_talos_version(&talos_current) != live {
+                talos_current = live.clone();
+                let mut healed = cluster.clone();
+                healed.talos_version = live;
+                healed.updated_at = chrono::Utc::now();
+                let _ = crate::db::repos::cluster::update(&state.db_pool, &healed).await;
+            }
+        }
+    }
+
     let factory = crate::integration::image_factory::ImageFactoryClient::new(
         &state.config.factory.normalized_base(),
     );
@@ -3695,7 +3713,7 @@ pub async fn get_upgrade_targets(
 
     Ok(Json(serde_json::json!({
         "talos": {
-            "current": cluster.talos_version,
+            "current": talos_current,
             "versions": talos_versions,
         },
         "k8s": k8s_targets,

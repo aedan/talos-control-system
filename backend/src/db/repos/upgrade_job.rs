@@ -246,6 +246,22 @@ pub async fn update_target_status(
     Ok(())
 }
 
+/// Jobs for this cluster that have not finished. A second rolling upgrade
+/// must not be queued while one of these is still walking nodes.
+pub async fn list_active_for_cluster(
+    pool: &DbPool,
+    cluster_id: Uuid,
+) -> Result<Vec<UpgradeJob>, AppError> {
+    pool.fetch_all_as(
+        "SELECT DISTINCT j.* FROM upgrade_jobs j
+         JOIN upgrade_job_targets t ON t.job_id = j.id
+         WHERE t.cluster_id = ? AND j.status IN ('pending', 'running')
+         ORDER BY j.created_at ASC",
+        &[SqlVal::Uuid(cluster_id)],
+    )
+    .await
+}
+
 pub async fn list_pending_jobs(pool: &DbPool) -> Result<Vec<UpgradeJob>, AppError> {
     pool.fetch_all_as(
         "SELECT * FROM upgrade_jobs WHERE status IN ('pending', 'running') ORDER BY created_at ASC",

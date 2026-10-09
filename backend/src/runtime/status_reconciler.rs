@@ -177,22 +177,42 @@ async fn reconcile_cluster_statuses(
         if !CLUSTER_RECONCILABLE.contains(&cluster.status.as_str()) {
             continue;
         }
-        let member_statuses: Vec<&str> = machines
+        let members: Vec<&Machine> = machines
             .iter()
             .filter(|m| m.cluster_id == Some(*cluster_id))
-            .map(|m| m.status.as_str())
             .collect();
+        let member_statuses: Vec<&str> = members.iter().map(|m| m.status.as_str()).collect();
         let derived = derive_cluster_status(&member_statuses);
-        if derived != cluster.status {
-            repos::cluster::update_status(pool, cluster.id, derived).await?;
-            info!(
-                cluster_id = %cluster_id,
-                name = %cluster.name,
-                old_status = %cluster.status,
-                new_status = derived,
-                "Cluster status reconciled"
-            );
+        let live_talos = crate::utils::talos_version::consensus_talos_version(
+            members.iter().map(|m| m.talos_version.as_str()),
+        );
+        let talos_changed = live_talos
+            .as_ref()
+            .map(|v| crate::utils::talos_version::normalize_talos_version(&cluster.talos_version) != *v)
+            .unwrap_or(false);
+        let status_changed = derived != cluster.status;
+        if !status_changed && !talos_changed {
+            continue;
         }
+
+        let mut updated = cluster.clone();
+        updated.updated_at = chrono::Utc::now();
+        if status_changed {
+            updated.status = derived.to_string();
+        }
+        if let Some(ver) = live_talos.filter(|_| talos_changed) {
+            updated.talos_version = ver;
+        }
+        repos::cluster::update(pool, &updated).await?;
+        info!(
+            cluster_id = %cluster_id,
+            name = %cluster.name,
+            old_status = %cluster.status,
+            new_status = %updated.status,
+            old_talos = %cluster.talos_version,
+            new_talos = %updated.talos_version,
+            "Cluster status reconciled"
+        );
     }
     Ok(())
 }

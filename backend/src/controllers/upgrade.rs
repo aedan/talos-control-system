@@ -47,6 +47,14 @@ impl UpgradeController {
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Cluster {} not found", cluster_id)))?;
 
+        let active = upgrade_job::list_active_for_cluster(&self.pool, cluster_id).await?;
+        if let Some(running) = active.first() {
+            return Err(AppError::InvalidInput(format!(
+                "A rolling upgrade is already in progress (job {})",
+                running.id
+            )));
+        }
+
         // ── module handling ───────────────────────────────────────────────
         // When the caller supplies a module set that differs from the stored
         // cluster default, persist it first (same semantics as the UI's

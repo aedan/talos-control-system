@@ -52,11 +52,13 @@ pub async fn list(pool: &DbPool) -> Result<Vec<Cluster>, AppError> {
 pub async fn update(pool: &DbPool, cluster: &Cluster) -> Result<Cluster, AppError> {
     let n = pool
         .execute(
-            "UPDATE clusters SET name = ?, status = ?, control_plane_size = ?, worker_size = ?, backup_retention = ?, backup_schedule_hours = ?, last_auto_backup_at = ?, network_config = COALESCE(?, network_config), factory_modules = ?, updated_at = ?
+            "UPDATE clusters SET name = ?, status = ?, control_plane_version = ?, talos_version = ?, control_plane_size = ?, worker_size = ?, backup_retention = ?, backup_schedule_hours = ?, last_auto_backup_at = ?, network_config = COALESCE(?, network_config), factory_modules = ?, updated_at = ?
               WHERE id = ?",
             &[
                 SqlVal::text(&cluster.name),
                 SqlVal::text(&cluster.status),
+                SqlVal::text(&cluster.control_plane_version),
+                SqlVal::text(&cluster.talos_version),
                 SqlVal::I32(cluster.control_plane_size),
                 SqlVal::I32(cluster.worker_size),
                 SqlVal::OptI32(cluster.backup_retention),
