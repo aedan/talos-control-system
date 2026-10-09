@@ -51,6 +51,9 @@ jwt_secret = "change-me-to-a-long-random-string"
 bind_port = 8082
 listen_port = 443
 mtu = 1420
+# IPv4 address placed on the WireGuard interface: the first host of this
+# CIDR, with the same prefix. Default 100.64.0.0/10 → 100.64.0.1/10.
+# Set to "" to add no IPv4 address (IPv6 ULA only).
 subnet = "100.64.0.0/10"
 rate_limit_bytes = 0
 

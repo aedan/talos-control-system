@@ -4117,7 +4117,7 @@ pub async fn siderolink_register(
                 "serverPublicKey": state.siderolink_wg.server_public_key(),
                 "endpoint": state.siderolink_wg.endpoint_hint(),
                 "listenPort": state.siderolink_wg.listen_port(),
-                "allowedIps": "100.64.0.0/10",
+                "allowedIps": state.siderolink_wg.ipv4_subnet(),
                 "persistentKeepalive": 25,
             },
         })),

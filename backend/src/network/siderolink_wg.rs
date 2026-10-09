@@ -130,9 +130,7 @@ impl SiderolinkWg {
             key,
         ]);
         // Recreation clears the overlay addresses; restore them.
-        let server_addr = format!("{}/64", self.server_address());
-        let _ = run_cmd(&["ip", "address", "add", &server_addr, "dev", &self.iface]);
-        let _ = run_cmd(&["ip", "address", "add", "100.64.0.1/10", "dev", &self.iface]);
+        self.assign_overlay_addresses();
         // Recreation wipes the peer list; restore it from the cache.
         let n_peers = self.reapply_cached_peers();
         match ok {
@@ -288,6 +286,22 @@ impl SiderolinkWg {
         self.cfg.listen_port
     }
 
+    /// IPv4 overlay advertised to peers. Empty when `[siderolink] subnet` is
+    /// blank, which means the host interface gets no IPv4 address.
+    pub fn ipv4_subnet(&self) -> &str {
+        self.cfg.subnet.trim()
+    }
+
+    /// IPv6 server address plus, when configured, the first host of `subnet`.
+    /// The default subnet `100.64.0.0/10` still becomes `100.64.0.1/10`.
+    fn assign_overlay_addresses(&self) {
+        let server_addr = format!("{}/64", self.server_address());
+        let _ = run_cmd(&["ip", "address", "add", &server_addr, "dev", &self.iface]);
+        if let Some(v4) = ipv4_host_cidr(&self.cfg.subnet) {
+            let _ = run_cmd(&["ip", "address", "add", &v4, "dev", &self.iface]);
+        }
+    }
+
     /// The server's own address on the SideroLink IPv6 ULA overlay.
     pub fn server_address(&self) -> String {
         crate::siderolink::address::server_address(&self.installation_id)
@@ -365,11 +379,7 @@ impl SiderolinkWg {
         ])?;
         // Assign the server's own overlay address (first usable in the /64) so
         // nodes can reach TCS at server_address over the tunnel.
-        let server_addr = format!("{}/64", self.server_address());
-        let _ = run_cmd(&["ip", "address", "add", &server_addr, "dev", &self.iface]);
-        // Keep the legacy IPv4 CGNAT address too so pre-existing tooling/peers
-        // that expect 100.64.0.1 keep a route; harmless alongside the IPv6.
-        let _ = run_cmd(&["ip", "address", "add", "100.64.0.1/10", "dev", &self.iface]);
+        self.assign_overlay_addresses();
         // WireGuard link MTU (nodes use 1280; the host interface can be higher).
         let _ = run_cmd(&["ip", "link", "set", "mtu", "1420", "dev", &self.iface]);
         Ok(())
@@ -542,6 +552,57 @@ fn parse_handshake_age_secs(s: &str) -> Option<u64> {
         found = true;
     }
     if found { Some(total) } else { None }
+}
+
+/// Host address installed for `[siderolink] subnet`.
+///
+/// `100.64.0.0/10` becomes `100.64.0.1/10`. An empty string adds nothing.
+/// Prefixes of /31 and /32 use the network address itself; there is no
+/// separate host.
+pub fn ipv4_host_cidr(subnet: &str) -> Option<String> {
+    let s = subnet.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (addr, pref) = s.split_once('/')?;
+    let ip: std::net::Ipv4Addr = addr.trim().parse().ok()?;
+    let pref: u32 = pref.trim().parse().ok()?;
+    if pref > 32 {
+        return None;
+    }
+    let ip_u = u32::from(ip);
+    let mask: u32 = if pref == 0 { 0 } else { u32::MAX << (32 - pref) };
+    let network = ip_u & mask;
+    let host = if pref >= 31 { network } else { network + 1 };
+    let broadcast = if pref == 0 { u32::MAX } else { network | !mask };
+    if pref < 31 && (host == network || host == broadcast || host < network) {
+        return None;
+    }
+    Some(format!("{}/{}", std::net::Ipv4Addr::from(host), pref))
+}
+
+#[cfg(test)]
+mod ipv4_host_tests {
+    use super::ipv4_host_cidr;
+
+    #[test]
+    fn default_cgnat_is_unchanged() {
+        assert_eq!(ipv4_host_cidr("100.64.0.0/10"), Some("100.64.0.1/10".into()));
+        assert_eq!(ipv4_host_cidr("  100.64.0.5/10 "), Some("100.64.0.1/10".into()));
+    }
+
+    #[test]
+    fn empty_adds_nothing() {
+        assert_eq!(ipv4_host_cidr(""), None);
+        assert_eq!(ipv4_host_cidr("   "), None);
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert_eq!(ipv4_host_cidr("100.64.0.0"), None);
+        assert_eq!(ipv4_host_cidr("nope/10"), None);
+        assert_eq!(ipv4_host_cidr("100.64.0.0/33"), None);
+    }
 }
 
 #[cfg(test)]
