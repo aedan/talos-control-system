@@ -2024,7 +2024,7 @@ pub async fn get_cert_config(
         .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/tcs"));
     let overlay_path = data_dir.join("tls.toml");
 
-    let tls = if overlay_path.exists() {
+    let mut tls = if overlay_path.exists() {
         let raw = std::fs::read_to_string(&overlay_path)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("cannot read {}: {}", overlay_path.display(), e)))?;
         let table: toml::value::Table = raw
@@ -2039,6 +2039,15 @@ pub async fn get_cert_config(
     } else {
         state.config.tls.clone()
     };
+
+    // Never return DNS credentials. The form leaves a blank field alone.
+    if let Some(le) = tls.letsencrypt.as_mut() {
+        if let Some(dns) = le.dns_provider.as_mut() {
+            dns.api_key.clear();
+            dns.api_secret.clear();
+            dns.api_token.clear();
+        }
+    }
 
     Ok(Json(tls))
 }
@@ -2058,6 +2067,42 @@ pub struct LetsEncryptConfigRequest {
     #[serde(default)]
     pub challenge_type: String,
     pub dns_provider: Option<DnsProviderConfigRequest>,
+}
+
+async fn store_dns_secrets(
+    state: &AppState,
+    dns: &DnsProviderConfigRequest,
+) -> Result<(), (StatusCode, String)> {
+    use crate::utils::vault::{self, DNS_API_KEY, DNS_API_SECRET, DNS_API_TOKEN};
+
+    let opened = vault::open(
+        &state.db_pool,
+        &vault::host_key_path(&state.config),
+        &state.config.auth.jwt_secret,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(passphrase) = &opened.break_glass {
+        tracing::warn!("Vault was created while saving DNS settings. The break-glass passphrase was written to stderr once.");
+        eprintln!(
+            "\nTCS vault created.\nBreak-glass passphrase (shown once): {passphrase}\n"
+        );
+    }
+    for (name, value) in [
+        (DNS_API_KEY, dns.api_key.as_str()),
+        (DNS_API_SECRET, dns.api_secret.as_str()),
+        (DNS_API_TOKEN, dns.api_token.as_str()),
+    ] {
+        if value.is_empty() {
+            continue;
+        }
+        opened
+            .vault
+            .put(&state.db_pool, name, value)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -2224,18 +2269,9 @@ pub async fn update_cert_config(
                         "provider".to_string(),
                         toml::Value::String(dns.provider.clone()),
                     );
-                    dns_table.insert(
-                        "api_key".to_string(),
-                        toml::Value::String(dns.api_key.clone()),
-                    );
-                    dns_table.insert(
-                        "api_secret".to_string(),
-                        toml::Value::String(dns.api_secret.clone()),
-                    );
-                    dns_table.insert(
-                        "api_token".to_string(),
-                        toml::Value::String(dns.api_token.clone()),
-                    );
+                    // Credentials stay in the vault. Empty fields mean "keep
+                    // the stored value" so a masked form save does not wipe them.
+                    store_dns_secrets(&state, dns).await?;
                     dns_table.insert(
                         "zone_id".to_string(),
                         toml::Value::String(dns.zone_id.clone()),

@@ -307,11 +307,17 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         vault::apply_config(&opened.vault, &db_pool, &mut config).await?;
         let config_path =
             std::env::var("TCS_CONFIG").unwrap_or_else(|_| "/etc/tcs/config.toml".into());
+        let overlay = std::path::Path::new(&config.database.sqlite_path)
+            .parent()
+            .map(|p| p.join("tls.toml"))
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/tcs/tls.toml"));
         if let Err(e) = vault::redact_cleartext_files(
             &opened.vault,
             &db_pool,
             Some(std::path::Path::new(&config_path)),
             Some(std::path::Path::new("/etc/tcs/env")),
+            std::slice::from_ref(&overlay),
         )
         .await
         {

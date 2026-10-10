@@ -36,7 +36,7 @@ On first start the process creates two things:
 - `/var/lib/tcs/vault.hostkey` (mode 0600), which unlocks the vault on later boots
 - a break-glass passphrase, printed once on stderr (and therefore the service journal)
 
-The passphrase is stored only as an Argon2id hash. After the vault holds a secret, TCS comments that secret out of `config.toml` and `/etc/tcs/env`. A value systemd already loaded stays in the process until the next restart.
+The passphrase is stored only as an Argon2id hash. After the vault holds a secret, TCS comments that secret out of `config.toml`, `/etc/tcs/env`, and the TLS overlay `/var/lib/tcs/tls.toml`. A value systemd already loaded stays in the process until the next restart. Saving certificate settings stores DNS credentials in the vault and leaves them out of those files. The certificate form does not display a stored credential again.
 
 The data key is fixed at first start. It matches the key previously derived from the JWT secret, so talosconfig, kubeconfig, and BMC passwords already in the database still decrypt. Changing `auth.jwt_secret` later changes token signing only.
 

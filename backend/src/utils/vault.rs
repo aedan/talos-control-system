@@ -169,15 +169,19 @@ pub async fn open(pool: &DbPool, host_key_path: &Path, seed_jwt: &str) -> Result
 }
 
 async fn create(pool: &DbPool, host_key_path: &Path, seed_jwt: &str) -> Result<Opened, AppError> {
-    let mut rng = rand::thread_rng();
-    let mut host_key = [0u8; 32];
-    rng.fill_bytes(&mut host_key);
+    // ThreadRng is not Send. Finish with it before the first .await so the
+    // server can call open() from an axum handler.
+    let (host_key, salt, passphrase) = {
+        let mut rng = rand::thread_rng();
+        let mut host_key = [0u8; 32];
+        rng.fill_bytes(&mut host_key);
+        let mut salt = [0u8; 16];
+        rng.fill_bytes(&mut salt);
+        (host_key, salt, generate_passphrase())
+    };
     // Seed from the JWT-derived key so ciphertext already in the database
     // (talosconfig, kubeconfig, BMC) still opens. A random key would strand it.
     let dek = secrets::key_from_jwt_secret(seed_jwt);
-    let mut salt = [0u8; 16];
-    rng.fill_bytes(&mut salt);
-    let passphrase = generate_passphrase();
     let break_glass_hash = hash_password(&passphrase)?;
     let wrap_key = derive_break_glass_key(&passphrase, &salt)?;
     let host_wrap = wrap_dek(&host_key, &dek)?;
@@ -358,6 +362,7 @@ pub async fn redact_cleartext_files(
     pool: &DbPool,
     config_path: Option<&Path>,
     env_path: Option<&Path>,
+    overlay_paths: &[PathBuf],
 ) -> Result<(), AppError> {
     let mut config_keys: Vec<&str> = Vec::new();
     let mut env_keys: Vec<&str> = Vec::new();
@@ -400,6 +405,9 @@ pub async fn redact_cleartext_files(
         }
     }
     if let Some(path) = config_path {
+        redact_file(path, &config_keys)?;
+    }
+    for path in overlay_paths {
         redact_file(path, &config_keys)?;
     }
     if let Some(path) = env_path {
@@ -776,7 +784,13 @@ export TCS_AUTH_JWT_SECRET=from-env\n";
             "TCS_AUTH_JWT_SECRET=ord-bootstrap-jwt-not-default\nTCS_HTTP_PORT=0\n",
         )
         .unwrap();
-        redact_cleartext_files(&restored.vault, &pool, Some(&cfg_path), Some(&env_path))
+        redact_cleartext_files(
+            &restored.vault,
+            &pool,
+            Some(&cfg_path),
+            Some(&env_path),
+            &[],
+        )
             .await
             .unwrap();
         let cfg = std::fs::read_to_string(&cfg_path).unwrap();
