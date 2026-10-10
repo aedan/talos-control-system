@@ -13,73 +13,47 @@ TCS **always** listens on **:443 (HTTPS)** and **:80 (HTTP → redirect / ACME c
 
 ## Configuration
 
-```toml
-[tls]
-enabled = true
-mode = "letsencrypt"
+Set the certificate in **Settings → Certificates**. TCS stores that document in the database. DNS provider credentials are vault secrets, not fields in the saved document. A blank credential on save keeps the value already in the vault:
 
-[tls.letsencrypt]
-domains = ["tcs.example.com"]
-email = "admin@example.com"
-challenge_type = "http-01"
-
-[tls.letsencrypt.dns_provider]
-provider = "godaddy"
-api_key = "YOUR_API_KEY"
-api_secret = "YOUR_API_SECRET"
-
-[tls.self-signed]
-domains = ["localhost"]
-
-[tls.provided]
-cert_path = "/etc/tls/cert.pem"
-key_path = "/etc/tls/key.pem"
-# ca_path = "/etc/tls/ca.pem"   # optional CA chain
+```bash
+printf '%s' "$GODADDY_SECRET" | tcs vault put tls.dns.api_secret
+printf '%s' "$GODADDY_KEY" | tcs vault put tls.dns.api_key
+printf '%s' "$CLOUDFLARE_TOKEN" | tcs vault put tls.dns.api_token
 ```
+
+The first start copies an existing `[tls]` block and `/var/lib/tcs/tls.toml` into the database, then removes `tls.toml`. Do not put new certificate settings in `config.toml`.
+
+Fields the form saves:
+
+| Field | Meaning |
+|-------|---------|
+| `mode` | `letsencrypt`, `self-signed`, `provided`, or `disabled` |
+| `letsencrypt.domains` / `email` / `challenge_type` | Certificate names, account email, `http-01` or `dns-01` |
+| `letsencrypt.dns_provider.provider` / `zone` | DNS-01 provider name and zone. Credentials stay in the vault |
+| `provided.cert_path` / `key_path` / `ca_path` | PEM paths on the host for an operator-supplied certificate |
 
 ## ACME Challenges
 
 ### HTTP-01
 
-TCS serves `/.well-known/acme-challenge/*` on port 80. Ensure port 80 is accessible from the internet. This is the simplest option and requires no DNS provider configuration.
-
-```toml
-[tls]
-enabled = true
-mode = "letsencrypt"
-
-[tls.letsencrypt]
-domains = ["tcs.example.com"]
-email = "admin@example.com"
-challenge_type = "http-01"
-```
+TCS serves `/.well-known/acme-challenge/*` on port 80. Ensure port 80 is accessible from the internet. This is the simplest option and requires no DNS provider configuration. In **Settings → Certificates**, set mode to Let's Encrypt, challenge type to HTTP-01, and fill in the domain and email.
 
 ### DNS-01
 
 For DNS-01 challenges, TCS configures TXT records through a supported DNS provider. This is useful when port 80 is not accessible from the internet.
 
 Supported providers:
-- **GoDaddy** — Configure `api_key` (account number) and `api_secret` (API key)
-- **Cloudflare** — Configure with Cloudflare API token
+- **GoDaddy** — vault names `tls.dns.api_key` (account number) and `tls.dns.api_secret` (API key)
+- **Cloudflare** — vault name `tls.dns.api_token`
 
-```toml
-[tls.letsencrypt]
-domains = ["tcs.example.com"]
-email = "admin@example.com"
-challenge_type = "dns-01"
-
-[tls.letsencrypt.dns_provider]
-provider = "godaddy"
-api_key = "YOUR_ACCOUNT_NUMBER"
-api_secret = "YOUR_API_KEY"
-```
+Set the provider and zone in **Settings → Certificates**. Store the credentials with `tcs vault put`.
 
 ## Settings UI (live reload)
 
 Saving TLS settings from **Settings → Certificates**:
 
-1. Writes a TLS overlay to `/var/lib/tcs/tls.toml` (writable under the default systemd unit).
-2. Best-effort merges into `/etc/tcs/config.toml` when that path is writable.
+1. Stores the non-secret certificate document in the database.
+2. Stores a newly typed DNS credential in the vault. A blank field keeps the stored secret.
 3. **Hot-reloads** the HTTPS listener when TCS already started with TLS (self-signed, LE, or provided). New certs apply on the next TLS handshake — **no restart**.
 
 Response fields:

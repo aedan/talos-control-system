@@ -2,7 +2,7 @@
 
 # Configuration Reference
 
-TCS is configured via a TOML file and environment variables. Environment variables take precedence over the config file.
+The config file and environment variables hold the database connection, the bind address, and the SideroLink subnet. Environment variables override the file for those values. Authentication, certificate, and metal settings are stored in the database. After the first start, a value saved in the database wins over the same key left in the file or the environment.
 
 ## Config File Location
 
@@ -20,11 +20,8 @@ export TCS_CONFIG=/path/to/config.toml
 All config keys are available as environment variables with the `TCS_` prefix and `_` separators:
 
 ```bash
-# Equivalent to:
-# [tls]
-# mode = "self_signed"
-
-export TCS_TLS_MODE=self_signed
+# Equivalent to siderolink.subnet = ""
+export TCS_SIDEROLINK_SUBNET=
 ```
 
 ## Secrets vault
@@ -36,7 +33,7 @@ On first start the process creates two things:
 - `/var/lib/tcs/vault.hostkey` (mode 0600), which unlocks the vault on later boots
 - a break-glass passphrase, printed once on stderr (and therefore the service journal)
 
-The passphrase is stored only as an Argon2id hash. After the vault holds a secret, TCS comments that secret out of `config.toml`, `/etc/tcs/env`, and the TLS overlay `/var/lib/tcs/tls.toml`. A value systemd already loaded stays in the process until the next restart. Saving certificate settings stores DNS credentials in the vault and leaves them out of those files. The certificate form does not display a stored credential again.
+The passphrase is stored only as an Argon2id hash. Authentication, certificate, and metal settings that you save in the console are stored in the database (`settings` table). Secrets inside those settings stay in the vault. `config.toml` keeps the database connection, the bind address, and the SideroLink subnet, because those are read before the database opens. After the vault holds a secret, TCS comments that secret out of `config.toml`, `/etc/tcs/env`, and the TLS overlay `/var/lib/tcs/tls.toml`. The first start copies auth and TLS out of those files into the database and then removes `tls.toml`. A value systemd already loaded stays in the process until the next restart. Saving certificate settings stores DNS credentials in the vault and leaves them out of those files. The certificate form does not display a stored credential again.
 
 The data key is fixed at first start. It matches the key previously derived from the JWT secret, so talosconfig, kubeconfig, and BMC passwords already in the database still decrypt. Changing `auth.jwt_secret` later changes token signing only.
 
@@ -102,27 +99,7 @@ postgresql://username:password@host:port/database?sslmode=require
 
 ## TLS Configuration
 
-```toml
-[tls]
-enabled = false
-mode = "disabled"
-
-[tls.letsencrypt]
-domains = ["tcs.example.com"]
-email = "admin@example.com"
-challenge_type = "http-01"
-
-[tls.letsencrypt.dns_provider]
-provider = "godaddy"
-api_key = "..."
-api_secret = "..."
-
-[tls.provided]
-cert_path = "/etc/tls/cert.pem"
-key_path = "/etc/tls/key.pem"
-```
-
-See [TLS.md](./TLS.md) for detailed TLS and ACME configuration.
+Certificate settings are saved from **Settings → Certificates** into the database. DNS credentials stay in the vault. See [TLS.md](./TLS.md).
 
 ## Siderolink Configuration
 
@@ -190,8 +167,8 @@ support_url = ""                # External support link
 
 Full DHCP + PXE + BMC path for provisioning bare metal. **Off by default** —
 enable it on a dedicated provisioning VLAN only. See [METAL.md](METAL.md) for the
-operator workflow and host requirements. A live overlay can also be written to
-`/var/lib/tcs/metal.toml` from the Settings UI without a process restart.
+operator workflow and host requirements. The Settings UI stores this in the
+database and rebinds DHCP and PXE without a process restart. The fields below are that database document. A `[metal]` block already in `config.toml` is copied in once on the first start.
 
 ```toml
 [metal]
@@ -253,17 +230,8 @@ sqlite_path = "/var/lib/tcs/data.db"
 
 [auth]
 # Bootstrap only. First start copies this into the vault, then removes the line.
-# After that, leave it unset. See "Secrets vault" above.
+# After that, leave it unset. LDAP, OIDC, and SAML are saved in the console.
 jwt_secret = "a-long-random-string"
-
-[tls]
-enabled = true
-mode = "letsencrypt"
-
-[tls.letsencrypt]
-domains = ["tcs.example.com"]
-email = "admin@example.com"
-challenge_type = "http-01"
 
 [siderolink]
 bind_port = 8082
@@ -274,10 +242,6 @@ subnet = ""
 [factory]
 base_url = "https://factory.talos.dev"
 registry = "factory.talos.dev"
-
-# Bare-metal is off by default; see METAL.md
-[metal]
-enabled = false
 
 [branding]
 name = "Acme Kubernetes"

@@ -57,9 +57,8 @@ impl MetalRuntime {
 
     pub fn start(pool: DbPool, base: MetalConfig, data_dir: impl Into<PathBuf>) -> Arc<Self> {
         let data_dir = data_dir.into();
-        let merged = Self::load_merged(&base, &data_dir);
         let rt = Arc::new(Self {
-            config: Arc::new(RwLock::new(merged.clone())),
+            config: Arc::new(RwLock::new(base)),
             pool,
             data_dir,
             dhcp_handle: tokio::sync::Mutex::new(None),
@@ -82,14 +81,12 @@ impl MetalRuntime {
 
     pub async fn write_overlay_and_apply(&self, next: MetalConfig) -> Result<MetalConfig, AppError> {
         validate_metal(&next)?;
+        crate::db::settings::put_json(&self.pool, crate::db::settings::METAL, &next).await?;
         let path = Self::overlay_path(&self.data_dir);
-        let body = toml::to_string_pretty(&MetalOverlayFile::from_config(&next))
-            .map_err(|e| AppError::Internal(format!("metal.toml encode: {e}")))?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(AppError::Io)?;
+        if path.is_file() {
+            let _ = std::fs::remove_file(&path);
         }
-        std::fs::write(&path, body).map_err(AppError::Io)?;
-        info!(path = %path.display(), "Wrote metal config overlay");
+        info!("Saved metal config in the database");
 
         {
             let mut w = self.config.write().await;
@@ -211,8 +208,8 @@ fn validate_metal(cfg: &MetalConfig) -> Result<(), AppError> {
     Ok(())
 }
 
-/// TOML shape written to metal.toml (same fields as MetalConfig).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+/// One-time shape read from an old metal.toml before the database takes over.
+#[derive(Debug, Clone, serde::Deserialize, Default)]
 #[serde(default)]
 struct MetalOverlayFile {
     enabled: Option<bool>,
@@ -222,15 +219,6 @@ struct MetalOverlayFile {
 }
 
 impl MetalOverlayFile {
-    fn from_config(c: &MetalConfig) -> Self {
-        Self {
-            enabled: Some(c.enabled),
-            dhcp: Some(c.dhcp.clone()),
-            pxe: Some(c.pxe.clone()),
-            bmc: Some(c.bmc.clone()),
-        }
-    }
-
     fn apply_to(self, mut base: MetalConfig) -> MetalConfig {
         if let Some(e) = self.enabled {
             base.enabled = e;

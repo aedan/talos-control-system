@@ -42,32 +42,15 @@ Login accepts **email or username**. For emails, `{0}` is the local-part (`alice
 
 First-time LDAP users are **auto-provisioned** when no local row exists (if LDAP is configured).
 
-```toml
-[auth.ldap]
-url = "ldaps://ad.example.com:636"
-bind_dn = "CN=tcs-svc,OU=Service Accounts,DC=example,DC=com"
-# Leave bind_password unset. Store it with:
-#   printf '%s' "$LDAP_BIND_PASSWORD" | tcs vault put auth.ldap.bind_password
-user_search_base = "OU=Users,DC=example,DC=com"
-user_search_filter = "(sAMAccountName={0})"
-default_role = "reader"
+Set this in **Settings → Authentication**. The values are stored in the database. The bind password is a vault secret: type it once in the form, or run `tcs vault put auth.ldap.bind_password`. A blank password on save keeps the vault value.
 
-[[auth.ldap.group_role_mappings]]
-group_dn_pattern = "CN=TCS-Admins*"
-role = "admin"
-
-[[auth.ldap.group_role_mappings]]
-group_dn_pattern = "CN=TCS-Operators*"
-role = "operator"
-```
-
-Group patterns are case-insensitive. A single `*` wildcard is supported.
+The form fields are the server URL, bind DN, user search base, user search filter (`(sAMAccountName={0})`), default role, and group-to-role mappings. Group patterns are case-insensitive. A single `*` wildcard is supported.
 
 **Verification checklist (real AD/LDAP):**
 
 1. `ldapsearch` with the same URL, bind DN, base, and filter succeeds
 2. User bind with the same credentials succeeds
-3. Configure TCS, restart, log in with a directory user
+3. Save the settings, then log in with a directory user
 4. Confirm role from group mapping in **Settings → Users**
 
 ### OIDC
@@ -78,17 +61,7 @@ Group patterns are case-insensitive. A single `*` wildcard is supported.
 - Users auto-provisioned on first login with `default_role` (default `reader`)
 - Password login is rejected for existing `oidc` users (use the OIDC button)
 
-```toml
-[auth.oidc]
-enabled = true
-issuer_url = "https://login.example.com/"
-client_id = "tcs"
-# Leave client_secret unset. Store it with:
-#   printf '%s' "$OIDC_CLIENT_SECRET" | tcs vault put auth.oidc.client_secret
-redirect_url = "https://tcs.example.com/api/auth/oidc/callback"
-scopes = ["openid", "email", "profile"]
-default_role = "reader"
-```
+Set this in **Settings → Authentication**. The values are stored in the database. The client secret is a vault secret: type it once in the form, or run `tcs vault put auth.oidc.client_secret`. A blank secret on save keeps the vault value. The form fields are the issuer URL, client ID, redirect URL, scopes, and default role.
 
 **IdP app settings:**
 
@@ -118,22 +91,11 @@ If JWKS verification fails, TCS falls back to userinfo / unverified claims (logg
 Alpha SP: builds HTTP-Redirect AuthnRequest, serves SP metadata, accepts HTTP-POST ACS,
 parses NameID / attributes, maps groups → roles, auto-provisions local users.
 
-```toml
-[auth.saml]
-enabled = true
-idp_metadata_url = "https://idp.example.com/realms/tcs/protocol/saml/descriptor"
-# or set idp_sso_url + optional idp_cert_pem
-sp_entity_id = "https://tcs.example.com/saml/sp"
-acs_url = "https://tcs.example.com/api/auth/saml/acs"
-attribute_email = "email"
-attribute_name = "displayName"
-attribute_groups = "groups"
-default_role = "reader"
-
-[[auth.saml.group_role_mappings]]
-group_pattern = "tcs-admins"
-role = "admin"
-```
+Set this in **Settings → Authentication**. The values are stored in the database.
+The login page shows **Sign in with SAML** when SAML is enabled. The fields are
+the SP entity ID, the ACS URL (`https://<advertised host>/api/auth/saml/acs`),
+either an IdP metadata URL or an SSO URL, an optional IdP signing certificate,
+the attribute names, a default role, and group-to-role mappings.
 
 | Endpoint | Purpose |
 |----------|---------|

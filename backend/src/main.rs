@@ -304,7 +304,6 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             print_break_glass(passphrase, &key_path);
         }
         opened.vault.install_process_key();
-        vault::apply_config(&opened.vault, &db_pool, &mut config).await?;
         let config_path =
             std::env::var("TCS_CONFIG").unwrap_or_else(|_| "/etc/tcs/config.toml".into());
         let overlay = std::path::Path::new(&config.database.sqlite_path)
@@ -312,6 +311,15 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .map(|p| p.join("tls.toml"))
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/tcs/tls.toml"));
+        // Database rows win over config.toml / tls.toml. The first boot copies
+        // the file settings in, without secrets, and later saves stay in the DB.
+        talos_control_system::db::settings::adopt_auth_and_tls(&db_pool, &mut config).await?;
+        vault::apply_config(&opened.vault, &db_pool, &mut config).await?;
+        if overlay.is_file() {
+            if let Err(e) = std::fs::remove_file(&overlay) {
+                warn!(error = %e, path = %overlay.display(), "Could not remove the TLS overlay file");
+            }
+        }
         if let Err(e) = vault::redact_cleartext_files(
             &opened.vault,
             &db_pool,
@@ -429,20 +437,36 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let acme_store: AcmeChallengeStore = Arc::new(DashMap::new());
 
-    // Metal runtime: merge /var/lib/tcs/metal.toml overlay, own DHCP/PXE tasks
-    let metal_merged = talos_control_system::network::MetalRuntime::load_merged(
+    // Metal: one-time import from metal.toml, then the database is the copy.
+    let mut metal = talos_control_system::network::MetalRuntime::load_merged(
         &config.metal,
         std::path::Path::new(&data_dir),
     );
+    talos_control_system::db::settings::adopt_or_replace(
+        &db_pool,
+        talos_control_system::db::settings::METAL,
+        &mut metal,
+    )
+    .await?;
+    let metal_file = talos_control_system::network::MetalRuntime::overlay_path(
+        std::path::Path::new(&data_dir),
+    );
+    if metal_file.is_file() {
+        if let Err(e) = std::fs::remove_file(&metal_file) {
+            warn!(error = %e, path = %metal_file.display(), "Could not remove metal.toml");
+        }
+    }
+    config.metal = metal.clone();
     let metal_runtime = talos_control_system::network::MetalRuntime::start(
         db_pool.clone(),
-        config.metal.clone(),
+        metal,
         &data_dir,
     );
 
     // Placeholder runtime; filled in run_with_tls before serving
     let state = AppState {
         config: Arc::new(config.clone()),
+        auth: Arc::new(tokio::sync::RwLock::new(config.auth.clone())),
         db_pool: db_pool.clone(),
         branding: branding_manager,
         event_bus,
@@ -467,7 +491,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         db_pool.clone(),
         config.database.sqlite_path.clone(),
         config.auth.jwt_secret.clone(),
-        metal_merged,
+        config.metal.clone(),
     );
     let _convert_sched = talos_control_system::runtime::spawn_convert_scheduler(
         db_pool.clone(),

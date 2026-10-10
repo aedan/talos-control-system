@@ -143,9 +143,9 @@
 <div class="metal-settings">
   <h1>Metal / PXE</h1>
   <p class="hint">
-    Configure provisioning DHCP and PXE here. Changes write
-    <code>/var/lib/tcs/metal.toml</code> and rebind listeners <strong>without</strong>
-    restarting the TCS process. Use a dedicated provision VLAN.
+    Configure provisioning DHCP and PXE here. Changes are stored in the database
+    and rebind listeners <strong>without</strong> restarting the TCS process.
+    Use a dedicated provision VLAN.
   </p>
 
   {#if loading}

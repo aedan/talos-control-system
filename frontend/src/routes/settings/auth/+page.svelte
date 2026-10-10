@@ -28,13 +28,20 @@
       clientSecret: string;
       redirectUrl: string;
       scopes: string;
+      defaultRole: 'reader' | 'operator' | 'admin';
     };
-    saml?: {
+    saml: {
       enabled: boolean;
-      spEntityId?: string;
-      acsUrl?: string;
-      idpMetadataUrl?: string;
-      hasIdpSsoUrl?: boolean;
+      spEntityId: string;
+      acsUrl: string;
+      idpMetadataUrl: string;
+      idpSsoUrl: string;
+      idpCertPem: string;
+      attributeEmail: string;
+      attributeName: string;
+      attributeGroups: string;
+      defaultRole: 'reader' | 'operator' | 'admin';
+      groupRoleMappings: { groupPattern: string; role: 'reader' | 'operator' | 'admin' }[];
     };
   }
 
@@ -44,6 +51,8 @@
     confirmPassword: string;
   }
 
+  let ldapPasswordStored = $state(false);
+  let oidcSecretStored = $state(false);
   let loading = $state(true);
   let saving = $state(false);
   let changingPassword = $state(false);
@@ -69,14 +78,21 @@
       clientId: '',
       clientSecret: '',
       redirectUrl: '',
-      scopes: 'openid,profile,email'
+      scopes: 'openid,profile,email',
+      defaultRole: 'reader'
     },
     saml: {
       enabled: false,
       spEntityId: '',
       acsUrl: '',
       idpMetadataUrl: '',
-      hasIdpSsoUrl: false
+      idpSsoUrl: '',
+      idpCertPem: '',
+      attributeEmail: 'email',
+      attributeName: 'displayName',
+      attributeGroups: 'groups',
+      defaultRole: 'reader',
+      groupRoleMappings: []
     }
   });
 
@@ -91,6 +107,8 @@
       const data = (await client.get('/settings/auth/config')) as any;
       if (data) {
         // Map backend response (mixed camel/snake) into form state.
+        ldapPasswordStored = !!(data.ldap?.hasBindPassword ?? data.ldap?.has_bind_password);
+        oidcSecretStored = !!(data.oidc?.hasClientSecret ?? data.oidc?.has_client_secret);
         if (data.ldap) {
           config.ldap = {
             enabled: true,
@@ -117,7 +135,8 @@
             redirectUrl: data.oidc.redirect_url || data.oidc.redirectUrl || '',
             scopes: Array.isArray(data.oidc.scopes)
               ? data.oidc.scopes.join(',')
-              : data.oidc.scopes || 'openid,profile,email'
+              : data.oidc.scopes || 'openid,profile,email',
+            defaultRole: data.oidc.default_role || data.oidc.defaultRole || 'reader'
           };
         }
         if (data.saml) {
@@ -126,7 +145,18 @@
             spEntityId: data.saml.spEntityId || data.saml.sp_entity_id || '',
             acsUrl: data.saml.acsUrl || data.saml.acs_url || '',
             idpMetadataUrl: data.saml.idpMetadataUrl || data.saml.idp_metadata_url || '',
-            hasIdpSsoUrl: !!(data.saml.hasIdpSsoUrl ?? data.saml.has_idp_sso_url)
+            idpSsoUrl: data.saml.idpSsoUrl || data.saml.idp_sso_url || '',
+            idpCertPem: data.saml.idpCertPem || data.saml.idp_cert_pem || '',
+            attributeEmail: data.saml.attributeEmail || data.saml.attribute_email || 'email',
+            attributeName: data.saml.attributeName || data.saml.attribute_name || 'displayName',
+            attributeGroups: data.saml.attributeGroups || data.saml.attribute_groups || 'groups',
+            defaultRole: data.saml.defaultRole || data.saml.default_role || 'reader',
+            groupRoleMappings: (data.saml.groupRoleMappings || data.saml.group_role_mappings || []).map(
+              (m: any) => ({
+                groupPattern: m.groupPattern || m.group_pattern || '',
+                role: m.role || 'reader'
+              })
+            )
           };
         }
       }
@@ -146,6 +176,17 @@
 
   function removeGroupMapping(index: number) {
     config.ldap.groupRoleMappings.splice(index, 1);
+  }
+
+  function addSamlGroupMapping() {
+    config.saml.groupRoleMappings.push({
+      groupPattern: '',
+      role: 'reader'
+    });
+  }
+
+  function removeSamlGroupMapping(index: number) {
+    config.saml.groupRoleMappings.splice(index, 1);
   }
 
   async function changePassword() {
@@ -189,8 +230,12 @@
     successMsg = '';
     try {
       await client.put('/settings/auth/config', config);
-      successMsg = 'Authentication configuration saved successfully';
-      success('Authentication configuration saved');
+      successMsg = 'Authentication settings saved in the database';
+      success('Authentication settings saved in the database');
+      if (config.ldap.bindPassword) ldapPasswordStored = true;
+      if (config.oidc.clientSecret) oidcSecretStored = true;
+      config.ldap.bindPassword = '';
+      config.oidc.clientSecret = '';
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Failed to save configuration';
       notifyError('Failed to save authentication configuration');
@@ -203,7 +248,7 @@
 <div class="auth-page">
   <div class="page-header">
     <h1>Authentication</h1>
-    <p class="description">Configure password policies, LDAP, and OIDC authentication.</p>
+    <p class="description">LDAP, OpenID Connect, and SAML settings are stored in the database. Passwords and client secrets go into the vault and are not shown again.</p>
   </div>
 
   {#if loading}
@@ -310,7 +355,7 @@
                 type="password"
                 title="Password for the bind account"
                 bind:value={config.ldap.bindPassword}
-                placeholder="Bind account password"
+                placeholder={ldapPasswordStored ? 'Stored in the vault. Leave blank to keep it.' : 'Bind account password'}
               />
             </div>
 
@@ -424,7 +469,7 @@
                 type="password"
                 title="OIDC client secret"
                 bind:value={config.oidc.clientSecret}
-                placeholder="OIDC client secret"
+                placeholder={oidcSecretStored ? 'Stored in the vault. Leave blank to keep it.' : 'OIDC client secret'}
               />
             </div>
 
@@ -450,49 +495,101 @@
               />
               <span class="hint">Comma-separated OAuth scopes</span>
             </div>
+
+            <div class="form-group">
+              <label for="oidcDefaultRole">Default role</label>
+              <select id="oidcDefaultRole" title="Role for a new OIDC user" bind:value={config.oidc.defaultRole}>
+                <option value="reader">Reader</option>
+                <option value="operator">Operator</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
           {/if}
         </div>
 
         <div class="saml-card">
           <div class="card-header">
             <h2>SAML 2.0 (Service Provider)</h2>
-            <span class="badge {config.saml?.enabled ? 'on' : 'off'}">
-              {config.saml?.enabled ? 'Enabled' : 'Disabled'}
-            </span>
+            <label class="toggle">
+              <input type="checkbox" title="Enable SAML sign-in" checked={config.saml.enabled} onchange={() => config.saml.enabled = !config.saml.enabled} />
+              <span class="toggle-track">
+                <span class="toggle-thumb"></span>
+              </span>
+            </label>
           </div>
           <p class="section-desc">
-            Configure SAML in <code>config.toml</code> under <code>[auth.saml]</code> (not via this form yet).
             When enabled, the login page shows <strong>Sign in with SAML</strong>.
+            Metadata: <code>/api/auth/saml/metadata</code> · Login: <code>/api/auth/saml/login</code>
           </p>
-          {#if config.saml?.enabled}
+          {#if config.saml.enabled}
             <div class="form-group">
-              <label>SP Entity ID</label>
-              <input type="text" title="SAML service provider entity ID (from config.toml)" value={config.saml.spEntityId || ''} readonly />
+              <label for="spEntityId">SP Entity ID</label>
+              <input id="spEntityId" type="text" title="Service provider entity ID" bind:value={config.saml.spEntityId} placeholder="https://tcs.example.com/saml/sp" />
             </div>
             <div class="form-group">
-              <label>ACS URL</label>
-              <input type="text" title="Assertion Consumer Service URL (from config.toml)" value={config.saml.acsUrl || ''} readonly />
+              <label for="acsUrl">ACS URL</label>
+              <input id="acsUrl" type="url" title="Assertion Consumer Service URL" bind:value={config.saml.acsUrl} placeholder="https://tcs.example.com/api/auth/saml/acs" />
             </div>
             <div class="form-group">
-              <label>IdP metadata URL</label>
-              <input type="text" title="Identity provider metadata URL (from config.toml)" value={config.saml.idpMetadataUrl || ''} readonly />
+              <label for="idpMetadataUrl">IdP metadata URL</label>
+              <input id="idpMetadataUrl" type="url" title="Identity provider metadata URL" bind:value={config.saml.idpMetadataUrl} placeholder="https://idp.example.com/metadata" />
             </div>
-            <p class="hint">
-              Metadata: <code>/api/auth/saml/metadata</code> · Login: <code>/api/auth/saml/login</code> ·
-              IdP SSO configured: {config.saml.hasIdpSsoUrl ? 'yes' : 'no'}
-            </p>
-          {:else}
-            <pre class="sample-toml">[auth.saml]
-enabled = true
-idp_metadata_url = "https://idp.example.com/metadata"
-# or idp_sso_url = "https://idp.example.com/sso"
-sp_entity_id = "https://tcs.example.com/saml/sp"
-acs_url = "https://tcs.example.com/api/auth/saml/acs"
-default_role = "reader"</pre>
+            <div class="form-group">
+              <label for="idpSsoUrl">IdP SSO URL</label>
+              <input id="idpSsoUrl" type="url" title="Direct IdP SSO URL, used when metadata is not set" bind:value={config.saml.idpSsoUrl} placeholder="https://idp.example.com/sso" />
+            </div>
+            <div class="form-group">
+              <label for="idpCertPem">IdP signing certificate</label>
+              <textarea id="idpCertPem" title="PEM of the IdP signing certificate" bind:value={config.saml.idpCertPem} rows="4" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+            </div>
+            <div class="form-group">
+              <label for="attributeEmail">Email attribute</label>
+              <input id="attributeEmail" type="text" title="SAML attribute that carries the email" bind:value={config.saml.attributeEmail} />
+            </div>
+            <div class="form-group">
+              <label for="attributeName">Name attribute</label>
+              <input id="attributeName" type="text" title="SAML attribute that carries the display name" bind:value={config.saml.attributeName} />
+            </div>
+            <div class="form-group">
+              <label for="attributeGroups">Groups attribute</label>
+              <input id="attributeGroups" type="text" title="SAML attribute that carries group names" bind:value={config.saml.attributeGroups} />
+            </div>
+            <div class="form-group">
+              <label for="samlDefaultRole">Default role</label>
+              <select id="samlDefaultRole" title="Role for a SAML user with no group mapping" bind:value={config.saml.defaultRole}>
+                <option value="reader">Reader</option>
+                <option value="operator">Operator</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
+            <div class="group-mappings">
+              <div class="mapping-header">
+                <h3>Group-to-role mappings</h3>
+                <Button variant="ghost" size="sm" title="Add a SAML group-to-role mapping" onclick={addSamlGroupMapping}>+ Add</Button>
+              </div>
+              {#each config.saml.groupRoleMappings as mapping, index}
+                <div class="mapping-row">
+                  <div class="form-group mapping-input">
+                    <input type="text" title="IdP group name or pattern" bind:value={mapping.groupPattern} placeholder="Group name or pattern" />
+                  </div>
+                  <select title="Role granted to members of this group" bind:value={mapping.role}>
+                    <option value="reader">Reader</option>
+                    <option value="operator">Operator</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                  <button class="remove-btn" onclick={() => removeSamlGroupMapping(index)} title="Remove mapping">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                      <line x1="18" y1="6" x2="6" y2="18"/>
+                      <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                  </button>
+                </div>
+              {/each}
+            </div>
           {/if}
         </div>
 
-        <Button variant="primary" title="Save the LDAP and OIDC authentication configuration" onclick={saveConfig} disabled={saving}>
+        <Button variant="primary" title="Save LDAP, OpenID Connect, and SAML settings" onclick={saveConfig} disabled={saving}>
           {saving ? 'Saving...' : 'Save Configuration'}
         </Button>
       </div>

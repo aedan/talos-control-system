@@ -58,7 +58,7 @@ Env overrides use the `TCS_METAL_*` prefix (same pattern as other config).
 
 ## Operator workflow
 
-1. Enable metal DHCP/PXE via **Settings → Metal / PXE → Apply** (writes `/var/lib/tcs/metal.toml` and rebinds listeners **without** process restart), or put `[metal]` in `/etc/tcs/config.toml` and restart once for baseline.
+1. Enable metal DHCP/PXE via **Settings → Metal / PXE → Apply**. The settings are stored in the database and the listeners rebind **without** a process restart. A `[metal]` block already in `config.toml` is copied in on the first start.
 2. **Settings → Metal / PXE** → create profile → **Sync assets** (downloads kernel + initramfs).
 3. **Clusters → Provision bare metal**:
    - Create cluster + **Generate PKI + configs** (talosconfig is auto-attached).

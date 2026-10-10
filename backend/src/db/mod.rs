@@ -3,6 +3,7 @@ pub mod models;
 pub mod pool;
 pub mod postgres;
 pub mod repos;
+pub mod settings;
 
 pub use pool::{DbPool, SqlVal};
 
@@ -123,6 +124,7 @@ pub async fn run_migrations(pool: &DbPool) -> Result<(), AppError> {
             include_str!("migrations/023_machine_os_type.sql"),
         ),
         ("024_vault.sql", include_str!("migrations/024_vault.sql")),
+        ("025_settings.sql", include_str!("migrations/025_settings.sql")),
     ];
 
     for (name, sql) in migrations {

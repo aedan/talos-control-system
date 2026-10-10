@@ -82,5 +82,5 @@ VLAN as MAAS DHCP.
 
 ## Metal DHCP/PXE without process restart
 
-**Settings → Metal / PXE → Apply** writes `/var/lib/tcs/metal.toml` and rebinds listeners
+**Settings → Metal / PXE → Apply** stores the metal config in the database and rebinds listeners
 in-process. Dedicated provision VLAN still required when enabling DHCP.

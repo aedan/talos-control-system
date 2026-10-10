@@ -31,7 +31,7 @@ cluster.
 | **iDRAC 7 virtual console** | **Supported (alpha)** | Machine page opens the HTML5 KVM viewer |
 | **Metal provision jobs** | **Supported (alpha)** | BMC → PXE → wait installer → install → bootstrap |
 | **Inventory YAML/CSV import** | **Supported (alpha)** | Bulk MAC/BMC inventory; optional create cluster |
-| **Live metal config** | **Supported (alpha)** | Settings UI → `metal.toml` overlay; rebind DHCP/PXE without process restart |
+| **Live metal config** | **Supported (alpha)** | Settings UI stores metal config in the database and rebinds DHCP/PXE without a process restart |
 | Scale workers (desired size) | **Supported (alpha)** | Inventory target |
 | Machine reset / wipe | **Supported (alpha)** | Talos Reset RPC; requires confirm |
 | Live TLS cert reload | **Supported** | Self-signed ↔ LE ↔ provided without restart when HTTPS already up |

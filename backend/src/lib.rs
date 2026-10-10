@@ -20,6 +20,8 @@ use crate::runtime::cache::AppCache;
 
 pub struct AppState {
     pub config: Arc<crate::config::Config>,
+    /// Auth providers saved from the console. Secrets in this copy come from the vault.
+    pub auth: Arc<tokio::sync::RwLock<crate::config::AuthConfig>>,
     pub db_pool: crate::db::DbPool,
     pub branding: Arc<BrandingManager>,
     pub event_bus: Arc<EventBus>,
@@ -37,6 +39,7 @@ impl Clone for AppState {
     fn clone(&self) -> Self {
         Self {
             config: Arc::clone(&self.config),
+            auth: Arc::clone(&self.auth),
             db_pool: self.db_pool.clone(),
             branding: Arc::clone(&self.branding),
             event_bus: Arc::clone(&self.event_bus),

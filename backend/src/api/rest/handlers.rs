@@ -85,23 +85,12 @@ pub struct AuthProvidersResponse {
 }
 
 pub async fn get_auth_providers(State(state): State<AppState>) -> Json<AuthProvidersResponse> {
+    let auth = state.auth.read().await.clone();
     Json(AuthProvidersResponse {
         local: true,
-        oidc: state
-            .config
-            .auth
-            .oidc
-            .as_ref()
-            .map(|o| o.enabled)
-            .unwrap_or(false),
-        saml: state
-            .config
-            .auth
-            .saml
-            .as_ref()
-            .map(|s| s.enabled)
-            .unwrap_or(false),
-        ldap_configured: state.config.auth.ldap.is_some(),
+        oidc: auth.oidc.as_ref().map(|o| o.enabled).unwrap_or(false),
+        saml: auth.saml.as_ref().map(|s| s.enabled).unwrap_or(false),
+        ldap_configured: auth.ldap.is_some(),
     })
 }
 
@@ -1632,6 +1621,7 @@ pub async fn login(
     let existing = repos::user::get_by_email(&state.db_pool, &payload.email)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let auth = state.auth.read().await.clone();
 
     let authenticated_user = if let Some(user) = existing {
         if !user.is_active {
@@ -1642,7 +1632,7 @@ pub async fn login(
                 .await
                 .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?,
             "ldap" => {
-                if let Some(ref ldap_config) = state.config.auth.ldap {
+                if let Some(ref ldap_config) = auth.ldap {
                     let ldap_client = crate::auth::LdapClient::new(ldap_config.clone());
                     ldap_client
                         .authenticate(&state.db_pool, &payload.email, &payload.password)
@@ -1665,7 +1655,7 @@ pub async fn login(
                 ));
             }
         }
-    } else if let Some(ref ldap_config) = state.config.auth.ldap {
+    } else if let Some(ref ldap_config) = auth.ldap {
         // First-time / auto-provision LDAP login when no local row exists yet.
         let ldap_client = crate::auth::LdapClient::new(ldap_config.clone());
         ldap_client
@@ -1855,8 +1845,12 @@ fn extract_claims(headers: &HeaderMap) -> Result<Claims, (StatusCode, String)> {
 pub async fn oidc_authorize(
     State(state): State<AppState>,
 ) -> Result<(StatusCode, axum::response::Redirect), (StatusCode, String)> {
-    let oidc_config = state.config.auth.oidc
-        .as_ref()
+    let oidc_config = state
+        .auth
+        .read()
+        .await
+        .oidc
+        .clone()
         .ok_or_else(|| (StatusCode::BAD_GATEWAY, "OIDC is not configured".to_string()))?;
 
     if !oidc_config.enabled {
@@ -1892,8 +1886,12 @@ pub async fn oidc_callback(
     State(state): State<AppState>,
     Query(params): Query<OidcCallbackParams>,
 ) -> Result<axum::response::Html<String>, (StatusCode, String)> {
-    let oidc_config = state.config.auth.oidc
-        .as_ref()
+    let oidc_config = state
+        .auth
+        .read()
+        .await
+        .oidc
+        .clone()
         .ok_or_else(|| (StatusCode::BAD_GATEWAY, "OIDC is not configured".to_string()))?;
 
     if !oidc_config.enabled {
@@ -2008,34 +2006,22 @@ pub async fn get_cert_status(
 }
 
 /// Return the persisted certificate configuration (admin-only) so the
-/// Certificates page can pre-fill its form with what's actually configured —
-/// mode, domains, LE email, challenge type, DNS provider + zone + credentials —
-/// instead of showing defaults. Source of truth is the `[tls]` overlay written
-/// by PUT (same trust boundary where credentials were set); falls back to the
-/// boot config if no overlay exists. The UI masks the credential inputs.
+/// Certificates page can pre-fill its form. The database `settings` row is the
+/// source of truth. DNS credentials are not included; the form leaves those
+/// blank and a blank value keeps the vault secret.
 pub async fn get_cert_config(
     State(state): State<AppState>,
 ) -> Result<Json<crate::config::TlsConfig>, (StatusCode, String)> {
-    // Mirror update_cert_config's overlay location: <data_dir>/tls.toml.
-    let data_dir = std::path::Path::new(&state.config.database.sqlite_path)
-        .parent()
-        .map(|p| p.to_path_buf())
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/tcs"));
-    let overlay_path = data_dir.join("tls.toml");
-
-    let mut tls = if overlay_path.exists() {
-        let raw = std::fs::read_to_string(&overlay_path)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("cannot read {}: {}", overlay_path.display(), e)))?;
-        let table: toml::value::Table = raw
-            .parse()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("invalid tls overlay: {e}")))?;
-        table
-            .get("tls")
-            .cloned()
-            .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "tls overlay missing [tls] section".to_string()))?
-            .try_into::<crate::config::TlsConfig>()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to parse [tls]: {e}")))?
+    let mut tls = if let Some(rt) = &state.tls_runtime {
+        rt.tls.read().await.clone()
+    } else if let Some(stored) = crate::db::settings::get_json::<crate::config::TlsConfig>(
+        &state.db_pool,
+        crate::db::settings::TLS,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        stored
     } else {
         state.config.tls.clone()
     };
@@ -2233,161 +2219,61 @@ pub async fn update_cert_config(
         }
     }
 
-    let mut tls_table = toml::value::Table::new();
-    tls_table.insert(
-        "enabled".to_string(),
-        toml::Value::Boolean(req.mode != "disabled"),
-    );
-    tls_table.insert("mode".to_string(), toml::Value::String(req.mode.clone()));
-
     if req.mode == "letsencrypt" {
-        if let Some(le) = &req.letsencrypt {
-            let mut le_table = toml::value::Table::new();
-            le_table.insert(
-                "domains".to_string(),
-                toml::Value::Array(
-                    domains
-                        .iter()
-                        .map(|d| toml::Value::String(d.clone()))
-                        .collect(),
-                ),
-            );
-            le_table.insert("email".to_string(), toml::Value::String(le.email.clone()));
-            let challenge = if le.challenge_type.trim().is_empty() {
-                "http-01".to_string()
-            } else {
-                le.challenge_type.clone()
-            };
-            le_table.insert(
-                "challenge_type".to_string(),
-                toml::Value::String(challenge.clone()),
-            );
-            if challenge == "dns-01" {
+        if let Some(le) = req.letsencrypt.as_ref() {
+            if le.challenge_type == "dns-01" {
                 if let Some(dns) = &le.dns_provider {
-                    let mut dns_table = toml::value::Table::new();
-                    dns_table.insert(
-                        "provider".to_string(),
-                        toml::Value::String(dns.provider.clone()),
-                    );
-                    // Credentials stay in the vault. Empty fields mean "keep
-                    // the stored value" so a masked form save does not wipe them.
                     store_dns_secrets(&state, dns).await?;
-                    dns_table.insert(
-                        "zone_id".to_string(),
-                        toml::Value::String(dns.zone_id.clone()),
-                    );
-                    if !dns.dns_zone.trim().is_empty() {
-                        dns_table.insert(
-                            "dns_zone".to_string(),
-                            toml::Value::String(dns.dns_zone.clone()),
-                        );
-                    }
-                    le_table.insert("dns_provider".to_string(), toml::Value::Table(dns_table));
                 }
             }
-            tls_table.insert("letsencrypt".to_string(), toml::Value::Table(le_table));
-        }
-    } else if req.mode == "self-signed" {
-        let ss_domains = if domains.is_empty() {
-            vec!["localhost".to_string()]
-        } else {
-            domains.clone()
-        };
-        let mut ss_table = toml::value::Table::new();
-        ss_table.insert(
-            "domains".to_string(),
-            toml::Value::Array(
-                ss_domains
-                    .iter()
-                    .map(|d| toml::Value::String(d.clone()))
-                    .collect(),
-            ),
-        );
-        tls_table.insert("self-signed".to_string(), toml::Value::Table(ss_table));
-    } else if req.mode == "provided" {
-        if let Some(prov) = &req.provided {
-            let mut prov_table = toml::value::Table::new();
-            prov_table.insert(
-                "cert_path".to_string(),
-                toml::Value::String(prov.cert_path.clone()),
-            );
-            prov_table.insert(
-                "key_path".to_string(),
-                toml::Value::String(prov.key_path.clone()),
-            );
-            if let Some(ca) = &prov.ca_path {
-                prov_table.insert("ca_path".to_string(), toml::Value::String(ca.clone()));
-            }
-            tls_table.insert("provided".to_string(), toml::Value::Table(prov_table));
-        } else {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "provided cert_path and key_path required".into(),
-            ));
         }
     }
 
-    let mut config_data = toml::value::Table::new();
-    config_data.insert("tls".to_string(), toml::Value::Table(tls_table));
-    let config_str = toml::to_string_pretty(&config_data)
+    let mut new_tls_config = build_tls_config_from_request(&req);
+    if let Some(le) = new_tls_config.letsencrypt.as_mut() {
+        if let Some(dns) = le.dns_provider.as_mut() {
+            let opened = crate::utils::vault::open(
+                &state.db_pool,
+                &crate::utils::vault::host_key_path(&state.config),
+                &state.config.auth.jwt_secret,
+            )
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            for (slot, name) in [
+                (&mut dns.api_key, crate::utils::vault::DNS_API_KEY),
+                (&mut dns.api_secret, crate::utils::vault::DNS_API_SECRET),
+                (&mut dns.api_token, crate::utils::vault::DNS_API_TOKEN),
+            ] {
+                if slot.is_empty() {
+                    if let Some(stored) = opened
+                        .vault
+                        .get(&state.db_pool, name)
+                        .await
+                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                    {
+                        *slot = stored;
+                    }
+                }
+            }
+        }
+    }
+    let mut stored_tls = new_tls_config.clone();
+    crate::db::settings::strip_tls_secrets(&mut stored_tls);
+    crate::db::settings::put_json(&state.db_pool, crate::db::settings::TLS, &stored_tls)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // Prefer writable data dir overlay (systemd ProtectSystem often makes /etc read-only).
-    let data_dir = std::path::Path::new(&state.config.database.sqlite_path)
-        .parent()
-        .map(|p| p.to_path_buf())
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/tcs"));
-    let overlay_path = data_dir.join("tls.toml");
-    std::fs::create_dir_all(&data_dir).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("cannot create data dir: {}", e),
-        )
-    })?;
-    std::fs::write(&overlay_path, &config_str).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!(
-                "cannot write {}: {} (check ReadWritePaths for the data directory)",
-                overlay_path.display(),
-                e
-            ),
-        )
-    })?;
-
-    // Best-effort merge into main config.toml when it is writable
-    let main_path = std::env::var("TCS_CONFIG").unwrap_or_else(|_| "/etc/tcs/config.toml".into());
-    let mut wrote_main = false;
-    if let Ok(existing) = std::fs::read_to_string(&main_path) {
-        if let Ok(mut root) = existing.parse::<toml::Value>() {
-            if let Some(table) = root.as_table_mut() {
-                table.insert(
-                    "tls".to_string(),
-                    config_data.get("tls").cloned().unwrap_or(toml::Value::Table(toml::map::Map::new())),
-                );
-                if let Ok(merged) = toml::to_string_pretty(&root) {
-                    if std::fs::write(&main_path, merged).is_ok() {
-                        wrote_main = true;
-                    }
-                }
-            }
-        }
-    }
 
     crate::utils::audit::log_action(
         &state.db_pool,
         &claims.sub,
         "tls_config_update",
         &req.mode,
-        &format!("overlay={} main_merged={}", overlay_path.display(), wrote_main),
+        "saved certificate settings in the database",
     )
     .await;
 
     // Attempt live reload if TLS is currently active
     let live_result = if let Some(tls_runtime) = &state.tls_runtime {
-        // Build TlsConfig directly from the request (avoids TOML round-trip)
-        let new_tls_config = build_tls_config_from_request(&req);
         match tls_runtime.apply_mode(&new_tls_config).await {
             Ok(note) => Some(Ok(note)),
             Err(e) => Some(Err(e.to_string())),
@@ -2400,24 +2286,24 @@ pub async fn update_cert_config(
         Some(Ok(note)) => Ok(Json(serde_json::json!({
             "message": note,
             "mode": req.mode,
-            "overlayPath": overlay_path.display().to_string(),
-            "mainConfigMerged": wrote_main,
+            "overlayPath": "",
+            "mainConfigMerged": false,
             "restartRequired": false,
             "appliedLive": true,
         }))),
         Some(Err(err)) => Ok(Json(serde_json::json!({
             "message": format!("Config saved but live reload failed: {}", err),
             "mode": req.mode,
-            "overlayPath": overlay_path.display().to_string(),
-            "mainConfigMerged": wrote_main,
+            "overlayPath": "",
+            "mainConfigMerged": false,
             "restartRequired": true,
             "appliedLive": false,
         }))),
         None => Ok(Json(serde_json::json!({
             "message": "TLS config saved. Restart TCS to apply (systemctl restart tcs).",
             "mode": req.mode,
-            "overlayPath": overlay_path.display().to_string(),
-            "mainConfigMerged": wrote_main,
+            "overlayPath": "",
+            "mainConfigMerged": false,
             "restartRequired": true,
             "appliedLive": false,
         }))),
@@ -2551,9 +2437,11 @@ pub struct AuthConfigResponse {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LdapConfigResponse {
     pub server: String,
     pub bind_dn: String,
+    pub has_bind_password: bool,
     pub user_search_base: String,
     pub user_search_filter: String,
     pub default_role: String,
@@ -2561,18 +2449,22 @@ pub struct LdapConfigResponse {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GroupRoleMappingResponse {
     pub group_dn_pattern: String,
     pub role: String,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OidcConfigResponse {
     pub enabled: bool,
     pub issuer_url: String,
     pub client_id: String,
     pub redirect_url: String,
     pub scopes: Vec<String>,
+    pub has_client_secret: bool,
+    pub default_role: String,
 }
 
 #[derive(Serialize)]
@@ -2582,15 +2474,30 @@ pub struct SamlConfigResponse {
     pub sp_entity_id: String,
     pub acs_url: String,
     pub idp_metadata_url: String,
-    pub has_idp_sso_url: bool,
+    pub idp_sso_url: String,
+    pub idp_cert_pem: String,
+    pub attribute_email: String,
+    pub attribute_name: String,
+    pub attribute_groups: String,
+    pub default_role: String,
+    pub group_role_mappings: Vec<SamlGroupMappingResponse>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SamlGroupMappingResponse {
+    pub group_pattern: String,
+    pub role: String,
 }
 
 pub async fn get_auth_config(
     State(state): State<AppState>,
 ) -> Result<Json<AuthConfigResponse>, (StatusCode, String)> {
-    let ldap = state.config.auth.ldap.as_ref().map(|l| LdapConfigResponse {
+    let auth = state.auth.read().await.clone();
+    let ldap = auth.ldap.as_ref().map(|l| LdapConfigResponse {
         server: l.url.clone(),
-        bind_dn: String::new(),
+        bind_dn: l.bind_dn.clone(),
+        has_bind_password: !l.bind_password.is_empty(),
         user_search_base: l.user_search_base.clone(),
         user_search_filter: l.user_search_filter.clone(),
         default_role: l.default_role.clone(),
@@ -2600,41 +2507,96 @@ pub async fn get_auth_config(
         }).collect(),
     });
 
-    let oidc = state.config.auth.oidc.as_ref().map(|o| OidcConfigResponse {
+    let oidc = auth.oidc.as_ref().map(|o| OidcConfigResponse {
         enabled: o.enabled,
         issuer_url: o.issuer_url.clone(),
         client_id: o.client_id.clone(),
         redirect_url: o.redirect_url.clone(),
         scopes: o.scopes.clone(),
+        has_client_secret: !o.client_secret.is_empty(),
+        default_role: o.default_role.clone(),
     });
 
-    let saml = state.config.auth.saml.as_ref().map(|s| SamlConfigResponse {
+    let saml = Some(auth.saml.clone().unwrap_or_default()).map(|s| SamlConfigResponse {
         enabled: s.enabled,
-        sp_entity_id: s.sp_entity_id.clone(),
-        acs_url: s.acs_url.clone(),
-        idp_metadata_url: s.idp_metadata_url.clone(),
-        has_idp_sso_url: !s.idp_sso_url.is_empty(),
+        sp_entity_id: s.sp_entity_id,
+        acs_url: s.acs_url,
+        idp_metadata_url: s.idp_metadata_url,
+        idp_sso_url: s.idp_sso_url,
+        idp_cert_pem: s.idp_cert_pem.unwrap_or_default(),
+        attribute_email: s.attribute_email,
+        attribute_name: s.attribute_name,
+        attribute_groups: s.attribute_groups,
+        default_role: s.default_role,
+        group_role_mappings: s
+            .group_role_mappings
+            .into_iter()
+            .map(|m| SamlGroupMappingResponse {
+                group_pattern: m.group_pattern,
+                role: m.role,
+            })
+            .collect(),
     });
 
     Ok(Json(AuthConfigResponse { ldap, oidc, saml }))
 }
 
+fn flexible_scopes<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::String(text) => Ok(text
+            .split(',')
+            .map(|part| part.trim().to_string())
+            .filter(|part| !part.is_empty())
+            .collect()),
+        serde_json::Value::Array(items) => Ok(items
+            .into_iter()
+            .filter_map(|item| item.as_str().map(|s| s.to_string()))
+            .collect()),
+        _ => Ok(Vec::new()),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct AuthConfigRequest {
+    #[serde(default)]
     pub ldap: Option<AuthLdapRequest>,
+    #[serde(default)]
     pub oidc: Option<AuthOidcRequest>,
+    #[serde(default)]
+    pub saml: Option<AuthSamlRequest>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthLdapRequest {
-    pub server: String,
+    #[serde(default = "default_ldap_enabled")]
+    pub enabled: bool,
+    #[serde(alias = "server", alias = "url")]
+    pub server_url: String,
+    #[serde(default)]
     pub bind_dn: String,
+    #[serde(default)]
     pub bind_password: String,
+    #[serde(default)]
     pub user_search_base: String,
+    #[serde(default)]
     pub user_search_filter: String,
+    #[serde(default = "default_reader_role")]
     pub default_role: String,
+    #[serde(default)]
     pub group_role_mappings: Vec<AuthGroupMappingRequest>,
+}
+
+fn default_ldap_enabled() -> bool {
+    true
+}
+
+fn default_reader_role() -> String {
+    "reader".to_string()
 }
 
 #[derive(Deserialize)]
@@ -2647,81 +2609,225 @@ pub struct AuthGroupMappingRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthOidcRequest {
+    #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
     pub issuer_url: String,
+    #[serde(default)]
     pub client_id: String,
+    #[serde(default)]
     pub client_secret: String,
+    #[serde(default)]
     pub redirect_url: String,
+    #[serde(default, deserialize_with = "flexible_scopes")]
     pub scopes: Vec<String>,
+    #[serde(default = "default_reader_role")]
+    pub default_role: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthSamlRequest {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub sp_entity_id: String,
+    #[serde(default)]
+    pub acs_url: String,
+    #[serde(default)]
+    pub idp_metadata_url: String,
+    #[serde(default)]
+    pub idp_sso_url: String,
+    #[serde(default)]
+    pub idp_cert_pem: String,
+    #[serde(default = "default_email_attr")]
+    pub attribute_email: String,
+    #[serde(default = "default_name_attr")]
+    pub attribute_name: String,
+    #[serde(default = "default_groups_attr")]
+    pub attribute_groups: String,
+    #[serde(default = "default_reader_role")]
+    pub default_role: String,
+    #[serde(default)]
+    pub group_role_mappings: Vec<AuthSamlGroupRequest>,
+}
+
+fn default_email_attr() -> String {
+    "email".to_string()
+}
+
+fn default_name_attr() -> String {
+    "displayName".to_string()
+}
+
+fn default_groups_attr() -> String {
+    "groups".to_string()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthSamlGroupRequest {
+    pub group_pattern: String,
+    pub role: String,
 }
 
 pub async fn update_auth_config(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<AuthConfigRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let config_path = "/etc/tcs/config.toml";
-    let mut config_data = toml::value::Table::new();
-    let mut auth_table = toml::value::Table::new();
+    let claims = extract_claims(&headers)?;
+    if claims.role != "admin" {
+        return Err((StatusCode::FORBIDDEN, "Admin role required".into()));
+    }
+
+    use crate::config::auth::{GroupRoleMapping, LdapConfig, OidcConfig, SamlConfig, SamlGroupMapping};
+    use crate::db::settings::{self, AuthSettings};
+    use crate::utils::vault::{self, LDAP_BIND_PASSWORD, OIDC_CLIENT_SECRET};
+
+    let opened = vault::open(
+        &state.db_pool,
+        &vault::host_key_path(&state.config),
+        &state.config.auth.jwt_secret,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(passphrase) = &opened.break_glass {
+        tracing::warn!("Vault was created while saving auth settings. The break-glass passphrase was written to stderr once.");
+        eprintln!(
+            "\nTCS vault created.\nBreak-glass passphrase (shown once): {passphrase}\n"
+        );
+    }
+
+    let current = state.auth.read().await.clone();
+    let mut next = current.clone();
+    next.jwt_secret = state.config.auth.jwt_secret.clone();
 
     if let Some(ldap_req) = req.ldap {
-        let mut ldap_table = toml::value::Table::new();
-        // Config file field is `url` (not "server").
-        ldap_table.insert("url".to_string(), toml::Value::String(ldap_req.server));
-        ldap_table.insert("bind_dn".to_string(), toml::Value::String(ldap_req.bind_dn));
-        ldap_table.insert(
-            "bind_password".to_string(),
-            toml::Value::String(ldap_req.bind_password),
-        );
-        ldap_table.insert(
-            "user_search_base".to_string(),
-            toml::Value::String(ldap_req.user_search_base),
-        );
-        ldap_table.insert(
-            "user_search_filter".to_string(),
-            toml::Value::String(ldap_req.user_search_filter),
-        );
-        ldap_table.insert(
-            "default_role".to_string(),
-            toml::Value::String(ldap_req.default_role),
-        );
-        
-        let mut mappings = vec![];
-        for m in ldap_req.group_role_mappings {
-            let mut map_table = toml::value::Table::new();
-            map_table.insert("group_dn_pattern".to_string(), toml::Value::String(m.group_dn_pattern));
-            map_table.insert("role".to_string(), toml::Value::String(m.role));
-            mappings.push(toml::Value::Table(map_table));
+        if ldap_req.enabled {
+            let mut bind_password = ldap_req.bind_password;
+            if bind_password.is_empty() {
+                bind_password = opened
+                    .vault
+                    .get(&state.db_pool, LDAP_BIND_PASSWORD)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                    .unwrap_or_default();
+            } else {
+                opened
+                    .vault
+                    .put(&state.db_pool, LDAP_BIND_PASSWORD, &bind_password)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            }
+            next.ldap = Some(LdapConfig {
+                url: ldap_req.server_url,
+                bind_dn: ldap_req.bind_dn,
+                bind_password,
+                user_search_base: ldap_req.user_search_base,
+                user_search_filter: if ldap_req.user_search_filter.is_empty() {
+                    "(sAMAccountName={0})".to_string()
+                } else {
+                    ldap_req.user_search_filter
+                },
+                group_role_mappings: ldap_req
+                    .group_role_mappings
+                    .into_iter()
+                    .map(|m| GroupRoleMapping {
+                        group_dn_pattern: m.group_dn_pattern,
+                        role: m.role,
+                    })
+                    .collect(),
+                default_role: ldap_req.default_role,
+                use_tls: current.ldap.as_ref().map(|l| l.use_tls).unwrap_or(false),
+            });
+        } else {
+            next.ldap = None;
         }
-        ldap_table.insert("group_role_mappings".to_string(), toml::Value::Array(mappings));
-        auth_table.insert("ldap".to_string(), toml::Value::Table(ldap_table));
     }
 
     if let Some(oidc_req) = req.oidc {
-        if oidc_req.enabled {
-            let mut oidc_table = toml::value::Table::new();
-            oidc_table.insert("enabled".to_string(), toml::Value::Boolean(true));
-            oidc_table.insert("issuer_url".to_string(), toml::Value::String(oidc_req.issuer_url));
-            oidc_table.insert("client_id".to_string(), toml::Value::String(oidc_req.client_id));
-            oidc_table.insert("client_secret".to_string(), toml::Value::String(oidc_req.client_secret));
-            oidc_table.insert("redirect_url".to_string(), toml::Value::String(oidc_req.redirect_url));
-            oidc_table.insert("scopes".to_string(), toml::Value::Array(
-                oidc_req.scopes.iter().map(|s| toml::Value::String(s.clone())).collect()
-            ));
-            auth_table.insert("oidc".to_string(), toml::Value::Table(oidc_table));
+        let mut client_secret = oidc_req.client_secret;
+        if client_secret.is_empty() {
+            client_secret = opened
+                .vault
+                .get(&state.db_pool, OIDC_CLIENT_SECRET)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                .unwrap_or_default();
+        } else {
+            opened
+                .vault
+                .put(&state.db_pool, OIDC_CLIENT_SECRET, &client_secret)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         }
+        let scopes = if oidc_req.scopes.is_empty() {
+            vec!["openid".into(), "profile".into(), "email".into()]
+        } else {
+            oidc_req.scopes
+        };
+        next.oidc = Some(OidcConfig {
+            enabled: oidc_req.enabled,
+            issuer_url: oidc_req.issuer_url,
+            client_id: oidc_req.client_id,
+            client_secret,
+            redirect_url: oidc_req.redirect_url,
+            scopes,
+            default_role: oidc_req.default_role,
+        });
     }
 
-    config_data.insert("auth".to_string(), toml::Value::Table(auth_table));
-
-    if let Some(path) = std::path::Path::new(config_path).parent() {
-        std::fs::create_dir_all(path).ok();
+    if let Some(saml_req) = req.saml {
+        next.saml = Some(SamlConfig {
+            enabled: saml_req.enabled,
+            idp_metadata_url: saml_req.idp_metadata_url,
+            idp_sso_url: saml_req.idp_sso_url,
+            idp_cert_pem: if saml_req.idp_cert_pem.trim().is_empty() {
+                None
+            } else {
+                Some(saml_req.idp_cert_pem)
+            },
+            sp_entity_id: saml_req.sp_entity_id,
+            acs_url: saml_req.acs_url,
+            attribute_email: saml_req.attribute_email,
+            attribute_name: saml_req.attribute_name,
+            attribute_groups: saml_req.attribute_groups,
+            default_role: saml_req.default_role,
+            group_role_mappings: saml_req
+                .group_role_mappings
+                .into_iter()
+                .map(|m| SamlGroupMapping {
+                    group_pattern: m.group_pattern,
+                    role: m.role,
+                })
+                .collect(),
+        });
     }
-    let config_str = toml::to_string_pretty(&config_data)
+
+    let mut stored = AuthSettings {
+        ldap: next.ldap.clone(),
+        oidc: next.oidc.clone(),
+        saml: next.saml.clone(),
+    };
+    settings::strip_auth_secrets(&mut stored);
+    settings::put_json(&state.db_pool, settings::AUTH, &stored)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    std::fs::write(config_path, &config_str).ok();
+    *state.auth.write().await = next;
+
+    crate::utils::audit::log_action(
+        &state.db_pool,
+        &claims.sub,
+        "auth_config_update",
+        "auth",
+        "saved authentication settings in the database",
+    )
+    .await;
 
     Ok(Json(serde_json::json!({
-        "message": "Auth config updated. Restart required to apply changes."
+        "message": "Authentication settings saved in the database. No restart required.",
+        "restartRequired": false
     })))
 }
 
@@ -3810,10 +3916,11 @@ pub async fn cancel_upgrade_job(
 
 pub async fn saml_metadata(State(state): State<AppState>) -> Result<(StatusCode, String), (StatusCode, String)> {
     let cfg = state
-        .config
         .auth
+        .read()
+        .await
         .saml
-        .as_ref()
+        .clone()
         .ok_or_else(|| (StatusCode::NOT_FOUND, "SAML not configured".into()))?;
     if !cfg.enabled {
         return Err((StatusCode::NOT_FOUND, "SAML disabled".into()));
@@ -3831,10 +3938,11 @@ pub async fn saml_login(
     State(state): State<AppState>,
 ) -> Result<axum::response::Redirect, (StatusCode, String)> {
     let cfg = state
-        .config
         .auth
+        .read()
+        .await
         .saml
-        .as_ref()
+        .clone()
         .ok_or_else(|| (StatusCode::BAD_GATEWAY, "SAML not configured".into()))?;
     if !cfg.enabled {
         return Err((StatusCode::BAD_GATEWAY, "SAML disabled".into()));
@@ -3861,10 +3969,11 @@ pub async fn saml_acs(
     axum::Form(form): axum::Form<SamlAcsForm>,
 ) -> Result<axum::response::Html<String>, (StatusCode, String)> {
     let cfg = state
-        .config
         .auth
+        .read()
+        .await
         .saml
-        .as_ref()
+        .clone()
         .ok_or_else(|| (StatusCode::BAD_GATEWAY, "SAML not configured".into()))?;
     if !cfg.enabled {
         return Err((StatusCode::BAD_GATEWAY, "SAML disabled".into()));

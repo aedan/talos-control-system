@@ -23,27 +23,8 @@ connection_timeout = 30
 # Lab only: TCS_ALLOW_INSECURE=1 allows the built-in default.
 jwt_secret = "change-me-to-a-long-random-string"
 
-# Optional LDAP / OIDC — see docs/AUTH.md
-#
-# [auth.ldap]
-# url = "ldaps://ad.example.com:636"
-# bind_dn = "CN=tcs-svc,OU=Service Accounts,DC=example,DC=com"
-# bind_password is not set here. Use: tcs vault put auth.ldap.bind_password
-# user_search_base = "OU=Users,DC=example,DC=com"
-# user_search_filter = "(sAMAccountName={0})"
-# default_role = "reader"
-# [[auth.ldap.group_role_mappings]]
-# group_dn_pattern = "CN=TCS-Admins*"
-# role = "admin"
-#
-# [auth.oidc]
-# enabled = true
-# issuer_url = "https://login.example.com/"
-# client_id = "tcs"
-# client_secret is not set here. Use: tcs vault put auth.oidc.client_secret
-# redirect_url = "https://tcs.example.com/api/auth/oidc/callback"
-# scopes = ["openid", "email", "profile"]
-# default_role = "reader"
+# LDAP, OIDC, and SAML are saved from Settings → Authentication into the database.
+# Passwords and client secrets go in the vault (`tcs vault put`). See docs/AUTH.md.
 
 [siderolink]
 # WireGuard control-plane: manages host WG iface (tcs-sl0) and hands registering
@@ -79,56 +60,9 @@ favicon_path = ""
 docs_url = ""
 support_url = ""
 
-# TLS — TCS always serves :443. With no [tls] (or mode="disabled") it
-# auto-generates a self-signed cert so HTTPS works immediately. Pick a mode for
-# a real cert: self_signed, provided (your own PEMs), or letsencrypt.
-# [tls]
-# enabled = true
-# mode = "self_signed"  # disabled | self_signed | provided | letsencrypt
-#
-# [tls.letsencrypt]
-# domains = ["tcs.example.com"]
-# email = "admin@example.com"
-# challenge_type = "http-01"
-#
-# [tls.letsencrypt.dns_provider]
-# provider = "cloudflare"
-# api_token = "your-token"
-# zone_id = "your-zone"
-#
-# [tls.self-signed]
-# domains = ["localhost", "tcs.local"]
-#
-# [tls.provided]
-# cert_path = "/etc/tls/cert.pem"
-# key_path = "/etc/tls/key.pem"
-# ca_path = "/etc/tls/ca.pem"   # optional CA chain
+# Certificates are saved from Settings → Certificates into the database.
+# DNS credentials go in the vault. With no saved settings, TCS serves a
+# self-signed certificate. See docs/TLS.md.
 
-# Bare-metal: full DHCP + PXE + BMC (off by default — use a dedicated provision VLAN)
-# [metal]
-# enabled = true
-# [metal.dhcp]
-# enabled = true
-# interface = "eth1"
-# bind_ip = "10.88.0.1"         # optional; else interface primary
-# subnet = "10.88.0.0/24"
-# range_start = "10.88.0.100"
-# range_end = "10.88.0.200"
-# gateway = "10.88.0.1"
-# dns = ["10.88.0.1"]
-# lease_ttl_secs = 3600
-# allow_unknown = false
-# [metal.pxe]
-# enabled = true
-# http_port = 6969
-# tftp_enabled = false   # serve iPXE chainloaders (undionly.kpxe/snponly.efi) over TFTP for legacy PXE
-# asset_dir = "/var/lib/tcs/pxe"
-# default_talos_version = "v1.13.7"
-# mirror_base = "https://github.com/siderolabs/talos/releases/download"
-# extra_cmdline = ""
-# ipxe_bios_file = "undionly.kpxe"
-# ipxe_uefi_file = "snponly.efi"
-# [metal.bmc]
-# connect_timeout_secs = 15
-# prefer_redfish = true
-# ipmi_interface = "lanplus"
+# Metal DHCP, PXE, and BMC are saved from Settings → Metal / PXE into the
+# database. Off until enabled there. Use a dedicated provision VLAN. See docs/METAL.md.
