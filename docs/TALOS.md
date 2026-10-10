@@ -1,8 +1,8 @@
 # Talos API control plane
 
 TCS talks **outbound** to Talos machines using the official machine gRPC API
-(port **50000**) via mTLS. It does **not** run a Talos-compatible gRPC server
-for machines to dial into (Siderolink is not implemented).
+(port **50000**) via mTLS. Nodes that cannot be reached on that port can dial
+in over SideroLink; see [SIDEROLINK.md](SIDEROLINK.md).
 
 ## Credentials
 
@@ -125,6 +125,3 @@ PUT /api/clusters/{id}/backups/schedule
 | EtcdSnapshot failed | Target is not control-plane or role insufficient |
 | Apply failed | Invalid patch YAML / mode conflict |
 
-## Not implemented
-
-- Siderolink registration (use Talos Siderolink natively)  

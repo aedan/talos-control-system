@@ -1,6 +1,6 @@
 # Talos Control System
 
-**Status: Alpha (v0.5.10)** — see [docs/STATUS.md](docs/STATUS.md) and [CHANGELOG.md](CHANGELOG.md).
+**Status: Alpha (v0.5.91)** — see [docs/STATUS.md](docs/STATUS.md) and [CHANGELOG.md](CHANGELOG.md).
 
 **Talos Control System (TCS)** is a self-hosted web UI for managing [Talos Linux](https://www.talos.dev/) clusters. Import existing clusters, inventory machines, apply config patches, take etcd snapshots, and run limited machine actions over the Talos gRPC API.
 
@@ -16,13 +16,17 @@ TCS runs **on a management host** (systemd binary). It is **not** deployed with 
 - Config patches applied via Talos (pure-Rust COSI merge + ApplyConfiguration)
 - Real etcd snapshots (download, schedule, retention, disaster-recovery restore)
 - Machine version probe, reboot, upgrade
-- **Per-cluster rolling upgrade jobs** (max-unavailable, control-plane-last)
+- **Per-cluster rolling upgrade jobs** (max-unavailable, control-plane-last). A second job is rejected while one is `pending` or `running`. The cluster's stored Talos version updates when the roll finishes.
 - **In-place Kubernetes upgrade** (no reboots, control-plane first) alongside the Talos image roll — a job can change Talos and/or Kubernetes and/or modules
+- **In-place convert** of an existing kubeadm or Kubespray cluster to Talos (lab notes in [docs/convert-takeover-lessons.md](docs/convert-takeover-lessons.md))
 - **Cluster-default + per-node Image-Factory modules** with per-node +/− deltas and reset-to-defaults
 - Dashboard-centric UI: clusters + machine counts on the home page, Settings as a top-bar dropdown
-- Greenfield config factory + apply/bootstrap/scale helpers (metal still external)
+- Greenfield config factory + apply/bootstrap/scale helpers
+- Bare-metal PXE, DHCP, and BMC power (alpha — see [docs/METAL.md](docs/METAL.md))
+- iDRAC 7 HTML5 virtual console from the machine page
+- BMC host-NIC MAC fill when inventory has an out-of-band login but no MAC
 - Machine reset (Talos wipe) with confirm
-- Siderolink inventory + **WireGuard** (host `wg`/`ip` when available)
+- Siderolink inventory + **WireGuard** (host `wg`/`ip` when available). Node tunnel addresses are IPv6. `[siderolink] subnet` is an optional IPv4 address on the host interface only (`""` adds none).
 - **Postgres** dual-backend runtime (SQLite default)
 - Multi-replica HA foundation (scheduler locks + shared OIDC state)
 
@@ -55,7 +59,7 @@ cd backend && cargo run -- serve
 ```bash
 # After a release is published:
 curl -fsSL -o tcs-install.sh \
-  "https://github.com/OWNER/REPO/releases/download/vX.Y.Z/tcs-X.Y.Z-linux-x86_64.sh"
+  "https://github.com/aedan/talos-control-system/releases/download/v0.5.91/tcs-0.5.91-linux-x86_64.sh"
 chmod +x tcs-install.sh
 sudo ./tcs-install.sh
 ```

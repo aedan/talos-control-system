@@ -24,64 +24,73 @@ register and get IPs, but the WireGuard tunnel is not created.
 
 ```toml
 [siderolink]
-bind_port = 8082               # Internal port for WG listener
-listen_port = 443               # Port advertised to machines
-mtu = 1420                      # Tunnel MTU
-subnet = "100.64.0.0/10"        # CGNAT subnet for machine IPs
-rate_limit_bytes = 0            # Rate limit (0 = unlimited)
+bind_port = 8082               # TCP gRPC port nodes use to join
+listen_port = 443              # UDP WireGuard port nodes dial
+mtu = 1420                     # Tunnel MTU
+subnet = "100.64.0.0/10"       # Optional IPv4 on tcs-sl0; "" adds none
+rate_limit_bytes = 0           # Rate limit (0 = unlimited)
 ```
+
+Node tunnel addresses are IPv6 ULAs derived from the installation id. They are
+not allocated from `subnet`. `subnet` only controls an extra IPv4 address on
+the host interface: the first host of that CIDR with the same prefix
+(`100.64.0.0/10` becomes `100.64.0.1/10`). Set `subnet = ""` when that prefix
+overlaps a network this host must reach (for example a cluster node CIDR
+inside `100.64.0.0/10`). The default is unchanged, so an existing config that
+omits the key still installs `100.64.0.1/10`.
 
 ### Environment variables
 
 | Variable | Purpose |
 |---|---|
-| `TCS_SIDEROLINK_ENDPOINT` | Override the advertised endpoint (e.g. `tcs.example.com:8082`). Without this, TCS guesses from `TCS_PUBLIC_HOST`. |
+| `TCS_SIDEROLINK_ENDPOINT` | Override the advertised WireGuard endpoint (host only, or `host:port`). The port is `listen_port` (default UDP 443). Without this, TCS uses `TCS_PUBLIC_HOST`. |
 | `TCS_PUBLIC_HOST` | Fallback hostname used in the endpoint hint. |
 | `TCS_SIDEROLINK_IFACE` | WireGuard interface name (default: `tcs-sl0`). |
 
 ### Firewall
 
-The `bind_port` (default `8082`) must be reachable from Talos nodes. UDP traffic
-must be allowed:
+Nodes dial **UDP `listen_port`** (default 443) for WireGuard and **TCP
+`bind_port`** (default 8082) to register. Both must be reachable from the nodes:
 
 ```bash
-# ufw example
-sudo ufw allow 8082/udp
+sudo ufw allow 443/udp
+sudo ufw allow 8082/tcp
 ```
 
 ## How TCS uses the tunnel for management
 
 When a machine is Siderolink-connected, **every TCS management operation for that
-machine is routed through its tunnel IP** (`100.64.x.x`), not its LAN address. This
+machine is routed through its tunnel address** (an IPv6 ULA), not its LAN address. This
 is the "prefer tunnel when connected" policy: version probe, reboot, upgrade
 (including in-place k8s), config read/apply, reset, bootstrap, and the background
 status reconciler all resolve the node's *effective endpoint* first. The machine
 page shows this under **Management path** — a green `via Siderolink tunnel` badge
-with the tunnel IP, or a `direct` badge with the LAN address.
+with the tunnel address, or a `direct` badge with the LAN address. A probe that
+cannot route the overlay falls back to the inventory LAN address.
 
 The tunnel IP is used only while the peer is **fresh** (last seen within ~5
 minutes). If a node's tunnel drops, TCS automatically falls back to the LAN
 address instead of sending traffic to a dead IP.
 
-## Enabling the tunnel on a TCS host (opt-in)
+## Enabling the tunnel on a TCS host
 
-Siderolink is dormant by default. To give TCS a live tunnel it can manage NAT'd
-nodes through:
+When `wireguard-tools` is installed, TCS creates `tcs-sl0` at startup. Nodes
+are not enrolled until they receive a SideroLink config. To manage nodes that
+cannot be reached on the LAN:
 
 1. Install `wireguard-tools` on the TCS host:
    ```bash
    sudo apt-get install -y wireguard-tools
    ```
-2. (Optional) add a `[siderolink]` section to `/etc/tcs/config.toml` — defaults
-   (`bind_port = 8082`, `subnet = "100.64.0.0/10"`) are fine for most setups.
-3. Open UDP `bind_port` to your nodes (`sudo ufw allow 8082/udp`).
+2. Set `[siderolink]` in `/etc/tcs/config.toml`. Use `subnet = ""` if
+   `100.64.0.0/10` overlaps a network on this host.
+3. Open UDP `listen_port` and TCP `bind_port` to the nodes.
 4. Restart TCS: `sudo systemctl restart tcs`.
    - Confirm the interface came up: `sudo wg show tcs-sl0`
 5. Create a join token (Settings → Siderolink, or `POST /api/siderolink/tokens`).
 6. Put the `siderolink:` block (below) into the node's Talos config so it dials in.
 
-Until a node registers via Siderolink, all nodes are managed by direct LAN
-routing and none of this changes behavior.
+Until a node registers, TCS keeps managing it on its LAN address.
 
 ## Creating join tokens
 
@@ -219,14 +228,14 @@ works (IP allocation, DB record) but the tunnel isn't created. Install
 ```json
 {
   "peerId": "...",
-  "assignedIp": "100.64.0.2",
+  "assignedIp": "fd00:0000:0000:0000:0000:0000:0000:0002",
   "systemUuid": "550e8400-...",
   "wireguard": {
     "enabled": true,
     "serverPublicKey": "base64serverpubkey...",
-    "endpoint": "tcs.example.com:8082",
-    "listenPort": 8082,
-    "allowedIps": "100.64.0.0/10",
+    "endpoint": "tcs.example.com:443",
+    "listenPort": 443,
+    "allowedIps": "",
     "persistentKeepalive": 25
   }
 }

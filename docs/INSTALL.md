@@ -18,10 +18,9 @@ writes a systemd unit, creates `/etc/tcs` + `/var/lib/tcs`, and generates a JWT 
 ### Download
 
 ```bash
-# Replace OWNER/REPO and VERSION with your release
-# Example: aedan/talos-control-system / v0.1.0
+# Replace VERSION with the release you want. Current release: v0.5.91
 curl -fsSL -o tcs-install.sh \
-  "https://github.com/OWNER/REPO/releases/download/v0.1.0/tcs-0.1.0-linux-x86_64.sh"
+  "https://github.com/aedan/talos-control-system/releases/download/v0.5.91/tcs-0.5.91-linux-x86_64.sh"
 chmod +x tcs-install.sh
 ```
 
@@ -64,13 +63,13 @@ sudo journalctl -u tcs | grep -i 'Default admin password'
 # Login: admin@tcs.local + that password
 ```
 
-UI defaults to HTTP port **8081** (or 80/443 if you enable TLS in config).
+A shipped binary serves the UI on **HTTPS :443**. It also tries to bind **HTTP :80** for redirects and ACME HTTP-01. If port 80 is already taken, TCS keeps running on 443. Set `TCS_HTTP_PORT=0` in the systemd unit to skip port 80.
 
 ## Option 2: Binary + tar package
 
 ```bash
 curl -fsSL -o tcs.tgz \
-  "https://github.com/OWNER/REPO/releases/download/v0.1.0/tcs-0.1.0-linux-x86_64.tar.gz"
+  "https://github.com/aedan/talos-control-system/releases/download/v0.5.91/tcs-0.5.91-linux-x86_64.tar.gz"
 sudo tar xzf tcs.tgz -C /tmp
 sudo install -m 755 /tmp/tcs /usr/local/bin/tcs
 # Then copy config.example.toml and create a systemd unit
@@ -80,7 +79,7 @@ sudo install -m 755 /tmp/tcs /usr/local/bin/tcs
 ## Option 3: Build from source
 
 ```bash
-git clone https://github.com/OWNER/REPO.git
+git clone https://github.com/aedan/talos-control-system.git
 cd talos-control-system
 cd frontend && npm ci && npm run build && cd ..
 export GIT_HASH="$(git rev-parse --short=12 HEAD)"

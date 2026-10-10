@@ -106,25 +106,25 @@ See [TLS.md](./TLS.md) for detailed TLS and ACME configuration.
 
 Siderolink here is TCS's **WireGuard control-plane** side: it manages a host WG
 interface (default `tcs-sl0`) and hands registering Talos nodes their tunnel
-peer config (assigned CGNAT IP + server public key + `listen_port`). It is not a
-gRPC tunnel server — nodes reach TCS over UDP `bind_port`. See
+peer config (IPv6 ULA, server public key, and `listen_port`). Join registration
+is plaintext gRPC on TCP `bind_port`. WireGuard data is UDP `listen_port`. See
 [SIDEROLINK.md](SIDEROLINK.md).
 
 ```toml
 [siderolink]
-bind_port = 8082               # UDP port nodes reach TCS on (advertised as listen_port)
-listen_port = 443               # Advertised port for machines to connect to
-mtu = 1420                      # Maximum transmission unit
-subnet = "100.64.0.0/10"        # Carrier-grade NAT subnet for tunnel IPs
-rate_limit_bytes = 0            # Rate limit in bytes/sec (0 = unlimited)
+bind_port = 8082               # TCP gRPC port nodes use to join
+listen_port = 443              # UDP WireGuard port nodes dial
+mtu = 1420                     # Maximum transmission unit
+subnet = "100.64.0.0/10"       # Optional IPv4 on tcs-sl0; "" adds none
+rate_limit_bytes = 0           # Rate limit in bytes/sec (0 = unlimited)
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `bind_port` | u16 | `8082` | Internal port for siderolink listener |
-| `listen_port` | u16 | `443` | Port advertised to machines |
+| `bind_port` | u16 | `8082` | TCP port for the SideroLink join API |
+| `listen_port` | u16 | `443` | UDP WireGuard port advertised to machines |
 | `mtu` | u16 | `1420` | MTU for tunnel packets |
-| `subnet` | string | `"100.64.0.0/10"` | CGNAT subnet for assigning machine IPs |
+| `subnet` | string | `"100.64.0.0/10"` | Optional IPv4 on `tcs-sl0`: first host of this CIDR. `""` adds no IPv4. Node addresses are IPv6 and do not come from this prefix. |
 | `rate_limit_bytes` | u64 | `0` | Rate limit in bytes/second (0 = unlimited) |
 
 ## Branding Configuration
@@ -246,7 +246,7 @@ challenge_type = "http-01"
 bind_port = 8082
 listen_port = 443
 mtu = 1420
-subnet = "100.64.0.0/10"
+subnet = ""
 
 [factory]
 base_url = "https://factory.talos.dev"

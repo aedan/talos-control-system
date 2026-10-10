@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+- **A finished rolling upgrade left the cluster Talos version on the old tag, and Start stayed available during the roll.** `cluster::update` never wrote `talos_version` or `control_plane_version`. Those columns are persisted now. The cluster version advances when every probed node agrees, and again when the Talos phase completes. A new upgrade job is rejected while one is `pending` or `running`.
+- **`tcs-sl0` always gained `100.64.0.1/10`.** The address is now the first host of `[siderolink] subnet`. The default is still `100.64.0.0/10`. An empty `subnet` adds no IPv4 address.
+
 ## [0.5.91] — 2026-09-08
 
 ### Added
