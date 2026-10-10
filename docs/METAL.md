@@ -93,7 +93,7 @@ PXE HTTP (when enabled): `http://<next-server>:6969/pxe/ipxe/<mac>` and `/pxe/as
 
 - **Redfish** first (`/redfish/v1/Systems`), basic auth, optional insecure TLS (default on for lab BMCs).
 - **IPMI** via `ipmitool -I lanplus` when Redfish fails or `bmc_type=ipmi`.
-- Passwords encrypted at rest with the same key material as talosconfig (`jwt_secret`).
+- Passwords encrypted at rest with the vault data key (the same key as talosconfig).
 
 ## Limitations (alpha)
 

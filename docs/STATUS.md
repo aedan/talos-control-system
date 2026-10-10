@@ -10,7 +10,7 @@ cluster.
 
 | Feature | Status | Notes |
 |---------|--------|--------|
-| Local auth + JWT | **Supported** | `TCS_AUTH_JWT_SECRET` required in production |
+| Local auth + JWT | **Supported** | Signing secret lives in the database vault. A host key unlocks it; a one-time break-glass passphrase recovers a lost host key. |
 | OIDC | **Supported (alpha)** | Code flow + JWKS; **DB-backed CSRF state** for multi-replica |
 | LDAP / AD | **Supported (alpha)** | Service bind + search + user bind |
 | SAML 2.0 SP | **Supported (alpha)** | AuthnRequest + ACS; XML-DSig best-effort |

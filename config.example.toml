@@ -18,7 +18,8 @@ max_connections = 10
 connection_timeout = 30
 
 [auth]
-# REQUIRED in production. Generate with: openssl rand -hex 32
+# Bootstrap only. First start copies this into the database vault and then
+# removes the line. Do not leave a client secret or bind password here.
 # Lab only: TCS_ALLOW_INSECURE=1 allows the built-in default.
 jwt_secret = "change-me-to-a-long-random-string"
 
@@ -27,7 +28,7 @@ jwt_secret = "change-me-to-a-long-random-string"
 # [auth.ldap]
 # url = "ldaps://ad.example.com:636"
 # bind_dn = "CN=tcs-svc,OU=Service Accounts,DC=example,DC=com"
-# bind_password = "redacted"
+# bind_password is not set here. Use: tcs vault put auth.ldap.bind_password
 # user_search_base = "OU=Users,DC=example,DC=com"
 # user_search_filter = "(sAMAccountName={0})"
 # default_role = "reader"
@@ -39,7 +40,7 @@ jwt_secret = "change-me-to-a-long-random-string"
 # enabled = true
 # issuer_url = "https://login.example.com/"
 # client_id = "tcs"
-# client_secret = "redacted"
+# client_secret is not set here. Use: tcs vault put auth.oidc.client_secret
 # redirect_url = "https://tcs.example.com/api/auth/oidc/callback"
 # scopes = ["openid", "email", "profile"]
 # default_role = "reader"

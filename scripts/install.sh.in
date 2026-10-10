@@ -333,7 +333,7 @@ EOF
     chmod 0640 "$TCS_CONFIG"
   fi
   info "Created config → ${TCS_CONFIG}"
-  warn "Edit ${TCS_CONFIG}: set auth.jwt_secret and server.advertised_url before production use"
+  warn "Edit ${TCS_CONFIG}: set server.advertised_url before production use"
 else
   info "Keeping existing config → ${TCS_CONFIG}"
 fi
@@ -344,13 +344,14 @@ if [ ! -f "$TCS_ENV" ]; then
   JWT="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p -c 32)"
   cat > "$TCS_ENV" <<EOF
 # Environment for tcs.service (sourced by systemd EnvironmentFile)
+# Bootstrap only. First start copies this into the database vault and removes the line.
 TCS_AUTH_JWT_SECRET=${JWT}
 # Uncomment for local lab only:
 # TCS_ALLOW_INSECURE=1
 # TCS_DEFAULT_ADMIN_PASSWORD=change-me
 EOF
   chmod 0600 "$TCS_ENV"
-  info "Created ${TCS_ENV} with a generated JWT secret"
+  info "Created ${TCS_ENV} with a one-time JWT bootstrap (moved into the vault on first start)"
 else
   info "Keeping existing ${TCS_ENV}"
 fi

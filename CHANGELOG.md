@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **Secrets vault.** JWT, OIDC client secret, LDAP bind password, and DNS provider credentials are ciphertext in the database. `/var/lib/tcs/vault.hostkey` (mode 0600) unlocks them at startup. A break-glass passphrase is printed once and stored only as an Argon2id hash. `tcs vault put` reads a secret from stdin. `tcs vault recover` rebuilds the host key. First start removes the cleartext copy from `config.toml` and `/etc/tcs/env`. The data key matches the old JWT-derived key, so existing talosconfig, kubeconfig, and BMC blobs still decrypt.
+
 ### Fixed
 - **A finished rolling upgrade left the cluster Talos version on the old tag, and Start stayed available during the roll.** `cluster::update` never wrote `talos_version` or `control_plane_version`. Those columns are persisted now. The cluster version advances when every probed node agrees, and again when the Talos phase completes. A new upgrade job is rejected while one is `pending` or `running`.
 - **`tcs-sl0` always gained `100.64.0.1/10`.** The address is now the first host of `[siderolink] subnet`. The default is still `100.64.0.0/10`. An empty `subnet` adds no IPv4 address.

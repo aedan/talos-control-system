@@ -2,21 +2,30 @@
 
 TCS runs on a management host under systemd. It is not an in-cluster workload.
 
-## JWT / secrets hygiene
+## Secrets vault
 
-| Source | Purpose |
-|--------|---------|
-| `/etc/tcs/env` → `TCS_AUTH_JWT_SECRET` | Preferred production secret (mode 0600) |
-| `/etc/tcs/config.toml` → `auth.jwt_secret` | Optional; avoid duplicating secrets here |
+Secrets are ciphertext in the database. The host key `/var/lib/tcs/vault.hostkey` (mode 0600) unlocks them at startup. A break-glass passphrase is printed once on first start (`journalctl -u tcs | grep 'Break-glass passphrase'`). TCS stores only an Argon2id hash of that passphrase.
 
-Recommended:
+| Item | Where it lives |
+|------|----------------|
+| JWT, OIDC client secret, LDAP bind password, DNS API credentials | Database vault |
+| Host key that opens the vault | `/var/lib/tcs/vault.hostkey` |
+| Break-glass passphrase | Nowhere after first start. Copy it offline. |
+| Postgres URL | Config. Required to open the database. |
 
-1. Put the only secret in `/etc/tcs/env` (installer generates one).
-2. Remove or comment out `jwt_secret` from `config.toml` so the env var is authoritative.
-3. Never set `TCS_ALLOW_INSECURE=1` outside a lab.
+The first start copies a bootstrapped `TCS_AUTH_JWT_SECRET` or `auth.jwt_secret` into the vault and comments the cleartext line out. Store anything added later with `tcs vault put <name>` (stdin). There is no command that prints a secret back.
 
-If you change the JWT secret, encrypted kubeconfig/talosconfig blobs become unreadable
-and must be re-imported.
+If the host key is lost:
+
+```bash
+tcs vault recover
+```
+
+That prompts for the break-glass passphrase, writes a new host key, and does not print stored secrets.
+
+Back up `data.db` and `vault.hostkey` together. Keep the passphrase separate from that backup. Never set `TCS_ALLOW_INSECURE=1` outside a lab.
+
+The vault data key stays the key derived from the JWT secret that existed when the vault was created. Cluster ciphertext keeps decrypting if the signing secret is replaced later.
 
 ## Admin recovery (lab)
 

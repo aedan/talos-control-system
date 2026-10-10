@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-
 use axum::extract::{Path, Request, State};
 use axum::http::StatusCode;
 use axum::response::Redirect;
@@ -11,6 +10,7 @@ use dashmap::DashMap;
 use tokio::signal;
 use tracing::{error, info, warn};
 
+use clap::Parser as _;
 use talos_control_system::api::rest::create_rest_router;
 use talos_control_system::branding::BrandingManager;
 use talos_control_system::config::Config;
@@ -20,7 +20,6 @@ use talos_control_system::runtime::event::EventBus;
 use talos_control_system::utils::logging::init_tracing;
 use talos_control_system::utils::version::VERSION_INFO;
 use talos_control_system::AppState;
-use clap::Parser as _;
 
 type AcmeChallengeStore = Arc<DashMap<String, String>>;
 
@@ -49,6 +48,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             talos_control_system::db::migrate_sqlite_to_postgres::run(&sqlite, &pg).await?;
             info!("Migration complete");
             return Ok(());
+        }
+        if cmd == "vault" {
+            return run_vault(&argv).await;
         }
         if cmd == "--help" || cmd == "-h" || cmd == "help" {
             print_help();
@@ -179,6 +181,8 @@ fn print_help() {
            tcs serve                       Start the control plane (systemd unit)\n\
            tcs migrate-sqlite-to-postgres  Copy SQLite data into Postgres\n\
                                            env: TCS_SQLITE_PATH, TCS_POSTGRES_URL\n\
+           tcs vault put <name>           Store a secret from stdin in the database vault\n\
+           tcs vault recover              Rebuild the host key from the break-glass passphrase\n\
            tcs help                        Show this message\n\n\
          CLI (kubectl-like, thin client over the TCS API):\n\
            tcs login [email] [password]   (or --email/--password; prompts if omitted)\n\
@@ -204,6 +208,67 @@ fn print_help() {
     );
 }
 
+fn print_break_glass(passphrase: &str, host_key: &std::path::Path) {
+    eprintln!(
+        "\nTCS vault created.\n\
+         Break-glass passphrase (shown once): {passphrase}\n\
+         Write it down and store it offline. It rebuilds access if {} is lost.\n\
+         This line stays in the service journal until those logs rotate.\n\
+         TCS does not keep another copy of the passphrase.\n",
+        host_key.display()
+    );
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+}
+
+async fn run_vault(argv: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use talos_control_system::utils::vault;
+
+    init_tracing();
+    let sub = argv.get(2).map(String::as_str).unwrap_or("");
+    let config = Config::load()?;
+    let pool = init_pool(&config.database).await?;
+    run_migrations(&pool).await?;
+    let key_path = vault::host_key_path(&config);
+
+    match sub {
+        "put" => {
+            let name = argv.get(3).ok_or(
+                "usage: tcs vault put <name>  (secret on stdin; known names: auth.jwt_secret, auth.oidc.client_secret, auth.ldap.bind_password, tls.dns.api_key, tls.dns.api_secret, tls.dns.api_token)",
+            )?;
+            let mut raw = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut raw)?;
+            if raw.ends_with('\n') {
+                raw.pop();
+                if raw.ends_with('\r') {
+                    raw.pop();
+                }
+            }
+            if raw.is_empty() {
+                return Err("refusing to store an empty secret".into());
+            }
+            let opened = vault::open(&pool, &key_path, &config.auth.jwt_secret).await?;
+            if let Some(passphrase) = &opened.break_glass {
+                print_break_glass(passphrase, &key_path);
+            }
+            opened.vault.put(&pool, name, &raw).await?;
+            eprintln!("stored {name} in the vault");
+            Ok(())
+        }
+        "recover" => {
+            eprint!("Break-glass passphrase: ");
+            let _ = std::io::Write::flush(&mut std::io::stderr());
+            let passphrase = rpassword::read_password()?;
+            vault::recover(&pool, &key_path, passphrase.trim()).await?;
+            eprintln!("Host key restored at {}", key_path.display());
+            Ok(())
+        }
+        _ => {
+            eprintln!("usage:\n  tcs vault put <name>   (secret on stdin)\n  tcs vault recover");
+            std::process::exit(2);
+        }
+    }
+}
+
 /// Boot the TCS control-plane server (invoked via `tcs serve`).
 async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use talos_control_system::auth::jwt::set_jwt_secret;
@@ -214,21 +279,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Required because multiple crypto backends (ring, aws-lc-rs) are in the dep tree.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let config = Config::load()?;
-
-    let default_secret = "talos-control-system-default-secret-change-in-production";
-    if config.auth.jwt_secret == default_secret {
-        let allow = std::env::var("TCS_ALLOW_INSECURE").ok().as_deref() == Some("1");
-        if !allow {
-            error!(
-                "Refusing to start with default JWT secret. Set TCS_AUTH_JWT_SECRET (or auth.jwt_secret)                  or TCS_ALLOW_INSECURE=1 for local lab use only."
-            );
-            return Err("Insecure default JWT secret".into());
-        }
-        warn!("TCS_ALLOW_INSECURE=1: running with default JWT secret (lab only)");
-    }
-
-    set_jwt_secret(&config.auth.jwt_secret);
+    let mut config = Config::load()?;
 
     info!(
         version = VERSION_INFO.version,
@@ -243,20 +294,62 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     run_migrations(&db_pool).await?;
     info!("Database migrations applied successfully");
 
+    // Open the vault before refusing the default JWT. A restarted process
+    // loads auth.jwt_secret from the vault, so the env/config copy can be gone.
+    {
+        use talos_control_system::utils::vault;
+        let key_path = vault::host_key_path(&config);
+        let opened = vault::open(&db_pool, &key_path, &config.auth.jwt_secret).await?;
+        if let Some(passphrase) = &opened.break_glass {
+            print_break_glass(passphrase, &key_path);
+        }
+        opened.vault.install_process_key();
+        vault::apply_config(&opened.vault, &db_pool, &mut config).await?;
+        let config_path =
+            std::env::var("TCS_CONFIG").unwrap_or_else(|_| "/etc/tcs/config.toml".into());
+        if let Err(e) = vault::redact_cleartext_files(
+            &opened.vault,
+            &db_pool,
+            Some(std::path::Path::new(&config_path)),
+            Some(std::path::Path::new("/etc/tcs/env")),
+        )
+        .await
+        {
+            warn!(error = %e, "Vault is open, but cleartext copies could not be removed from config or env");
+        }
+    }
+
+    if config.auth.jwt_secret == talos_control_system::utils::vault::DEFAULT_JWT_SECRET {
+        let allow = std::env::var("TCS_ALLOW_INSECURE").ok().as_deref() == Some("1");
+        if !allow {
+            error!(
+                "Refusing to start with the default JWT secret. On a new install, set TCS_AUTH_JWT_SECRET once so the vault can store it. The server then removes that cleartext copy. TCS_ALLOW_INSECURE=1 is for a local lab only."
+            );
+            return Err("Insecure default JWT secret".into());
+        }
+        warn!("TCS_ALLOW_INSECURE=1: running with default JWT secret (lab only)");
+    }
+
+    set_jwt_secret(&config.auth.jwt_secret);
+
     // Create default admin user if users table is empty
     use talos_control_system::db::SqlVal;
     let count = db_pool
         .fetch_scalar_i64("SELECT COUNT(*) FROM users", &[])
         .await?;
     if count == 0 {
-        let default_password = std::env::var("TCS_DEFAULT_ADMIN_PASSWORD")
-            .unwrap_or_else(|_| {
-                let chars: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#";
-                let mut rng = fastrand::Rng::new();
-                let pw: String = (0..24).map(|_| chars[rng.u32(0..chars.len() as u32) as usize] as char).collect();
-                warn!("No TCS_DEFAULT_ADMIN_PASSWORD set. Generated random admin password: {}", pw);
+        let default_password = std::env::var("TCS_DEFAULT_ADMIN_PASSWORD").unwrap_or_else(|_| {
+            let chars: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#";
+            let mut rng = fastrand::Rng::new();
+            let pw: String = (0..24)
+                .map(|_| chars[rng.u32(0..chars.len() as u32) as usize] as char)
+                .collect();
+            warn!(
+                "No TCS_DEFAULT_ADMIN_PASSWORD set. Generated random admin password: {}",
                 pw
-            });
+            );
+            pw
+        });
 
         let password_hash = talos_control_system::auth::local::hash_password(&default_password)
             .expect("Failed to hash default admin password");
@@ -285,9 +378,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             )
             .await?;
 
-        info!(
-            "Created default admin user: admin@tcs.local"
-        );
+        info!("Created default admin user: admin@tcs.local");
         info!("Default admin password: {}", default_password);
         info!("IMPORTANT: Change the default admin password on first login");
     }
@@ -299,10 +390,8 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map(|p| p.to_string_lossy().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "/var/lib/tcs".to_string());
-    let siderolink_wg = talos_control_system::network::SiderolinkWg::init(
-        &config.siderolink,
-        &data_dir,
-    );
+    let siderolink_wg =
+        talos_control_system::network::SiderolinkWg::init(&config.siderolink, &data_dir);
     info!(
         instance_id = %talos_control_system::runtime::ha::instance_id(),
         wg_enabled = siderolink_wg.enabled(),
@@ -424,13 +513,17 @@ async fn run_server_all(
     // config says "disabled").
     let mut effective_tls = config.tls.clone();
     effective_tls.mode = effective_mode.clone();
-    if matches!(effective_tls.mode, talos_control_system::config::TlsMode::SelfSigned) {
+    if matches!(
+        effective_tls.mode,
+        talos_control_system::config::TlsMode::SelfSigned
+    ) {
         let domains = if effective_domains.is_empty() {
             vec!["localhost".to_string()]
         } else {
             effective_domains.clone()
         };
-        effective_tls.self_signed = Some(talos_control_system::config::SelfSignedConfig { domains });
+        effective_tls.self_signed =
+            Some(talos_control_system::config::SelfSignedConfig { domains });
     }
 
     let tls_runtime = Arc::new(
@@ -538,7 +631,11 @@ async fn run_server_all(
     let sl_endpoint_host = std::env::var("TCS_SIDEROLINK_ENDPOINT_HOST")
         .ok()
         .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("TCS_PUBLIC_HOST").ok().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            std::env::var("TCS_PUBLIC_HOST")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
         .or_else(|| {
             // Derive the advertised host (same logic used to bake configs).
             config
@@ -571,8 +668,9 @@ async fn run_server_all(
     // only the configured HTTP bind_addr. The advertised apiUrl host is set
     // separately via TCS_SIDEROLINK_ENDPOINT_HOST / TCS_PUBLIC_HOST so nodes
     // dial the IP they can actually reach.
-    let sl_grpc_addr: std::net::SocketAddr =
-        format!("0.0.0.0:{sl_grpc_port}").parse().unwrap_or_else(|_| "0.0.0.0:8082".parse().unwrap());
+    let sl_grpc_addr: std::net::SocketAddr = format!("0.0.0.0:{sl_grpc_port}")
+        .parse()
+        .unwrap_or_else(|_| "0.0.0.0:8082".parse().unwrap());
     let sl_endpoint_host_log = sl_endpoint_host.clone();
     let sl_installation_id_log = sl_installation_id.clone();
     let sl_grpc_handle = tokio::spawn(async move {
@@ -593,12 +691,16 @@ async fn run_server_all(
     // A skipped (None) listener must not trip the select! — make it a future
     // that only resolves on shutdown, not instantly.
     let mut https_done: ListenerFut = if let Some(h) = https_handle {
-        Box::pin(async move { let _ = h.await; })
+        Box::pin(async move {
+            let _ = h.await;
+        })
     } else {
         Box::pin(std::future::pending())
     };
     let mut http_done: ListenerFut = if let Some(h) = http_handle {
-        Box::pin(async move { let _ = h.await; })
+        Box::pin(async move {
+            let _ = h.await;
+        })
     } else {
         Box::pin(std::future::pending())
     };
@@ -633,7 +735,13 @@ async fn resolve_initial_certificate(
     config: &Config,
     acme_store: &AcmeChallengeStore,
 ) -> Result<
-    (String, String, talos_control_system::config::TlsMode, Vec<String>, String),
+    (
+        String,
+        String,
+        talos_control_system::config::TlsMode,
+        Vec<String>,
+        String,
+    ),
     Box<dyn std::error::Error + Send + Sync>,
 > {
     use talos_control_system::config::TlsMode;
@@ -644,7 +752,13 @@ async fn resolve_initial_certificate(
             .letsencrypt
             .as_ref()
             .and_then(|l| l.domains.first().cloned())
-            .or_else(|| config.tls.self_signed.as_ref().and_then(|s| s.domains.first().cloned()))
+            .or_else(|| {
+                config
+                    .tls
+                    .self_signed
+                    .as_ref()
+                    .and_then(|s| s.domains.first().cloned())
+            })
             .or_else(|| advertised_host(config))
             .unwrap_or_else(|| "localhost".to_string())
     };
@@ -653,8 +767,10 @@ async fn resolve_initial_certificate(
     if !tls_enabled {
         let domain = fallback_domain();
         info!(%domain, "TLS disabled in config — generating self-signed so :443 is reachable");
-        let (c, k) =
-            talos_control_system::cert::self_signed::generate_self_signed(std::slice::from_ref(&domain)).await?;
+        let (c, k) = talos_control_system::cert::self_signed::generate_self_signed(
+            std::slice::from_ref(&domain),
+        )
+        .await?;
         return Ok((
             c,
             k,
@@ -675,14 +791,18 @@ async fn resolve_initial_certificate(
                     // hit — downgrades the server to a self-signed cert even though a
                     // valid LE cert is sitting on disk. Loading the persisted cert first
                     // makes the valid cert survive upgrades/restarts.
-                    if let Some((c, k)) =
-                        load_persisted_letsencrypt_cert(&le.domains)
-                    {
+                    if let Some((c, k)) = load_persisted_letsencrypt_cert(&le.domains) {
                         info!(
                             domains = ?le.domains,
                             "Reusing persisted Let's Encrypt certificate from disk"
                         );
-                        return Ok((c, k, TlsMode::LetsEncrypt, le.domains.clone(), "Let's Encrypt issued (reused from disk)".to_string()));
+                        return Ok((
+                            c,
+                            k,
+                            TlsMode::LetsEncrypt,
+                            le.domains.clone(),
+                            "Let's Encrypt issued (reused from disk)".to_string(),
+                        ));
                     }
                     let client = talos_control_system::cert::acme::AcmeClient::new(
                         &le.email,
@@ -702,7 +822,13 @@ async fn resolve_initial_certificate(
                             {
                                 warn!(error = %e, "Failed to persist issued Let's Encrypt certificate to disk");
                             }
-                            return Ok((c, k, TlsMode::LetsEncrypt, le.domains.clone(), "Let's Encrypt issued".to_string()))
+                            return Ok((
+                                c,
+                                k,
+                                TlsMode::LetsEncrypt,
+                                le.domains.clone(),
+                                "Let's Encrypt issued".to_string(),
+                            ));
                         }
                         Err(e) => {
                             // Issuance failed (e.g. rate-limited). Before falling back
@@ -717,27 +843,45 @@ async fn resolve_initial_certificate(
                                     error = %e,
                                     "ACME issuance failed; serving persisted Let's Encrypt certificate anyway"
                                 );
-                                return Ok((c, k, TlsMode::LetsEncrypt, le.domains.clone(), "Let's Encrypt issued (reused, renewal pending)".to_string()));
+                                return Ok((
+                                    c,
+                                    k,
+                                    TlsMode::LetsEncrypt,
+                                    le.domains.clone(),
+                                    "Let's Encrypt issued (reused, renewal pending)".to_string(),
+                                ));
                             }
                             warn!(error = %e, "Let's Encrypt issuance failed at boot; using self-signed fallback");
                         }
                     }
                 }
                 let domain = fallback_domain();
-                let (c, k) =
-                    talos_control_system::cert::self_signed::generate_self_signed(std::slice::from_ref(&domain)).await?;
+                let (c, k) = talos_control_system::cert::self_signed::generate_self_signed(
+                    std::slice::from_ref(&domain),
+                )
+                .await?;
                 return Ok((
                     c,
                     k,
                     TlsMode::SelfSigned,
                     vec![domain.clone()],
-                    format!("self-signed ({domain}) — LE not ready (no domains or :80 unreachable)"),
+                    format!(
+                        "self-signed ({domain}) — LE not ready (no domains or :80 unreachable)"
+                    ),
                 ));
             }
             let domain = fallback_domain();
-            let (c, k) =
-                talos_control_system::cert::self_signed::generate_self_signed(std::slice::from_ref(&domain)).await?;
-            Ok((c, k, TlsMode::SelfSigned, vec![domain.clone()], format!("self-signed ({domain}) — LE mode not fully configured")))
+            let (c, k) = talos_control_system::cert::self_signed::generate_self_signed(
+                std::slice::from_ref(&domain),
+            )
+            .await?;
+            Ok((
+                c,
+                k,
+                TlsMode::SelfSigned,
+                vec![domain.clone()],
+                format!("self-signed ({domain}) — LE mode not fully configured"),
+            ))
         }
         TlsMode::SelfSigned => {
             let domains = config
@@ -747,8 +891,15 @@ async fn resolve_initial_certificate(
                 .map(|s| s.domains.clone())
                 .filter(|d| !d.is_empty())
                 .unwrap_or_else(|| vec![fallback_domain()]);
-            let (c, k) = talos_control_system::cert::self_signed::generate_self_signed(&domains).await?;
-            Ok((c, k, TlsMode::SelfSigned, domains.clone(), "self-signed (configured)".to_string()))
+            let (c, k) =
+                talos_control_system::cert::self_signed::generate_self_signed(&domains).await?;
+            Ok((
+                c,
+                k,
+                TlsMode::SelfSigned,
+                domains.clone(),
+                "self-signed (configured)".to_string(),
+            ))
         }
         TlsMode::Provided => {
             let provided = config
@@ -756,19 +907,32 @@ async fn resolve_initial_certificate(
                 .provided
                 .as_ref()
                 .ok_or("Provided TLS mode requires cert_path and key_path")?;
-            let (c, k) =
-                talos_control_system::cert::provided::load_provided_certs(
-                    &provided.cert_path,
-                    &provided.key_path,
-                )
-                .await?;
-            Ok((c, k, TlsMode::Provided, vec![], "provided (uploaded)".to_string()))
+            let (c, k) = talos_control_system::cert::provided::load_provided_certs(
+                &provided.cert_path,
+                &provided.key_path,
+            )
+            .await?;
+            Ok((
+                c,
+                k,
+                TlsMode::Provided,
+                vec![],
+                "provided (uploaded)".to_string(),
+            ))
         }
         TlsMode::Disabled => {
             let domain = fallback_domain();
-            let (c, k) =
-                talos_control_system::cert::self_signed::generate_self_signed(std::slice::from_ref(&domain)).await?;
-            Ok((c, k, TlsMode::SelfSigned, vec![domain.clone()], format!("self-signed ({domain}) — mode disabled, auto-enabled")))
+            let (c, k) = talos_control_system::cert::self_signed::generate_self_signed(
+                std::slice::from_ref(&domain),
+            )
+            .await?;
+            Ok((
+                c,
+                k,
+                TlsMode::SelfSigned,
+                vec![domain.clone()],
+                format!("self-signed ({domain}) — mode disabled, auto-enabled"),
+            ))
         }
     }
 }
@@ -795,7 +959,9 @@ fn load_persisted_letsencrypt_cert(domains: &[String]) -> Option<(String, String
     if remaining <= chrono::Duration::zero() {
         return None;
     }
-    if remaining <= chrono::Duration::days(talos_control_system::cert::renewal::RENEWAL_THRESHOLD_DAYS) {
+    if remaining
+        <= chrono::Duration::days(talos_control_system::cert::renewal::RENEWAL_THRESHOLD_DAYS)
+    {
         return None;
     }
     // Domain must match what we expect to serve (avoid serving a cert for a
@@ -878,14 +1044,22 @@ fn advertised_host(config: &Config) -> Option<String> {
     if url.is_empty() {
         return None;
     }
-    url.split("//").nth(1)?
-        .split('/').next()?
-        .split(':').next()?.to_string().into()
+    url.split("//")
+        .nth(1)?
+        .split('/')
+        .next()?
+        .split(':')
+        .next()?
+        .to_string()
+        .into()
 }
 
 fn build_http_redirect_router(acme_store: AcmeChallengeStore) -> Router {
     Router::new()
-        .route("/.well-known/acme-challenge/*token", get(acme_challenge_handler))
+        .route(
+            "/.well-known/acme-challenge/*token",
+            get(acme_challenge_handler),
+        )
         .fallback(https_redirect)
         .with_state(acme_store)
 }

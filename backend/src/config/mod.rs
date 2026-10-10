@@ -1,23 +1,23 @@
-pub mod server;
-pub mod database;
-pub mod branding;
-pub mod siderolink;
 pub mod auth;
-pub mod tls;
-pub mod metal;
+pub mod branding;
+pub mod database;
 pub mod factory;
+pub mod metal;
+pub mod server;
+pub mod siderolink;
 pub mod ssh;
+pub mod tls;
 
-pub use server::ServerConfig;
-pub use database::{DatabaseBackend, DatabaseConfig};
-pub use branding::BrandingConfig;
-pub use siderolink::SideroLinkConfig;
 pub use auth::LdapConfig;
 pub use auth::OidcConfig;
-pub use tls::{SelfSignedConfig, TlsConfig, TlsMode};
-pub use metal::{MetalBmcConfig, MetalConfig, MetalDhcpConfig, MetalPxeConfig};
+pub use branding::BrandingConfig;
+pub use database::{DatabaseBackend, DatabaseConfig};
 pub use factory::FactoryConfig;
+pub use metal::{MetalBmcConfig, MetalConfig, MetalDhcpConfig, MetalPxeConfig};
+pub use server::ServerConfig;
+pub use siderolink::SideroLinkConfig;
 pub use ssh::SshConfig;
+pub use tls::{SelfSignedConfig, TlsConfig, TlsMode};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -48,9 +48,12 @@ pub struct AuthConfig {
 
 fn default_jwt_secret() -> String {
     if let Ok(secret) = std::env::var("TCS_AUTH_JWT_SECRET") {
-        return secret;
+        if !secret.is_empty() {
+            return secret;
+        }
     }
-    tracing::warn!("Using default JWT secret — set TCS_AUTH_JWT_SECRET in production!");
+    // Missing on purpose after the vault takes the secret. run_server refuses
+    // this value unless the vault replaces it or TCS_ALLOW_INSECURE=1 is set.
     "talos-control-system-default-secret-change-in-production".to_string()
 }
 
@@ -67,8 +70,8 @@ impl Default for AuthConfig {
 
 impl Config {
     pub fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let file_path = std::env::var("TCS_CONFIG")
-            .unwrap_or_else(|_| "/etc/tcs/config.toml".to_string());
+        let file_path =
+            std::env::var("TCS_CONFIG").unwrap_or_else(|_| "/etc/tcs/config.toml".to_string());
 
         // TLS overlay written by the Settings UI (writable under ProtectSystem=strict).
         let data_dir = std::env::var("TCS_DATA_DIR").unwrap_or_else(|_| "/var/lib/tcs".into());
@@ -95,7 +98,9 @@ impl Config {
         Ok(result)
     }
 
-    pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn from_file(
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let file_source = config::File::from(path.as_ref().to_path_buf()).required(false);
 
         let config = config::Config::builder()
@@ -103,7 +108,8 @@ impl Config {
             .add_source(config::Environment::with_prefix("TCS").separator("_"))
             .build()?;
 
-        config.try_deserialize()
+        config
+            .try_deserialize()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 
@@ -112,7 +118,8 @@ impl Config {
             .add_source(config::Environment::with_prefix("TCS").separator("_"))
             .build()?;
 
-        config.try_deserialize()
+        config
+            .try_deserialize()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 

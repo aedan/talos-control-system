@@ -30,7 +30,7 @@ PUT /api/clusters/{id}/talosconfig
 { "talosconfig": "..." }
 ```
 
-Stored **encrypted** at rest (key derived from `jwt_secret`).
+Stored **encrypted** at rest. The vault data key is the key that used to be derived from `jwt_secret`, fixed when the vault is created.
 
 ### Kubeconfig
 

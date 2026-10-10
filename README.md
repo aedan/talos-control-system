@@ -52,7 +52,7 @@ cd backend && cargo run -- serve
 > Shipped binaries always bind **:443 (HTTPS)** + **:80 (redirect)**; the dev
 > port overrides above are only for running without root.
 
-**Production:** set `TCS_AUTH_JWT_SECRET` (never ship the default secret).
+**Production:** the installer bootstraps `TCS_AUTH_JWT_SECRET` once. First start stores it in the database vault and removes the cleartext copy. Never ship the default secret.
 
 ### Host install (self-extracting)
 

@@ -43,7 +43,7 @@ Creates / updates:
 |------|---------|
 | `/usr/local/bin/tcs` | Binary |
 | `/etc/tcs/config.toml` | Config (created once; upgrades leave it alone) |
-| `/etc/tcs/env` | Secrets (`TCS_AUTH_JWT_SECRET`, optional lab flags) |
+| `/etc/tcs/env` | First-boot bootstrap (`TCS_AUTH_JWT_SECRET`). The server moves it into the vault and removes the line. |
 | `/etc/systemd/system/tcs.service` | systemd unit |
 | `/var/lib/tcs/` | SQLite DB, certs, etcd backups |
 
@@ -53,7 +53,8 @@ Creates / updates:
 sudoedit /etc/tcs/config.toml
 # Set at least:
 #   [server] advertised_url = "https://tcs.example.com"
-#   [auth] jwt_secret  (or rely on /etc/tcs/env TCS_AUTH_JWT_SECRET)
+# The installer writes a JWT into /etc/tcs/env. First start stores it in the
+# vault and removes the cleartext copy. Record the break-glass passphrase.
 ```
 
 ### First login

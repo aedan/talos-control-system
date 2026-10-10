@@ -5,16 +5,18 @@ The login page discovers enabled SSO via `GET /api/auth/providers`.
 
 ## JWT secret (required in production)
 
+A new install can bootstrap the signing secret once:
+
 ```bash
 export TCS_AUTH_JWT_SECRET="$(openssl rand -hex 32)"
-# installer writes this into /etc/tcs/env automatically
+# the installer writes this into /etc/tcs/env for the first start
 ```
 
-Or set `auth.jwt_secret` in config. Starting with the built-in default secret is
-**refused** unless `TCS_ALLOW_INSECURE=1` (local lab only).
+Or set `auth.jwt_secret` in config for that first start. Starting with the built-in default secret is **refused** unless `TCS_ALLOW_INSECURE=1` (local lab only).
 
-The JWT secret also derives the key used to **encrypt talosconfig/kubeconfig** at rest.
-Changing it makes previously stored secrets unreadable.
+The first start copies the secret into the database vault and then removes it from `config.toml` and `/etc/tcs/env`. Later starts load it from the vault. The vault data key is seeded from this secret so existing talosconfig, kubeconfig, and BMC ciphertext still decrypts. Replacing the signing secret afterward does not re-key those blobs.
+
+See [CONFIGURATION.md](CONFIGURATION.md#secrets-vault).
 
 ## Auth providers
 
@@ -44,7 +46,8 @@ First-time LDAP users are **auto-provisioned** when no local row exists (if LDAP
 [auth.ldap]
 url = "ldaps://ad.example.com:636"
 bind_dn = "CN=tcs-svc,OU=Service Accounts,DC=example,DC=com"
-bind_password = "redacted"
+# Leave bind_password unset. Store it with:
+#   printf '%s' "$LDAP_BIND_PASSWORD" | tcs vault put auth.ldap.bind_password
 user_search_base = "OU=Users,DC=example,DC=com"
 user_search_filter = "(sAMAccountName={0})"
 default_role = "reader"
@@ -80,7 +83,8 @@ Group patterns are case-insensitive. A single `*` wildcard is supported.
 enabled = true
 issuer_url = "https://login.example.com/"
 client_id = "tcs"
-client_secret = "redacted"
+# Leave client_secret unset. Store it with:
+#   printf '%s' "$OIDC_CLIENT_SECRET" | tcs vault put auth.oidc.client_secret
 redirect_url = "https://tcs.example.com/api/auth/oidc/callback"
 scopes = ["openid", "email", "profile"]
 default_role = "reader"

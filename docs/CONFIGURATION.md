@@ -27,6 +27,28 @@ All config keys are available as environment variables with the `TCS_` prefix an
 export TCS_TLS_MODE=self_signed
 ```
 
+## Secrets vault
+
+Passwords, the JWT signing secret, the OIDC client secret, the LDAP bind password, and DNS-provider API credentials are stored as ciphertext in the database (`vault_secrets`). TCS does not serve them back over HTTP, and there is no `vault get` command.
+
+On first start the process creates two things:
+
+- `/var/lib/tcs/vault.hostkey` (mode 0600), which unlocks the vault on later boots
+- a break-glass passphrase, printed once on stderr (and therefore the service journal)
+
+The passphrase is stored only as an Argon2id hash. After the vault holds a secret, TCS comments that secret out of `config.toml` and `/etc/tcs/env`. A value systemd already loaded stays in the process until the next restart.
+
+The data key is fixed at first start. It matches the key previously derived from the JWT secret, so talosconfig, kubeconfig, and BMC passwords already in the database still decrypt. Changing `auth.jwt_secret` later changes token signing only.
+
+```bash
+printf '%s' "$OIDC_CLIENT_SECRET" | sudo tcs vault put auth.oidc.client_secret
+sudo tcs vault recover   # if vault.hostkey is lost; prompts for the break-glass passphrase
+```
+
+Known names: `auth.jwt_secret`, `auth.oidc.client_secret`, `auth.ldap.bind_password`, `tls.dns.api_key`, `tls.dns.api_secret`, `tls.dns.api_token`.
+
+The Postgres URL is the exception that stays in config: TCS needs it before the vault can be opened. Back up `data.db` and `vault.hostkey` together. Keep the break-glass passphrase offline, not in that backup.
+
 ## Server Configuration
 
 ```toml
@@ -230,7 +252,8 @@ backend = "sqlite"
 sqlite_path = "/var/lib/tcs/data.db"
 
 [auth]
-# REQUIRED in production; prefer /etc/tcs/env TCS_AUTH_JWT_SECRET (see OPS.md)
+# Bootstrap only. First start copies this into the vault, then removes the line.
+# After that, leave it unset. See "Secrets vault" above.
 jwt_secret = "a-long-random-string"
 
 [tls]
