@@ -67,9 +67,29 @@ pub struct OidcConfig {
     pub redirect_url: String,
     #[serde(default = "default_scopes")]
     pub scopes: Vec<String>,
-    /// Optional default role for newly provisioned OIDC users (default: reader).
+    /// Fallback only. Login uses reader when no user or group assignment matches.
     #[serde(default = "default_oidc_role")]
     pub default_role: String,
+    /// Email assignments. An exact email match wins over group and app-role claims.
+    #[serde(default)]
+    pub user_role_mappings: Vec<OidcUserMapping>,
+    /// Group id or name assignments. The highest matching role is used.
+    #[serde(default)]
+    pub group_role_mappings: Vec<OidcGroupMapping>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct OidcUserMapping {
+    pub email: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct OidcGroupMapping {
+    pub group_pattern: String,
+    pub role: String,
 }
 
 fn default_oidc_role() -> String {
@@ -86,6 +106,8 @@ impl Default for OidcConfig {
             redirect_url: String::new(),
             scopes: default_scopes(),
             default_role: default_oidc_role(),
+            user_role_mappings: Vec::new(),
+            group_role_mappings: Vec::new(),
         }
     }
 }

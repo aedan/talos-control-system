@@ -16,6 +16,134 @@ pub struct OidcUserInfo {
     pub subject: String,
     pub email: String,
     pub display_name: String,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    #[serde(default)]
+    pub roles: Vec<String>,
+}
+
+fn empty_oidc_user() -> OidcUserInfo {
+    OidcUserInfo {
+        subject: String::new(),
+        email: String::new(),
+        display_name: String::new(),
+        groups: Vec::new(),
+        roles: Vec::new(),
+    }
+}
+
+fn claim_strings(value: &serde_json::Value, key: &str) -> Vec<String> {
+    match value.get(key) {
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Some(serde_json::Value::String(s)) if !s.is_empty() => vec![s.clone()],
+        _ => Vec::new(),
+    }
+}
+
+fn user_from_claims(claims: &serde_json::Value) -> OidcUserInfo {
+    let mut info = empty_oidc_user();
+    info.subject = claims
+        .get("sub")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let email = claims
+        .get("email")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    info.email = if email.is_empty() {
+        claims
+            .get("preferred_username")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    } else {
+        email.to_string()
+    };
+    info.display_name = claims
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    info.groups = claim_strings(claims, "groups");
+    info.roles = claim_strings(claims, "roles");
+    info
+}
+
+fn known_role(role: &str) -> Option<String> {
+    match role.trim().to_ascii_lowercase().as_str() {
+        "admin" => Some("admin".to_string()),
+        "operator" => Some("operator".to_string()),
+        "reader" => Some("reader".to_string()),
+        _ => None,
+    }
+}
+
+fn role_rank(role: &str) -> u8 {
+    match role {
+        "admin" => 3,
+        "operator" => 2,
+        "reader" => 1,
+        _ => 0,
+    }
+}
+
+/// Role from an email row, an Entra app role, or a group mapping.
+/// `None` means nothing was assigned, so a new user becomes reader and an
+/// existing user's stored role is left alone.
+fn resolve_assigned_role(
+    config: &ConfigOidcConfig,
+    email: &str,
+    groups: &[String],
+    roles: &[String],
+) -> Option<String> {
+    let email_key = email.trim().to_ascii_lowercase();
+    if !email_key.is_empty() {
+        if let Some(mapping) = config.user_role_mappings.iter().find(|m| {
+            m.email.trim().to_ascii_lowercase() == email_key
+        }) {
+            if let Some(role) = known_role(&mapping.role) {
+                return Some(role);
+            }
+        }
+    }
+
+    let mut best = 0u8;
+    let mut chosen = None;
+    for role in roles {
+        let tail = role.rsplit(['.', ':']).next().unwrap_or(role);
+        if let Some(name) = known_role(tail) {
+            let rank = role_rank(&name);
+            if rank > best {
+                best = rank;
+                chosen = Some(name);
+            }
+        }
+    }
+    for mapping in &config.group_role_mappings {
+        let pattern = mapping.group_pattern.trim();
+        if pattern.is_empty() {
+            continue;
+        }
+        let Some(name) = known_role(&mapping.role) else {
+            continue;
+        };
+        let rank = role_rank(&name);
+        if rank <= best {
+            continue;
+        }
+        let pat = pattern.to_ascii_lowercase();
+        if groups.iter().any(|g| g.to_ascii_lowercase().contains(&pat)) {
+            best = rank;
+            chosen = Some(name);
+        }
+    }
+    chosen
 }
 
 pub struct TcsOidcProvider {
@@ -148,20 +276,28 @@ impl TcsOidcProvider {
             None
         };
 
-        let user_info = if let Some(info) = from_id_token {
-            // Optionally enrich display name from userinfo if missing.
-            if info.display_name.is_empty() && !self.userinfo_url.is_empty() {
+        let user_info = if let Some(mut info) = from_id_token {
+            let needs_more = info.display_name.is_empty()
+                || info.email.is_empty()
+                || info.groups.is_empty()
+                || info.roles.is_empty();
+            if needs_more && !self.userinfo_url.is_empty() {
                 if let Ok(ui) = self.fetch_user_info(access_token).await {
-                    OidcUserInfo {
-                        display_name: ui.display_name,
-                        ..info
+                    if info.display_name.is_empty() {
+                        info.display_name = ui.display_name;
                     }
-                } else {
-                    info
+                    if info.email.is_empty() {
+                        info.email = ui.email;
+                    }
+                    if info.groups.is_empty() {
+                        info.groups = ui.groups;
+                    }
+                    if info.roles.is_empty() {
+                        info.roles = ui.roles;
+                    }
                 }
-            } else {
-                info
             }
+            info
         } else if !self.userinfo_url.is_empty() {
             match self.fetch_user_info(access_token).await {
                 Ok(info) => info,
@@ -244,6 +380,10 @@ impl TcsOidcProvider {
             name: String,
             #[serde(default)]
             preferred_username: String,
+            #[serde(default, deserialize_with = "flexible_string_list")]
+            groups: Vec<String>,
+            #[serde(default, deserialize_with = "flexible_string_list")]
+            roles: Vec<String>,
         }
 
         let token_data = match decode::<IdClaims>(id_token, &key, &validation) {
@@ -270,6 +410,8 @@ impl TcsOidcProvider {
             subject: token_data.claims.sub,
             email,
             display_name: token_data.claims.name,
+            groups: token_data.claims.groups,
+            roles: token_data.claims.roles,
         })
     }
 
@@ -285,34 +427,14 @@ impl TcsOidcProvider {
             .await
             .map_err(|e| AppError::Auth(format!("Failed to parse userinfo: {}", e)))?;
 
-        Ok(OidcUserInfo {
-            subject: resp
-                .get("sub")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            email: resp
-                .get("email")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            display_name: resp
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-        })
+        Ok(user_from_claims(&resp))
     }
 
     fn parse_id_token_claims(&self, id_token_str: &str) -> OidcUserInfo {
         let parts: Vec<&str> = id_token_str.split('.').collect();
         if parts.len() != 3 {
             warn!("Invalid ID token format");
-            return OidcUserInfo {
-                subject: String::new(),
-                email: String::new(),
-                display_name: String::new(),
-            };
+            return empty_oidc_user();
         }
 
         let payload_bytes = match base64::Engine::decode(
@@ -322,11 +444,7 @@ impl TcsOidcProvider {
             Ok(b) => b,
             Err(_) => {
                 warn!("Failed to decode ID token payload");
-                return OidcUserInfo {
-                    subject: String::new(),
-                    email: String::new(),
-                    display_name: String::new(),
-                };
+                return empty_oidc_user();
             }
         };
 
@@ -334,31 +452,11 @@ impl TcsOidcProvider {
             Ok(v) => v,
             Err(_) => {
                 warn!("Failed to parse ID token claims as JSON");
-                return OidcUserInfo {
-                    subject: String::new(),
-                    email: String::new(),
-                    display_name: String::new(),
-                };
+                return empty_oidc_user();
             }
         };
 
-        OidcUserInfo {
-            subject: claims
-                .get("sub")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            email: claims
-                .get("email")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            display_name: claims
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-        }
+        user_from_claims(&claims)
     }
 
     pub async fn authenticate_and_issue_jwt(
@@ -382,20 +480,25 @@ impl TcsOidcProvider {
 
         let now = chrono::Utc::now();
 
+        let assigned = resolve_assigned_role(
+            &self.config,
+            &email,
+            &user_info.groups,
+            &user_info.roles,
+        );
         let user = match user::get_by_email(pool, &email).await? {
             Some(mut existing) => {
                 existing.display_name = display_name;
                 existing.auth_provider = "oidc".to_string();
                 existing.is_active = true;
                 existing.updated_at = now;
+                if let Some(role) = assigned {
+                    existing.role = role;
+                }
                 user::upsert(pool, &existing).await?
             }
             None => {
-                let role = if self.config.default_role.trim().is_empty() {
-                    "reader".to_string()
-                } else {
-                    self.config.default_role.clone()
-                };
+                let role = assigned.unwrap_or_else(|| "reader".to_string());
                 let new_user = User {
                     id: Uuid::new_v4(),
                     email: email.clone(),
@@ -455,6 +558,22 @@ impl TcsOidcProvider {
     }
 }
 
+fn flexible_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .filter(|s| !s.is_empty())
+            .collect(),
+        serde_json::Value::String(s) if !s.is_empty() => vec![s],
+        _ => Vec::new(),
+    })
+}
+
 fn oidc_state_store() -> &'static dashmap::DashMap<String, std::time::Instant> {
     use std::sync::OnceLock;
     static STORE: OnceLock<dashmap::DashMap<String, std::time::Instant>> = OnceLock::new();
@@ -470,7 +589,7 @@ mod tests {
         // header.payload.sig — payload is base64url JSON
         let payload = base64::Engine::encode(
             &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-            br#"{"sub":"u1","email":"u@example.com","name":"User One"}"#,
+            br#"{"sub":"u1","email":"u@example.com","name":"User One","groups":["admins"],"roles":["TCS.Operator"]}"#,
         );
         let token = format!("e30.{}.sig", payload);
         let provider = TcsOidcProvider {
@@ -485,6 +604,42 @@ mod tests {
         assert_eq!(info.subject, "u1");
         assert_eq!(info.email, "u@example.com");
         assert_eq!(info.display_name, "User One");
+        assert_eq!(info.groups, vec!["admins".to_string()]);
+        assert_eq!(info.roles, vec!["TCS.Operator".to_string()]);
+    }
+
+    #[test]
+    fn unassigned_login_has_no_role_and_email_beats_group() {
+        use crate::config::auth::{OidcGroupMapping, OidcUserMapping};
+
+        let mut config = ConfigOidcConfig::default();
+        assert!(resolve_assigned_role(&config, "new@example.com", &[], &[]).is_none());
+
+        config.group_role_mappings.push(OidcGroupMapping {
+            group_pattern: "readers".into(),
+            role: "reader".into(),
+        });
+        config.group_role_mappings.push(OidcGroupMapping {
+            group_pattern: "admins".into(),
+            role: "admin".into(),
+        });
+        assert_eq!(
+            resolve_assigned_role(&config, "a@example.com", &["admins".into(), "readers".into()], &[]).as_deref(),
+            Some("admin")
+        );
+        assert_eq!(
+            resolve_assigned_role(&config, "a@example.com", &[], &["TCS.Operator".into()]).as_deref(),
+            Some("operator")
+        );
+
+        config.user_role_mappings.push(OidcUserMapping {
+            email: "A@Example.com".into(),
+            role: "reader".into(),
+        });
+        assert_eq!(
+            resolve_assigned_role(&config, "a@example.com", &["admins".into()], &["admin".into()]).as_deref(),
+            Some("reader")
+        );
     }
 
     #[test]

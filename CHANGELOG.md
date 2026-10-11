@@ -6,6 +6,7 @@
 - **Secrets vault.** JWT, OIDC client secret, LDAP bind password, and DNS provider credentials are ciphertext in the database. `/var/lib/tcs/vault.hostkey` (mode 0600) unlocks them at startup. A break-glass passphrase is printed once and stored only as an Argon2id hash. `tcs vault put` reads a secret from stdin. `tcs vault recover` rebuilds the host key. First start removes the cleartext copy from `config.toml`, `/etc/tcs/env`, and `/var/lib/tcs/tls.toml`. Saving certificate settings stores DNS credentials in the vault and does not write them back to disk. The certificate form does not return a stored credential. The data key matches the old JWT-derived key, so existing talosconfig, kubeconfig, and BMC blobs still decrypt.
 
 ### Changed
+- **OpenID Connect roles can be assigned per user or group.** A listed email wins. Otherwise the highest matching group or app-role claim is applied on each login. A first login with no match gets reader, and a role already stored for that user is left alone until an assignment matches.
 - **Auth, TLS, and metal settings are stored in the database.** The Authentication page saves LDAP, OpenID Connect, and SAML there. A blank bind password or client secret keeps the vault value. Certificate and metal saves no longer write `config.toml`, `tls.toml`, or `metal.toml`. The config file still holds the database connection, bind address, and SideroLink subnet, which the process needs before it opens the database. The first start copies existing file settings into the database.
 
 ### Fixed

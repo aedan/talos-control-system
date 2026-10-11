@@ -2465,6 +2465,22 @@ pub struct OidcConfigResponse {
     pub scopes: Vec<String>,
     pub has_client_secret: bool,
     pub default_role: String,
+    pub user_role_mappings: Vec<OidcUserMappingResponse>,
+    pub group_role_mappings: Vec<OidcGroupMappingResponse>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OidcUserMappingResponse {
+    pub email: String,
+    pub role: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OidcGroupMappingResponse {
+    pub group_pattern: String,
+    pub role: String,
 }
 
 #[derive(Serialize)]
@@ -2515,6 +2531,22 @@ pub async fn get_auth_config(
         scopes: o.scopes.clone(),
         has_client_secret: !o.client_secret.is_empty(),
         default_role: o.default_role.clone(),
+        user_role_mappings: o
+            .user_role_mappings
+            .iter()
+            .map(|m| OidcUserMappingResponse {
+                email: m.email.clone(),
+                role: m.role.clone(),
+            })
+            .collect(),
+        group_role_mappings: o
+            .group_role_mappings
+            .iter()
+            .map(|m| OidcGroupMappingResponse {
+                group_pattern: m.group_pattern.clone(),
+                role: m.role.clone(),
+            })
+            .collect(),
     });
 
     let saml = Some(auth.saml.clone().unwrap_or_default()).map(|s| SamlConfigResponse {
@@ -2623,6 +2655,28 @@ pub struct AuthOidcRequest {
     pub scopes: Vec<String>,
     #[serde(default = "default_reader_role")]
     pub default_role: String,
+    #[serde(default)]
+    pub user_role_mappings: Vec<AuthOidcUserRequest>,
+    #[serde(default)]
+    pub group_role_mappings: Vec<AuthOidcGroupRequest>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthOidcUserRequest {
+    #[serde(default)]
+    pub email: String,
+    #[serde(default = "default_reader_role")]
+    pub role: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthOidcGroupRequest {
+    #[serde(default)]
+    pub group_pattern: String,
+    #[serde(default = "default_reader_role")]
+    pub role: String,
 }
 
 #[derive(Deserialize)]
@@ -2681,7 +2735,10 @@ pub async fn update_auth_config(
         return Err((StatusCode::FORBIDDEN, "Admin role required".into()));
     }
 
-    use crate::config::auth::{GroupRoleMapping, LdapConfig, OidcConfig, SamlConfig, SamlGroupMapping};
+    use crate::config::auth::{
+        GroupRoleMapping, LdapConfig, OidcConfig, OidcGroupMapping, OidcUserMapping, SamlConfig,
+        SamlGroupMapping,
+    };
     use crate::db::settings::{self, AuthSettings};
     use crate::utils::vault::{self, LDAP_BIND_PASSWORD, OIDC_CLIENT_SECRET};
 
@@ -2775,6 +2832,24 @@ pub async fn update_auth_config(
             redirect_url: oidc_req.redirect_url,
             scopes,
             default_role: oidc_req.default_role,
+            user_role_mappings: oidc_req
+                .user_role_mappings
+                .into_iter()
+                .filter(|m| !m.email.trim().is_empty())
+                .map(|m| OidcUserMapping {
+                    email: m.email,
+                    role: m.role,
+                })
+                .collect(),
+            group_role_mappings: oidc_req
+                .group_role_mappings
+                .into_iter()
+                .filter(|m| !m.group_pattern.trim().is_empty())
+                .map(|m| OidcGroupMapping {
+                    group_pattern: m.group_pattern,
+                    role: m.role,
+                })
+                .collect(),
         });
     }
 

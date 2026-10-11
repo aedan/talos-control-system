@@ -29,6 +29,8 @@
       redirectUrl: string;
       scopes: string;
       defaultRole: 'reader' | 'operator' | 'admin';
+      userRoleMappings: { email: string; role: 'reader' | 'operator' | 'admin' }[];
+      groupRoleMappings: { groupPattern: string; role: 'reader' | 'operator' | 'admin' }[];
     };
     saml: {
       enabled: boolean;
@@ -79,7 +81,9 @@
       clientSecret: '',
       redirectUrl: '',
       scopes: 'openid,profile,email',
-      defaultRole: 'reader'
+      defaultRole: 'reader',
+      userRoleMappings: [],
+      groupRoleMappings: []
     },
     saml: {
       enabled: false,
@@ -136,7 +140,19 @@
             scopes: Array.isArray(data.oidc.scopes)
               ? data.oidc.scopes.join(',')
               : data.oidc.scopes || 'openid,profile,email',
-            defaultRole: data.oidc.default_role || data.oidc.defaultRole || 'reader'
+            defaultRole: data.oidc.default_role || data.oidc.defaultRole || 'reader',
+            userRoleMappings: (data.oidc.userRoleMappings || data.oidc.user_role_mappings || []).map(
+              (m: any) => ({
+                email: m.email || '',
+                role: m.role || 'reader'
+              })
+            ),
+            groupRoleMappings: (data.oidc.groupRoleMappings || data.oidc.group_role_mappings || []).map(
+              (m: any) => ({
+                groupPattern: m.groupPattern || m.group_pattern || '',
+                role: m.role || 'reader'
+              })
+            )
           };
         }
         if (data.saml) {
@@ -176,6 +192,22 @@
 
   function removeGroupMapping(index: number) {
     config.ldap.groupRoleMappings.splice(index, 1);
+  }
+
+  function addOidcUserMapping() {
+    config.oidc.userRoleMappings.push({ email: '', role: 'reader' });
+  }
+
+  function removeOidcUserMapping(index: number) {
+    config.oidc.userRoleMappings.splice(index, 1);
+  }
+
+  function addOidcGroupMapping() {
+    config.oidc.groupRoleMappings.push({ groupPattern: '', role: 'reader' });
+  }
+
+  function removeOidcGroupMapping(index: number) {
+    config.oidc.groupRoleMappings.splice(index, 1);
   }
 
   function addSamlGroupMapping() {
@@ -496,13 +528,54 @@
               <span class="hint">Comma-separated OAuth scopes</span>
             </div>
 
-            <div class="form-group">
-              <label for="oidcDefaultRole">Default role</label>
-              <select id="oidcDefaultRole" title="Role for a new OIDC user" bind:value={config.oidc.defaultRole}>
-                <option value="reader">Reader</option>
-                <option value="operator">Operator</option>
-                <option value="admin">Admin</option>
-              </select>
+            <p class="hint">A person with no matching user or group gets reader. A listed email wins over groups. A role chosen later on Settings → Users stays until an email or group assignment matches.</p>
+            <div class="group-mappings">
+              <div class="mapping-header">
+                <h3>User roles</h3>
+                <Button variant="ghost" size="sm" title="Assign a role to one email address" onclick={addOidcUserMapping}>+ Add</Button>
+              </div>
+              {#each config.oidc.userRoleMappings as mapping, index}
+                <div class="mapping-row">
+                  <div class="form-group mapping-input">
+                    <input type="email" title="Email address from the identity provider" bind:value={mapping.email} placeholder="user@example.com" />
+                  </div>
+                  <select title="Role for this user" bind:value={mapping.role}>
+                    <option value="reader">Reader</option>
+                    <option value="operator">Operator</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                  <button class="remove-btn" onclick={() => removeOidcUserMapping(index)} title="Remove user role">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                      <line x1="18" y1="6" x2="6" y2="18"/>
+                      <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                  </button>
+                </div>
+              {/each}
+            </div>
+            <div class="group-mappings">
+              <div class="mapping-header">
+                <h3>Group roles</h3>
+                <Button variant="ghost" size="sm" title="Assign a role to an identity provider group" onclick={addOidcGroupMapping}>+ Add</Button>
+              </div>
+              {#each config.oidc.groupRoleMappings as mapping, index}
+                <div class="mapping-row">
+                  <div class="form-group mapping-input">
+                    <input type="text" title="Group name or object ID from the identity provider" bind:value={mapping.groupPattern} placeholder="Group name or object ID" />
+                  </div>
+                  <select title="Role for members of this group" bind:value={mapping.role}>
+                    <option value="reader">Reader</option>
+                    <option value="operator">Operator</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                  <button class="remove-btn" onclick={() => removeOidcGroupMapping(index)} title="Remove group role">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                      <line x1="18" y1="6" x2="6" y2="18"/>
+                      <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                  </button>
+                </div>
+              {/each}
             </div>
           {/if}
         </div>

@@ -58,10 +58,13 @@ The form fields are the server URL, bind DN, user search base, user search filte
 - Authorization code flow via discovery (`/.well-known/openid-configuration`)
 - CSRF `state` is **DB-backed** (`oidc_states` table), supporting multi-replica deployments
 - Query parameters are URL-encoded
-- Users auto-provisioned on first login with `default_role` (default `reader`)
+- Users are auto-provisioned on first login
 - Password login is rejected for existing `oidc` users (use the OIDC button)
+- A first login with no matching user or group assignment gets **reader**
+- An email row wins over groups. Otherwise the highest matching group or app role (`admin`, `operator`, or `reader`, including a suffix such as `TCS.Admin`) is applied on every login
+- With no match, a role already stored for that user is left as it is
 
-Set this in **Settings → Authentication**. The values are stored in the database. The client secret is a vault secret: type it once in the form, or run `tcs vault put auth.oidc.client_secret`. A blank secret on save keeps the vault value. The form fields are the issuer URL, client ID, redirect URL, scopes, and default role.
+Set this in **Settings → Authentication**. The values are stored in the database. The client secret is a vault secret: type it once in the form, or run `tcs vault put auth.oidc.client_secret`. A blank secret on save keeps the vault value. The form fields are the issuer URL, client ID, redirect URL, scopes, per-user roles, and per-group roles.
 
 **IdP app settings:**
 
