@@ -18,9 +18,9 @@ writes a systemd unit, creates `/etc/tcs` + `/var/lib/tcs`, and generates a JWT 
 ### Download
 
 ```bash
-# Replace VERSION with the release you want. Current release: v0.5.91
+# Replace VERSION with the release you want. Current release: v0.5.92
 curl -fsSL -o tcs-install.sh \
-  "https://github.com/aedan/talos-control-system/releases/download/v0.5.91/tcs-0.5.91-linux-x86_64.sh"
+  "https://github.com/aedan/talos-control-system/releases/download/v0.5.92/tcs-0.5.92-linux-x86_64.sh"
 chmod +x tcs-install.sh
 ```
 
@@ -70,7 +70,7 @@ A shipped binary serves the UI on **HTTPS :443**. It also tries to bind **HTTP :
 
 ```bash
 curl -fsSL -o tcs.tgz \
-  "https://github.com/aedan/talos-control-system/releases/download/v0.5.91/tcs-0.5.91-linux-x86_64.tar.gz"
+  "https://github.com/aedan/talos-control-system/releases/download/v0.5.92/tcs-0.5.92-linux-x86_64.tar.gz"
 sudo tar xzf tcs.tgz -C /tmp
 sudo install -m 755 /tmp/tcs /usr/local/bin/tcs
 # Then copy config.example.toml and create a systemd unit

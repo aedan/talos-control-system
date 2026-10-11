@@ -852,7 +852,9 @@ impl ClusterController {
         let is_cp = is_control_plane(&machine.machine_type);
         if is_cp {
             k8s.cordon(node_name).await?;
-        } else {            let res = k8s.drain(node_name, true).await?;
+            tracing::info!(node = %node_name, "cordoned control plane before upgrade");
+        } else {
+            let res = k8s.drain(node_name, true).await?;
             if !res.errors.is_empty() {
                 // Uncordon so we don't leave the node unschedulable on failure.
                 let _ = k8s.uncordon(node_name).await;
@@ -861,6 +863,7 @@ impl ClusterController {
                     res.errors.join("; ")
                 )));
             }
+            tracing::info!(node = %node_name, "drained worker before upgrade");
         }
         Ok(Some(node_name.to_string()))
     }
@@ -1256,6 +1259,54 @@ impl ClusterController {
         m.updated_at = chrono::Utc::now();
         let _ = crate::db::repos::machine::update(&self.pool, &m).await;
         Ok(version)
+    }
+
+    /// True when the local etcd service is running and healthy.
+    /// An API that answers while etcd is absent is the stuck-boot state.
+    pub async fn etcd_healthy(&self, machine_id: Uuid) -> Result<bool, AppError> {
+        let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
+        let tc = self.talosconfig_yaml(&cluster)?;
+        let (services, _) = self
+            .with_reachable(&machine, |endpoint| {
+                let tc = tc.clone();
+                async move { crate::integration::talosctl::TalosctlClient::service_list(&endpoint, tc.as_deref()).await }
+            })
+            .await?;
+        Ok(services.iter().any(|svc| {
+            svc["id"].as_str() == Some("etcd")
+                && svc["state"]
+                    .as_str()
+                    .map(|s| s.eq_ignore_ascii_case("running"))
+                    .unwrap_or(false)
+                && svc["healthy"].as_bool().unwrap_or(false)
+        }))
+    }
+
+    /// True when the Kubernetes node condition Ready is True.
+    /// A cordon leaves the node unschedulable and still Ready, so unschedulable is ignored.
+    pub async fn kubernetes_node_ready(&self, machine_id: Uuid) -> Result<bool, AppError> {
+        let (cluster, machine) = self.cluster_and_machine(machine_id).await?;
+        let Some(enc) = &cluster.kubeconfig else {
+            return Err(AppError::InvalidInput("cluster has no kubeconfig".into()));
+        };
+        let plain = self.dec(enc)?;
+        let k8s = crate::integration::kubernetes::K8sClient::from_kubeconfig_yaml(&plain).await?;
+        let node_name = machine.hostname.trim();
+        if node_name.is_empty() {
+            return Err(AppError::InvalidInput("machine has no hostname".into()));
+        }
+        let api = kube::Api::<k8s_openapi::api::core::v1::Node>::all(k8s.raw().clone());
+        let node = api
+            .get(node_name)
+            .await
+            .map_err(|e| AppError::Network(format!("get node {node_name}: {e}")))?;
+        Ok(node
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .and_then(|conds| conds.iter().find(|c| c.type_ == "Ready"))
+            .map(|c| c.status == "True")
+            .unwrap_or(false))
     }
 
     /// Like [`Self::machine_version`] but connects via an explicit endpoint.

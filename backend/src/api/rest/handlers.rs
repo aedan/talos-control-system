@@ -3797,7 +3797,9 @@ pub struct ClusterUpgradeRequest {
     pub modules: Option<Vec<String>>,
     #[serde(default = "default_max_unavail")]
     pub max_unavailable: i32,
-    #[serde(default = "default_true")]
+    /// Controllers go first unless the caller sets this. A minor Talos bump
+    /// ignores `true` and still upgrades controllers first.
+    #[serde(default)]
     pub control_plane_last: bool,
 }
 

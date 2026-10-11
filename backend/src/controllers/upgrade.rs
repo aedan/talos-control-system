@@ -153,6 +153,13 @@ impl UpgradeController {
         };
 
         let now = Utc::now();
+        // A minor Talos bump must not leave workers newer than the controllers.
+        // Patch bumps inside the same minor honor the caller's order.
+        let control_plane_last = if talos_minors_differ(&cluster.talos_version, &target_talos) {
+            false
+        } else {
+            control_plane_last
+        };
         let phase = if talos_changed || modules_changed {
             "talos".to_string()
         } else {
@@ -373,9 +380,35 @@ fn is_cp(t: &str) -> bool {
     t == "control-plane" || t == "controlplane"
 }
 
+/// `(major, minor)` from `v1.13.4`. Patch is ignored.
+fn talos_minor(v: &str) -> Option<(u32, u32)> {
+    let t = v.trim().trim_start_matches('v');
+    let mut parts = t.split('.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// True when the target is a different Talos minor (or major) than the cluster.
+pub(crate) fn talos_minors_differ(current: &str, target: &str) -> bool {
+    match (talos_minor(current), talos_minor(target)) {
+        (Some(a), Some(b)) => a != b,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn minor_bump_forces_controllers_first() {
+            assert!(!talos_minors_differ("v1.13.4", "v1.13.11"));
+            assert!(!talos_minors_differ("1.13.4", "v1.13.11"));
+            assert!(talos_minors_differ("v1.13.11", "v1.14.0"));
+            assert!(talos_minors_differ("v1.13.11", "v2.0.0"));
+            assert!(!talos_minors_differ("", "v1.14.0"));
+        }
 
         #[test]
         fn detects_control_plane_types() {

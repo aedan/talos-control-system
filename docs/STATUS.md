@@ -1,6 +1,6 @@
 # TCS Status (Alpha)
 
-**Last updated:** 2026-10-10 · **Release: v0.5.91** (this page matches `main`, including fixes landed after the v0.5.91 changelog entry)
+**Last updated:** 2026-10-11 · **Release: v0.5.92**
 
 Talos Control System is an **alpha** management UI for Talos Linux clusters.
 It runs as a **host systemd service** (or bare binary), **outside** the managed
@@ -20,7 +20,7 @@ cluster.
 | Dashboard-centric IA | **Supported** | No sidebar; clusters + counts on home, Settings top-bar dropdown |
 | Config apply (pure-Rust COSI) | **Supported** | |
 | Etcd backup / restore / schedule | **Supported** | Leader-only when multi-replica |
-| Rolling upgrade jobs (per-cluster) | **Supported (alpha)** | Talos image roll (reboots) + optional in-place Kubernetes upgrade; max-unavailable, control-plane-last. A second job is rejected while one is pending or running. `clusters.talos_version` updates when every node agrees on the new tag. |
+| Rolling upgrade jobs (per-cluster) | **Supported (alpha)** | Talos image roll reboots controllers first, one at a time, and waits for etcd before the next. A minor bump forces that order. Optional in-place Kubernetes upgrade. A second job is rejected while one is pending or running. `clusters.talos_version` updates when every node agrees on the new tag. |
 | In-place Kubernetes upgrade | **Supported (alpha)** | `talosctl upgrade-k8s` (no reboots, CP first); multi-minor ladders via sequential steps; drain/uncordon of workers via stored kubeconfig |
 | Image-Factory modules | **Supported (alpha)** | Cluster-default set + per-node +/− deltas + reset-to-defaults; effective set drives the installer schematic. Import does not yet copy the extensions loaded on a running node; set them before the next upgrade or that upgrade builds an image without them. |
 | Greenfield config factory | **Supported (alpha)** | Pure-Rust PKI + machine configs (no talosctl) |

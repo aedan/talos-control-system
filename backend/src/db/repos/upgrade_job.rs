@@ -138,6 +138,14 @@ pub async fn list_targets(pool: &DbPool, job_id: Uuid) -> Result<Vec<UpgradeJobT
     .await
 }
 
+pub async fn get_target(pool: &DbPool, id: Uuid) -> Result<Option<UpgradeJobTarget>, AppError> {
+    pool.fetch_optional_as(
+        "SELECT * FROM upgrade_job_targets WHERE id = ?",
+        &[SqlVal::Uuid(id)],
+    )
+    .await
+}
+
 pub async fn update_job_status(
     pool: &DbPool,
     id: Uuid,

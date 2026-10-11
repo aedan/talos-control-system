@@ -57,7 +57,7 @@ PUT /api/machines/{id}
 | Upgrade (single machine) | `POST /api/machines/{id}/upgrade` | `{ "image": "ghcr.io/siderolabs/installer:v1.x" }` |
 | Reset / wipe machine | `POST /api/machines/{id}/reset` | `{ "confirm": true, "graceful": true, "reboot": true }` |
 | Bootstrap control plane | `POST /api/machines/{id}/bootstrap` | initial etcd formation |
-| Rolling upgrade (cluster) | `POST /api/clusters/{id}/upgrade` | `{ "talosVersion", "k8sVersion", "modules", "maxUnavailable", "controlPlaneLast" }` (all optional; at least one required). Talos phase reboots nodes; k8s phase is in-place (no reboots, CP first). Legacy `image` is accepted only as a version-only shortcut. |
+| Rolling upgrade (cluster) | `POST /api/clusters/{id}/upgrade` | `{ "talosVersion", "k8sVersion", "modules", "maxUnavailable", "controlPlaneLast" }` (all optional; at least one required). Talos phase reboots controllers first, then workers, one controller at a time, and waits until that controller's etcd is healthy before the next. A minor Talos bump forces controllers first even when `controlPlaneLast` is true. A same-minor patch honors `controlPlaneLast`. k8s phase is in-place (no reboots, CP first). Legacy `image` is accepted only as a version-only shortcut. |
 | Scale workers (desired) | `POST /api/clusters/{id}/scale` | `{ "desiredWorkers": N }` inventory target |
 | Cluster upgrade jobs | `GET /api/clusters/{id}/upgrade-jobs` | jobs targeting this cluster |
 | Upgrade targets (probe) | `GET /api/clusters/{id}/upgrade-targets` | live Talos versions + supported in-place k8s targets (degrades gracefully) |

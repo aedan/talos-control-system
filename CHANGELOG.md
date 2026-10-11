@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.92] — 2026-10-11
+
 ### Added
 - **Secrets vault.** JWT, OIDC client secret, LDAP bind password, and DNS provider credentials are ciphertext in the database. `/var/lib/tcs/vault.hostkey` (mode 0600) unlocks them at startup. A break-glass passphrase is printed once and stored only as an Argon2id hash. `tcs vault put` reads a secret from stdin. `tcs vault recover` rebuilds the host key. First start removes the cleartext copy from `config.toml`, `/etc/tcs/env`, and `/var/lib/tcs/tls.toml`. Saving certificate settings stores DNS credentials in the vault and does not write them back to disk. The certificate form does not return a stored credential. The data key matches the old JWT-derived key, so existing talosconfig, kubeconfig, and BMC blobs still decrypt.
 
@@ -10,6 +12,7 @@
 - **Auth, TLS, and metal settings are stored in the database.** The Authentication page saves LDAP, OpenID Connect, and SAML there. A blank bind password or client secret keeps the vault value. Certificate and metal saves no longer write `config.toml`, `tls.toml`, or `metal.toml`. The config file still holds the database connection, bind address, and SideroLink subnet, which the process needs before it opens the database. The first start copies existing file settings into the database.
 
 ### Fixed
+- **A Talos roll started the next controller while the previous one was still out of etcd.** A control-plane target stays in the unavailable slot until the Talos API answers, the version matches, etcd is healthy, and the node is Ready. `talosctl upgrade` no longer blocks the scheduler, and a disconnect after the install has started is a reboot, not a failure that frees the slot. Controllers upgrade before workers. A minor-version change forces that order. The upgrader does not power-cycle a node or change its boot device.
 - **Self-signed login failed in the browser with "NetworkError when attempting to fetch resource."** `rcgen`'s default certificate window is 1 Jan 1975 through 1 Jan 4096. Firefox and Safari reject that span and the login `fetch` never receives a response. Generated certificates are now valid from yesterday for 397 days.
 - **A finished rolling upgrade left the cluster Talos version on the old tag, and Start stayed available during the roll.** `cluster::update` never wrote `talos_version` or `control_plane_version`. Those columns are persisted now. The cluster version advances when every probed node agrees, and again when the Talos phase completes. A new upgrade job is rejected while one is `pending` or `running`.
 - **`tcs-sl0` always gained `100.64.0.1/10`.** The address is now the first host of `[siderolink] subnet`. The default is still `100.64.0.0/10`. An empty `subnet` adds no IPv4 address.

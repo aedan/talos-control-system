@@ -1,4 +1,6 @@
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::db::pool::DbPool;
 use tracing::{info, warn};
@@ -99,60 +101,75 @@ async fn run_talos_phase(
     jwt_secret: &str,
     job: upgrade_job::UpgradeJob,
 ) -> Result<(), crate::AppError> {
-    let targets = upgrade_job::list_targets(pool, job.id).await?;
+    reap_upgrade_clients(pool).await?;
+
+    let mut targets = upgrade_job::list_targets(pool, job.id).await?;
+    let want = desired_talos_version(&job, &targets);
+    for t in targets.clone() {
+        if t.status == "running" || t.status == "failed" {
+            poll_talos_target(pool, sqlite_path, jwt_secret, &job, &t, want.as_deref()).await?;
+        }
+    }
+    targets = upgrade_job::list_targets(pool, job.id).await?;
+
     let any_active = targets
         .iter()
-        .any(|t| t.status == "pending" || t.status == "running");
+        .any(|t| t.status == "pending" || t.status == "running" || (t.status == "failed" && target_is_cp(&t)));
     if !any_active {
         transition_after_talos(pool, &job, &targets).await?;
         return Ok(());
     }
-
-    let max = job.max_unavailable.max(1) as usize;
-    let running = targets.iter().filter(|t| t.status == "running").count();
-    let slots = max.saturating_sub(running);
-
-    if slots > 0 {
-        let to_start: Vec<_> = targets
-            .iter()
-            .filter(|t| t.status == "pending")
-            .take(slots)
-            .cloned()
-            .collect();
-        for t in to_start {
-            if cancel_requested(pool, job.id).await? {
-                upgrade_job::update_job_status(pool, job.id, "cancelled", Some("cancel requested"))
-                    .await?;
-                return Ok(());
-            }
-            upgrade_job::update_target_status(pool, t.id, "running", None).await?;
-            let image = t.image.clone().unwrap_or_else(|| job.image.clone());
-            let controller =
-                ClusterController::with_context(pool.clone(), sqlite_path.to_string(), jwt_secret.to_string());
-            // Cordon + drain this node's k8s workload first (via the stored
-            // kubeconfig), so talosctl upgrade --drain=false can't fail trying
-            // to fetch a kubeconfig from a worker.
-            match controller.drain_machine_for_upgrade(t.machine_id).await {
-                Ok(Some(node)) => info!(machine = %t.machine_id, node, "drained node before upgrade"),
-                Ok(None) => {}
-                Err(e) => {
-                    upgrade_job::update_target_status(pool, t.id, "failed", Some(&format!("drain failed: {e}"))).await?;
-                    continue;
-                }
-            }
-            match controller.upgrade_machine(t.machine_id, &image).await {
-                Ok(()) => info!(machine = %t.machine_id, image, "Talos upgrade initiated"),
-                Err(e) => {
-                    let _ = controller.uncordon_machine(t.machine_id).await;
-                    upgrade_job::update_target_status(pool, t.id, "failed", Some(&e.to_string()))
-                        .await?;
-                }
-            }
-        }
+    // A failed controller still blocks the roll. Do not finish the job, and do
+    // not move on to Kubernetes, while one is down.
+    if targets.iter().any(|t| target_is_cp(t) && t.status == "failed") {
+        return Ok(());
     }
 
-    for t in targets.iter().filter(|t| t.status == "running") {
-        poll_talos_target(pool, sqlite_path, jwt_secret, &job, t).await?;
+    let max = job.max_unavailable.max(1) as usize;
+    let views: Vec<TargetView> = targets
+        .iter()
+        .map(|t| TargetView {
+            is_cp: target_is_cp(t),
+            status: t.status.clone(),
+        })
+        .collect();
+    let start_idx = select_to_start(&views, max);
+
+    for idx in start_idx {
+        let t = &targets[idx];
+        if cancel_requested(pool, job.id).await? {
+            upgrade_job::update_job_status(pool, job.id, "cancelled", Some("cancel requested"))
+                .await?;
+            return Ok(());
+        }
+        if inflight_contains(t.id) {
+            continue;
+        }
+        upgrade_job::update_target_status(pool, t.id, "running", None).await?;
+        let image = t.image.clone().unwrap_or_else(|| job.image.clone());
+        let controller =
+            ClusterController::with_context(pool.clone(), sqlite_path.to_string(), jwt_secret.to_string());
+        let is_cp = target_is_cp(t);
+        match controller.drain_machine_for_upgrade(t.machine_id).await {
+            Ok(Some(node)) => {
+                if is_cp {
+                    info!(machine = %t.machine_id, node, "cordoned control plane before upgrade");
+                } else {
+                    info!(machine = %t.machine_id, node, "drained worker before upgrade");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                upgrade_job::update_target_status(pool, t.id, "failed", Some(&format!("drain failed: {e}"))).await?;
+                // A controller that failed to cordon is still the machine we must
+                // not skip. Stop starting anything else this tick.
+                if is_cp {
+                    return Ok(());
+                }
+                continue;
+            }
+        }
+        spawn_upgrade_client(pool.clone(), sqlite_path.to_string(), jwt_secret.to_string(), t.id, t.machine_id, image);
     }
     Ok(())
 }
@@ -161,35 +178,258 @@ async fn poll_talos_target(
     pool: &DbPool,
     sqlite_path: &str,
     jwt_secret: &str,
-    job: &upgrade_job::UpgradeJob,
+    _job: &upgrade_job::UpgradeJob,
     t: &UpgradeJobTarget,
+    want: Option<&str>,
 ) -> Result<(), crate::AppError> {
-    let controller =
-        ClusterController::with_context(pool.clone(), sqlite_path.to_string(), jwt_secret.to_string());
-    let Some(want) = job.target_talos_version.as_ref() else {
+    let Some(want) = want else {
         return Ok(());
     };
-    match controller.machine_version(t.machine_id).await {
-        Ok(ver) => {
-            let want_n = norm_v(want);
-            let got_n = norm_v(&ver);
-            if got_n == want_n || got_n.contains(&want_n) || want_n.contains(&got_n) {
-                upgrade_job::update_target_status(pool, t.id, "completed", None).await?;
-                // Node is back — return it to the scheduler.
-                let _ = controller.uncordon_machine(t.machine_id).await;
-                if let Ok(Some(mut m)) = repos::machine::get(pool, t.machine_id).await {
-                    m.talos_version = ver;
-                    m.updated_at = chrono::Utc::now();
-                    let _ = repos::machine::update(pool, &m).await;
+    let controller =
+        ClusterController::with_context(pool.clone(), sqlite_path.to_string(), jwt_secret.to_string());
+    let ver = match controller.machine_version(t.machine_id).await {
+        Ok(ver) => ver,
+        Err(e) => {
+            // Unreachable while rebooting. Keep the slot. Do not mark it failed.
+            clear_stuck_since(t.id);
+            warn!(machine = %t.machine_id, error = %e, "version poll during Talos upgrade");
+            return Ok(());
+        }
+    };
+    let want_n = norm_v(want);
+    let got_n = norm_v(&ver);
+    let version_ok = got_n == want_n || got_n.contains(&want_n) || want_n.contains(&got_n);
+    let is_cp = target_is_cp(t);
+
+    if is_cp {
+        match controller.etcd_healthy(t.machine_id).await {
+            Ok(true) => clear_stuck_since(t.id),
+            Ok(false) => {
+                if stuck_long_enough(t.id) {
+                    let msg = "Talos API is up but etcd has not become healthy; holding this controller";
+                    if t.error.as_deref() != Some(msg) || t.status != "running" {
+                        upgrade_job::update_target_status(pool, t.id, "running", Some(msg)).await?;
+                    }
+                    info!(machine = %t.machine_id, "{msg}");
                 }
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(machine = %t.machine_id, error = %e, "etcd health poll during Talos upgrade");
+                return Ok(());
             }
         }
+    }
+
+    if !version_ok {
+        return Ok(());
+    }
+
+    let ready = match controller.kubernetes_node_ready(t.machine_id).await {
+        Ok(ready) => ready,
         Err(e) => {
-            // Nodes are unreachable while rebooting — not a failure, just not done.
-            warn!(machine = %t.machine_id, error = %e, "version poll during Talos upgrade");
+            warn!(machine = %t.machine_id, error = %e, "node readiness poll during Talos upgrade");
+            return Ok(());
+        }
+    };
+    if !ready {
+        return Ok(());
+    }
+
+    // Uncordon only once the node is Ready. Leave the target running so the
+    // next tick retries when the API was down for the uncordon call.
+    if controller.uncordon_machine(t.machine_id).await.is_err() {
+        warn!(machine = %t.machine_id, "uncordon failed after the node was Ready");
+        return Ok(());
+    }
+    upgrade_job::update_target_status(pool, t.id, "completed", None).await?;
+    if let Ok(Some(mut m)) = repos::machine::get(pool, t.machine_id).await {
+        m.talos_version = ver;
+        m.updated_at = chrono::Utc::now();
+        let _ = repos::machine::update(pool, &m).await;
+    }
+    Ok(())
+}
+
+fn desired_talos_version(job: &upgrade_job::UpgradeJob, targets: &[UpgradeJobTarget]) -> Option<String> {
+    if let Some(v) = job.target_talos_version.as_ref().filter(|v| !v.trim().is_empty()) {
+        return Some(norm_v(v));
+    }
+    let image = targets
+        .iter()
+        .find_map(|t| t.image.as_deref())
+        .unwrap_or(job.image.as_str());
+    version_from_image(image)
+}
+
+fn version_from_image(image: &str) -> Option<String> {
+    let tag = image.rsplit(':').next().unwrap_or("").trim();
+    if tag.is_empty() || tag.contains('/') {
+        return None;
+    }
+    let ok = tag.starts_with('v') || tag.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+    if ok { Some(norm_v(tag)) } else { None }
+}
+
+const UPGRADE_CLIENT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const ETCD_HOLD_AFTER: Duration = Duration::from_secs(10 * 60);
+
+enum ClientFinish {
+    /// Install started, the client timed out, or the node rebooted under the client.
+    RebootInProgress,
+    /// The client failed before the installer started. The slot stays taken.
+    FailedBeforeInstall(String),
+}
+
+static UPGRADE_INFLIGHT: LazyLock<Mutex<HashMap<Uuid, tokio::task::JoinHandle<ClientFinish>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static ETCD_STUCK_SINCE: LazyLock<Mutex<HashMap<Uuid, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn inflight_contains(id: Uuid) -> bool {
+    UPGRADE_INFLIGHT.lock().map(|g| g.contains_key(&id)).unwrap_or(false)
+}
+
+fn spawn_upgrade_client(
+    pool: DbPool,
+    sqlite_path: String,
+    jwt_secret: String,
+    target_id: Uuid,
+    machine_id: Uuid,
+    image: String,
+) {
+    let handle = tokio::spawn(async move {
+        let controller = ClusterController::with_context(pool, sqlite_path, jwt_secret);
+        match tokio::time::timeout(
+            UPGRADE_CLIENT_TIMEOUT,
+            controller.upgrade_machine(machine_id, &image),
+        )
+        .await
+        {
+            Ok(Ok(())) => ClientFinish::RebootInProgress,
+            Ok(Err(e)) => {
+                let msg = e.to_string();
+                if upgrade_failure_is_reboot(&msg) {
+                    ClientFinish::RebootInProgress
+                } else {
+                    ClientFinish::FailedBeforeInstall(msg)
+                }
+            }
+            Err(_) => ClientFinish::RebootInProgress,
+        }
+    });
+    if let Ok(mut guard) = UPGRADE_INFLIGHT.lock() {
+        guard.insert(target_id, handle);
+    }
+    info!(machine = %machine_id, "Talos upgrade client started");
+}
+
+async fn reap_upgrade_clients(pool: &DbPool) -> Result<(), crate::AppError> {
+    let finished: Vec<Uuid> = {
+        let Ok(guard) = UPGRADE_INFLIGHT.lock() else {
+            return Ok(());
+        };
+        guard
+            .iter()
+            .filter(|(_, handle)| handle.is_finished())
+            .map(|(id, _)| *id)
+            .collect()
+    };
+    for id in finished {
+        let Some(handle) = UPGRADE_INFLIGHT.lock().ok().and_then(|mut g| g.remove(&id)) else {
+            continue;
+        };
+        match handle.await {
+            Ok(ClientFinish::RebootInProgress) => {
+                info!(target = %id, "Talos upgrade client finished; waiting for the node to return");
+            }
+            Ok(ClientFinish::FailedBeforeInstall(msg)) => {
+                let current = upgrade_job::get_target(pool, id).await?;
+                if current.as_ref().map(|t| t.status.as_str()) == Some("running") {
+                    let clipped = clip_upgrade_error(&msg);
+                    upgrade_job::update_target_status(pool, id, "failed", Some(&clipped)).await?;
+                    warn!(target = %id, "Talos upgrade failed before the install started");
+                }
+            }
+            Err(e) => warn!(target = %id, error = %e, "Talos upgrade client task stopped"),
         }
     }
     Ok(())
+}
+
+fn clip_upgrade_error(msg: &str) -> String {
+    const MAX: usize = 500;
+    if msg.len() <= MAX {
+        msg.to_string()
+    } else {
+        let mut end = MAX;
+        while end > 0 && !msg.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &msg[..end])
+    }
+}
+
+/// A disconnect after the installer has written the image is the reboot, not a
+/// failed upgrade. Pre-install errors (pull, pre-flight, config) are failures.
+fn upgrade_failure_is_reboot(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    let installed = m.contains("installation of") && m.contains("complete");
+    let rebooting = m.contains("reboot sequence")
+        || m.contains("upgraded successfully")
+        || m.contains("waiting for the machine to reboot");
+    installed || rebooting
+}
+
+fn stuck_long_enough(id: Uuid) -> bool {
+    let Ok(mut guard) = ETCD_STUCK_SINCE.lock() else {
+        return false;
+    };
+    let since = guard.entry(id).or_insert_with(Instant::now);
+    since.elapsed() >= ETCD_HOLD_AFTER
+}
+
+fn clear_stuck_since(id: Uuid) {
+    if let Ok(mut guard) = ETCD_STUCK_SINCE.lock() {
+        guard.remove(&id);
+    }
+}
+
+struct TargetView {
+    is_cp: bool,
+    status: String,
+}
+
+fn target_is_cp(t: &UpgradeJobTarget) -> bool {
+    t.machine_type.as_deref().map(is_cp).unwrap_or(false)
+}
+
+/// Indexes of pending targets to start this tick, in list order.
+///
+/// A control plane that is `running` or `failed` blocks every later target.
+/// At most one control plane is started. Workers use `max_unavailable`.
+fn select_to_start(targets: &[TargetView], max_unavailable: usize) -> Vec<usize> {
+    let cp_blocked = targets
+        .iter()
+        .any(|t| t.is_cp && t.status != "completed" && t.status != "pending");
+    let mut running = targets.iter().filter(|t| t.status == "running").count();
+    let mut selected: Vec<usize> = Vec::new();
+    for (i, t) in targets.iter().enumerate() {
+        if t.status != "pending" {
+            continue;
+        }
+        if running >= max_unavailable || cp_blocked {
+            break;
+        }
+        if t.is_cp {
+            selected.push(i);
+            // One controller at a time, and nothing behind it this tick.
+            break;
+        }
+        selected.push(i);
+        running += 1;
+    }
+    selected
 }
 
 /// When the Talos phase has no active targets, either move on to the k8s phase
@@ -451,6 +691,88 @@ async fn cancel_requested(pool: &DbPool, job_id: Uuid) -> Result<bool, crate::Ap
         .await?
         .map(|j| j.cancel_requested)
         .unwrap_or(false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn view(is_cp: bool, status: &str) -> TargetView {
+        TargetView {
+            is_cp,
+            status: status.to_string(),
+        }
+    }
+
+    #[test]
+    fn failed_controller_occupies_the_slot() {
+        let targets = vec![
+            view(true, "failed"),
+            view(true, "pending"),
+            view(false, "pending"),
+        ];
+        assert!(select_to_start(&targets, 1).is_empty());
+    }
+
+    #[test]
+    fn failed_controller_blocks_the_workers_behind_it() {
+        let targets = vec![view(true, "failed"), view(false, "pending")];
+        assert!(select_to_start(&targets, 1).is_empty());
+    }
+
+    #[test]
+    fn running_controller_blocks_the_next_one() {
+        let targets = vec![view(true, "running"), view(true, "pending")];
+        assert!(select_to_start(&targets, 1).is_empty());
+    }
+
+    #[test]
+    fn controllers_start_before_workers() {
+        let targets = vec![
+            view(true, "pending"),
+            view(true, "pending"),
+            view(false, "pending"),
+        ];
+        assert_eq!(select_to_start(&targets, 1), vec![0]);
+    }
+
+    #[test]
+    fn workers_start_after_controllers_complete() {
+        let targets = vec![
+            view(true, "completed"),
+            view(true, "completed"),
+            view(false, "pending"),
+            view(false, "pending"),
+        ];
+        assert_eq!(select_to_start(&targets, 1), vec![2]);
+    }
+
+    #[test]
+    fn post_install_unavailable_is_a_reboot() {
+        let msg = "installation of v1.13.11 complete\n192.168.7.244: unavailable, retrying...";
+        assert!(upgrade_failure_is_reboot(msg));
+    }
+
+    #[test]
+    fn image_pull_failure_is_not_a_reboot() {
+        let msg = "failed to pull image: manifest unknown";
+        assert!(!upgrade_failure_is_reboot(msg));
+    }
+
+    #[test]
+    fn unmount_failure_before_install_is_not_a_reboot() {
+        let msg = "task: unmountPodMounts action: START";
+        assert!(!upgrade_failure_is_reboot(msg));
+    }
+
+    #[test]
+    fn version_comes_from_the_image_tag() {
+        assert_eq!(
+            version_from_image("factory.talos.dev/metal-installer/abc:v1.13.11").as_deref(),
+            Some("v1.13.11")
+        );
+        assert!(version_from_image("not-an-image").is_none());
+    }
 }
 
 fn norm_v(v: &str) -> String {

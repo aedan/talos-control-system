@@ -535,7 +535,7 @@
       '',
       talosChanged ? '• New Talos version selected.' : '',
       moduleChanged ? '• Module set differs from the cluster default — the new set will be applied.' : '',
-      doingTalos ? '• Talos phase reboots nodes one at a time (workers first).' : '',
+      doingTalos ? '• Talos phase reboots nodes one at a time (controllers first).' : '',
       doingK8s ? `• Kubernetes phase applies in place, no reboots, control-plane first.` : '',
     ]
       .filter(Boolean)
@@ -551,7 +551,7 @@
         k8sVersion: doingK8s ? upgradeK8sVersion : undefined,
         modules: doingTalos ? [...clusterModules] : undefined,
         maxUnavailable: upgradeMaxUnavail,
-        controlPlaneLast: true,
+        controlPlaneLast: false,
       })) as { job?: { id: string }; k8sSteps?: string[] };
       const steps = res.k8sSteps || [];
       if (steps.length > 1) {
@@ -859,7 +859,8 @@
       <summary>Rolling upgrade</summary>
       <p class="sub">
         Choose a new Talos version and/or Kubernetes version, and adjust modules. Talos reboots
-        nodes; Kubernetes applies in place (control-plane first, no reboots).
+        controllers first, then workers. A minor-version change always uses that order.
+        Kubernetes applies in place (control-plane first, no reboots).
       </p>
       {#if targetsError}
         <p class="hint error">{targetsError}</p>
