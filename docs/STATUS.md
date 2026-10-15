@@ -1,6 +1,6 @@
 # TCS Status (Alpha)
 
-**Last updated:** 2026-10-11 · **Release: v0.5.92**
+**Last updated:** 2026-10-15 · **Release: v0.5.93**
 
 Talos Control System is an **alpha** management UI for Talos Linux clusters.
 It runs as a **host systemd service** (or bare binary), **outside** the managed

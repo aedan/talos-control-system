@@ -81,6 +81,10 @@ pub struct ConvertNodeState {
     /// the installed OS (needed before etcd recover).
     #[serde(default)]
     pub installer_gone: bool,
+    /// How many times this node has been sent back to kexec because the disk
+    /// boot returned to the previous OS. One retry, then the node fails.
+    #[serde(default)]
+    pub install_tries: u32,
 }
 
 fn default_cluster_name() -> String {
@@ -110,6 +114,14 @@ pub struct ConvertJobPayload {
     pub node_states: Vec<ConvertNodeState>,
     pub etcd_snapshot_path: Option<String>,
     pub etcd_snapshot_size: i64,
+    /// mvcc revision of `etcd_snapshot_path`, from `etcdctl endpoint status`.
+    /// Zero when the snapshot pre-dates this field.
+    #[serde(default)]
+    pub etcd_snapshot_revision: u64,
+    /// First control plane has accepted `bootstrap --recover-from`. Later
+    /// ticks must not bootstrap again (`AlreadyExists` leaves the data dir).
+    #[serde(default)]
+    pub etcd_bootstrapped: bool,
     /// Talos cluster identity generated ONCE at job start and shared by every
     /// node (the machine CA + cluster secrets must be identical across all CPs
     /// and workers so they join the same Talos control plane). Populated lazily
@@ -130,6 +142,9 @@ pub struct ConvertJobPayload {
     /// has been applied as a kube-system Secret (worker-only overtake).
     #[serde(default)]
     pub bootstrap_token_injected: bool,
+    /// True after the kubelet CSR ClusterRoleBindings have been applied.
+    #[serde(default)]
+    pub bootstrap_rbac_applied: bool,
     /// BMC installer recover: skip SSH kexec, boot the factory ISO/PXE, then
     /// apply-config in maintenance. Used when the node is ping-only (no SSH,
     /// no apid) after a bad STATE rewrite.
@@ -199,8 +214,14 @@ pub struct ConvertClusterIdentity {
     pub service_cidr: String,
     /// Cluster domain, e.g. "cluster.local".
     pub cluster_domain: String,
-    /// Pod CIDR (for the Talos cluster.network; default 10.244.0.0/16).
+    /// Pod CIDR harvested from the running controller-manager
+    /// (`--cluster-cidr`). Falls back to 10.244.0.0/16 only when harvest fails.
     pub pod_cidr: String,
+    /// Upstream NTP servers harvested from chrony or systemd-timesyncd.
+    /// Written to `machine.time.servers` so etcd bootstrap does not wait on
+    /// `time.cloudflare.com` through a dead NodeLocal DNS resolver.
+    #[serde(default)]
+    pub ntp_servers: Vec<String>,
     /// secretbox encryption secret (fresh 32-byte b64 - encrypts the stored
     /// cluster secrets on the node; a fresh value is fine since it only
     /// protects at-rest storage of the CAs we provide).
@@ -681,19 +702,25 @@ impl ConvertController {
                     error: String::new(),
                     attempts: 0,
                     installer_gone: false,
+                    install_tries: 0,
                 })
                 .collect(),
             etcd_snapshot_path: None,
             etcd_snapshot_size: 0,
+            etcd_snapshot_revision: 0,
+            etcd_bootstrapped: false,
             cluster_identity: prior_identity.clone(),
             install_image_override: body.install_image.clone(),
             control_plane_endpoint: body.control_plane_endpoint.clone(),
             bootstrap_token_injected: false,
+            bootstrap_rbac_applied: false,
             bmc_recover: false,
             installer_iso_url: None,
             steps_log: vec![
                 format!("{now} convert job created ({} nodes)", body.nodes.len()),
-                if prior_identity.is_some() {
+                if worker_only {
+                    format!("{now} worker-only convert will adopt the live control plane machine CA and will not mint a new one")
+                } else if prior_identity.is_some() {
                     format!("{now} reusing Talos machine CA from previous convert job")
                 } else {
                     format!("{now} will mint Talos machine CA once at snapshot (shared by all nodes)")
@@ -873,6 +900,7 @@ impl ConvertController {
                 error: String::new(),
                 attempts: 0,
                 installer_gone: false,
+                install_tries: 0,
             });
             plans.push(plan);
         }

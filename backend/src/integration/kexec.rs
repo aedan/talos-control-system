@@ -90,14 +90,25 @@ pub fn standard_asset_urls(mirror_base: &str, version: &str, arch: &str) -> (Str
 /// `extra` allows the caller to append further params.
 pub fn kexec_append(network: &NodeNetworkCapture, hostname: &str, extra: &str) -> String {
     let mut a = String::from(
-        "console=tty0 console=ttyS0,115200 talos.platform=metal slab_nomerge pti=on",
+        "console=tty0 console=ttyS0,115200 talos.platform=metal slab_nomerge pti=on reset_devices panic=10",
     );
 
     // Kernel-level static network so the link is up before Talos userspace.
     if let Some(bond) = network.bonds.first() {
         let mode = talos_bond_mode(&bond.mode);
         let slaves = bond.slaves.join(",");
-        a.push_str(&format!(" bond={}:{}:mode={}", bond.name, slaves, mode));
+        // miimon is required. A switch that never answers LACP leaves every
+        // 802.3ad slave as backup, so the installer owns its address and still
+        // cannot answer ARP. The options match the Ubuntu bond that stays up
+        // on that switch (layer2, miimon 100, fast LACP, stable aggregator).
+        if mode == "802.3ad" {
+            a.push_str(&format!(
+                " bond={}:{}:mode=802.3ad,xmit_hash_policy=layer2,miimon=100,lacp_rate=fast,ad_select=stable",
+                bond.name, slaves
+            ));
+        } else {
+            a.push_str(&format!(" bond={}:{}:mode={},miimon=100", bond.name, slaves, mode));
+        }
         // ip=<client>:<server>:<gw>:<netmask>:<hostname>:<dev>:<autoconf>
         // autoconf=off disables DHCP so the machine stays on its static IP.
         if let Some((ip, cidr)) = address_for_bond(network, bond) {
@@ -339,8 +350,8 @@ magic=$(od -An -tx1 -N4 {initramfs_remote} 2>/dev/null | tr -d ' \\n'); \
 if [ \"$magic\" = 28b52ffd ]; then zstd -d -f -c {initramfs_remote} > $RAW; \
 elif [ \"$magic\" = fd377a58 ]; then unxz -c {initramfs_remote} > $RAW; \
 else cp {initramfs_remote} $RAW; fi && \
-kexec -c -l {kernel_remote} --initrd=$RAW --append='{append}' \
-  || kexec -l {kernel_remote} --initrd=$RAW --append='{append}'; \
+( kexec -c -l {kernel_remote} --initrd=$RAW --append='{append}' \
+  || kexec -l {kernel_remote} --initrd=$RAW --append='{append}' ) && \
 kexec -e"
         )
     }
@@ -348,6 +359,49 @@ kexec -e"
 
 const KERNEL_REMOTE: &str = "/tmp/tcs-kexec-vmlinuz";
 const INITRAMFS_REMOTE: &str = "/tmp/tcs-kexec-initramfs";
+
+/// Boot the installer with a one-shot GRUB entry and a real reboot.
+///
+/// `kexec -e` leaves some NICs (ixgbe on `931314-ceph04`) with no link, so
+/// the installer never answers. A firmware reboot re-inits the device. The
+/// entry is index 0 for one boot; the saved default stays the disk OS.
+pub fn grub_reboot_command(kernel_remote: &str, initramfs_remote: &str, append: &str) -> String {
+    format!(
+        "PATH=/usr/sbin:/usr/bin:/sbin:/bin; set -e; \
+mkdir -p /boot/tcs-installer; \
+cp {kernel} /boot/tcs-installer/vmlinuz; \
+RAW=/boot/tcs-installer/initrd; \
+magic=$(od -An -tx1 -N4 {init} 2>/dev/null | tr -d ' \\n'); \
+if [ \"$magic\" = 28b52ffd ]; then zstd -d -f -c {init} > \"$RAW\"; \
+elif [ \"$magic\" = fd377a58 ]; then unxz -c {init} > \"$RAW\"; \
+else cp {init} \"$RAW\"; fi; \
+mp=$(findmnt -T /boot -no TARGET || echo /); \
+if [ \"$mp\" = /boot ]; then prefix=; else prefix=/boot; fi; \
+cat > /etc/grub.d/09_tcs_talos << EOF\n\
+#!/bin/sh\n\
+cat << END\n\
+menuentry 'tcs-talos-installer' {{\n\
+  linux ${{prefix}}/tcs-installer/vmlinuz {append}\n\
+  initrd ${{prefix}}/tcs-installer/initrd\n\
+}}\n\
+END\n\
+EOF\n\
+chmod 755 /etc/grub.d/09_tcs_talos; \
+if grep -q '^GRUB_DEFAULT=' /etc/default/grub; then sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub; \
+else echo GRUB_DEFAULT=saved >> /etc/default/grub; fi; \
+update-grub; \
+grub-set-default 1 || true; \
+grub-reboot 0; \
+sync; \
+echo tcs-reboot; \
+reboot; \
+sleep 20; \
+echo tcs-reboot-stayed",
+        kernel = kernel_remote,
+        init = initramfs_remote,
+        append = append,
+    )
+}
 
 /// Transfer the boot assets to the node and kexec into the installer.
 ///
@@ -363,17 +417,51 @@ pub async fn kexec_node(
     if !assets.initramfs_path.is_empty() {
         ssh.scp_to(host, Path::new(&assets.initramfs_path), INITRAMFS_REMOTE).await?;
     }
-    let init = if assets.initramfs_path.is_empty() { String::new() } else { INITRAMFS_REMOTE.to_string() };
-    let o = ssh
-        .run_capture(host, &kexec_command(KERNEL_REMOTE, &init, append))
-        .await?;
-    // kexec -e reboots the host; the ssh connection is torn down mid-command,
-    // so `ok` is often false. Only treat it as a hard failure if the failure
-    // happened *before* the reboot (a real kexec error message).
-    if !o.ok && looks_like_kexec_error(&o.stderr) {
-        return Err(AppError::Network(format!("kexec failed on {host}: {}", o.stderr.trim())));
+    let init = if assets.initramfs_path.is_empty() {
+        String::new()
+    } else {
+        INITRAMFS_REMOTE.to_string()
+    };
+    // A separate initrd can be booted by the disk GRUB. That is a real reboot,
+    // which re-inits NICs that stay down across kexec. The combined UEFI image
+    // still uses kexec.
+    let cmdline = if init.is_empty() {
+        kexec_command(KERNEL_REMOTE, &init, append)
+    } else {
+        grub_reboot_command(KERNEL_REMOTE, &init, append)
+    };
+    let o = ssh.run_capture(host, &cmdline).await?;
+    if o.stdout.contains("tcs-reboot-stayed") {
+        return Err(AppError::Network(format!(
+            "installer reboot did not happen on {host}: {}",
+            o.stderr.trim()
+        )));
+    }
+    // The reboot drops SSH, so `ok` is often false. A finished command that
+    // never printed the reboot marker is a real failure.
+    let rebooted = o.stdout.contains("tcs-reboot") || connection_dropped(&o.stderr);
+    if !o.ok && !rebooted {
+        return Err(AppError::Network(format!(
+            "installer boot failed on {host}: {} {}",
+            o.stdout.trim(),
+            o.stderr.trim()
+        )));
+    }
+    if !o.ok && looks_like_kexec_error(&o.stderr) && !rebooted {
+        return Err(AppError::Network(format!(
+            "kexec failed on {host}: {}",
+            o.stderr.trim()
+        )));
     }
     Ok(())
+}
+
+fn connection_dropped(stderr: &str) -> bool {
+    let s = stderr.to_lowercase();
+    s.contains("connection reset")
+        || s.contains("closed by remote")
+        || s.contains("broken pipe")
+        || s.contains("kex_exchange")
 }
 
 fn looks_like_kexec_error(stderr: &str) -> bool {
@@ -760,12 +848,32 @@ mod tests {
     }
 
     #[test]
+    fn grub_reboot_command_cold_boots_installer() {
+        let c = grub_reboot_command(
+            "/tmp/tcs-kexec-vmlinuz",
+            "/tmp/tcs-kexec-initramfs",
+            "bond=bond0:eno1,eno2,eno3:mode=802.3ad reset_devices",
+        );
+        assert!(c.contains("28b52ffd"));
+        assert!(c.contains("/boot/tcs-installer/vmlinuz"));
+        assert!(c.contains("menuentry 'tcs-talos-installer'"));
+        assert!(c.contains("bond=bond0:eno1,eno2,eno3:mode=802.3ad"));
+        assert!(c.contains("update-grub"));
+        assert!(c.contains("grub-reboot 0"));
+        assert!(c.contains("echo tcs-reboot"));
+        assert!(c.contains("echo tcs-reboot-stayed"));
+        assert!(!c.contains("kexec -e"));
+    }
+
+    #[test]
     fn kexec_command_shape_separate_initrd() {
         let c = kexec_command("/tmp/vmlinuz", "/tmp/initramfs.xz", "console=ttyS0");
         assert!(c.contains("kexec -c -l /tmp/vmlinuz"));
         assert!(c.contains("--initrd=$RAW"));
         assert!(c.contains("28b52ffd"));
+        assert!(c.contains(") &&"));
         assert!(c.ends_with("kexec -e"));
+        assert!(!c.contains("; kexec -e") && !c.contains(";\nkexec -e"));
     }
 
     #[test]
@@ -783,6 +891,10 @@ mod tests {
         assert!(a.contains("talos.platform=metal"));
         assert!(a.contains("slab_nomerge"));
         assert!(a.contains("pti=on"));
+        // ixgbe (and some other NICs) stay down after kexec unless the new
+        // kernel resets the PCI device. panic=10 returns a wedged kexec to disk.
+        assert!(a.contains("reset_devices"));
+        assert!(a.contains("panic=10"));
     }
 
     #[test]
@@ -798,7 +910,9 @@ mod tests {
             ovs_bridges: vec![],
         };
         let a = kexec_append(&net, "host1", "");
-        assert!(a.contains("bond=bond0:eno1,eno2:mode=802.3ad"));
+        assert!(a.contains(
+            "bond=bond0:eno1,eno2:mode=802.3ad,xmit_hash_policy=layer2,miimon=100,lacp_rate=fast,ad_select=stable"
+        ));
         assert!(a.contains("ip=172.20.0.38::172.20.0.1:255.255.255.0:host1:bond0:off"));
         // No talos.config.early: the kernel ip=/bond= params carry the network,
         // and the full config is pushed via apply-config in the install phase.

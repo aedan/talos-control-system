@@ -1,6 +1,6 @@
 # Talos Control System
 
-**Status: Alpha (v0.5.92)** — see [docs/STATUS.md](docs/STATUS.md) and [CHANGELOG.md](CHANGELOG.md).
+**Status: Alpha (v0.5.93)** — see [docs/STATUS.md](docs/STATUS.md) and [CHANGELOG.md](CHANGELOG.md).
 
 **Talos Control System (TCS)** is a self-hosted web UI for managing [Talos Linux](https://www.talos.dev/) clusters. Import existing clusters, inventory machines, apply config patches, take etcd snapshots, and run limited machine actions over the Talos gRPC API.
 
@@ -59,7 +59,7 @@ cd backend && cargo run -- serve
 ```bash
 # After a release is published:
 curl -fsSL -o tcs-install.sh \
-  "https://github.com/aedan/talos-control-system/releases/download/v0.5.92/tcs-0.5.92-linux-x86_64.sh"
+  "https://github.com/aedan/talos-control-system/releases/download/v0.5.93/tcs-0.5.93-linux-x86_64.sh"
 chmod +x tcs-install.sh
 sudo ./tcs-install.sh
 ```

@@ -29,6 +29,13 @@ use crate::utils::secrets;
 use crate::AppError;
 
 const BACKUP_SUBDIR: &str = "convert";
+/// 5s ticks. Kube-OVN image pulls have taken longer than 30 minutes on this
+/// cluster, and the node became Ready after the job had already failed it.
+/// NotReady is not success, so the wait is an hour.
+const JOIN_READY_ATTEMPTS: u32 = 720;
+/// After the installer leaves, wait this many ticks before calling the node
+/// offline. A disk boot that instead answers on ssh is the previous OS.
+const DISK_BOOT_OFFLINE_ATTEMPTS: u32 = 240;
 
 pub fn spawn_convert_scheduler(
     pool: DbPool,
@@ -91,12 +98,26 @@ async fn run_one(
     let sshc = SshClient::new(ssh.clone());
 
     match payload.phase.as_str() {
-        "snapshot" => step_snapshot(pool, sqlite_path, jwt_secret, &sshc, &mut payload, cluster_id).await?,
+        "snapshot" => {
+            if let Err(e) = step_snapshot(pool, sqlite_path, jwt_secret, &sshc, &mut payload, cluster_id).await {
+                let msg = e.to_string();
+                // A worker-only job must not sit in snapshot minting a second
+                // machine CA. Fail the job so the next tick does not kexec.
+                if msg.contains("will not mint") {
+                    payload.log(&msg);
+                    finish(pool, job.id, &payload, "failed", Some(&msg)).await?;
+                    return Ok(());
+                }
+                return Err(e);
+            }
+        }
         "control-plane" => step_node_phase(pool, jwt_secret, &sshc, factory, metal_pxe, &mut payload, cluster_id, "control-plane").await?,
         "workers" => step_node_phase(pool, jwt_secret, &sshc, factory, metal_pxe, &mut payload, cluster_id, "workers").await?,
         "adopt" => step_adopt(pool, jwt_secret, &mut payload, cluster_id).await?,
         "done" => {
-            finish(pool, job.id, &payload, "complete", None).await?;
+            let err = payload.last_error();
+            let status = if err.is_some() { "failed" } else { "complete" };
+            finish(pool, job.id, &payload, status, err.as_deref()).await?;
             return Ok(());
         }
         other => {
@@ -146,13 +167,17 @@ async fn step_snapshot(
 ) -> Result<(), AppError> {
     // Mint or reuse the Talos machine CA before any kexec so a worker canary
     // and a later CP convert share one identity (payload may already hold a
-    // prior job's CA from start()).
-    if payload.cluster_identity.is_none() {
+    // prior job's CA from start()). A worker-only job adopts the CA that the
+    // already-converted control plane is serving. Minting here is what splits
+    // the fleet.
+    if is_worker_only(payload) {
+        adopt_live_control_plane_identity(pool, jwt_secret, payload, cluster_id).await?;
+    } else if payload.cluster_identity.is_none() {
         let k8s_ca = stored_kubeconfig_ca(pool, jwt_secret, cluster_id)
             .await
             .unwrap_or_default();
         let kube_server = stored_kubeconfig_server(pool, jwt_secret, cluster_id).await;
-        let _ = ensure_cluster_identity(sshc, payload, &k8s_ca, kube_server.as_deref()).await;
+        ensure_cluster_identity(sshc, payload, &k8s_ca, kube_server.as_deref()).await?;
     }
     persist_convert_talosconfig(pool, jwt_secret, cluster_id, payload).await;
     if payload.etcd_snapshot_path.is_some() {
@@ -218,6 +243,14 @@ ETCDCTL_API=3 etcdctl snapshot save {remote} \
   --endpoints=https://127.0.0.1:2379 \
   --cacert="$CA" --cert="$CERT" --key="$KEY" --write-out=table
 ls -l {remote}
+REV=$(ETCDCTL_API=3 etcdctl endpoint status -w json --endpoints=https://127.0.0.1:2379 --cacert="$CA" --cert="$CERT" --key="$KEY" 2>/dev/null | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin)
+    row=d[0] if isinstance(d, list) else d
+    print(row["Status"]["header"]["revision"])
+except Exception:
+    pass')
+echo "TCS_REV=${{REV}}"
 "#,
             remote = remote
         )
@@ -227,8 +260,9 @@ ls -l {remote}
         let local = root.join(cluster_id.to_string()).join(format!("convert-{}.db", Utc::now().format("%Y%m%d%H%M%S")));
         let remote = format!("/tmp/tcs-convert-etcd-{}.db", Utc::now().format("%Y%m%d%H%M%S%f"));
         payload.set_state(&cp.name, "snapshot", "etcdctl snapshot save", "");
+        let mut snap_stdout = String::new();
         match sshc.run_capture(&cp.address, &probe(&remote)).await {
-            Ok(o) if o.ok => {}
+            Ok(o) if o.ok => snap_stdout = o.stdout,
             Ok(o) if o.stdout.contains("CONVERTED") => {
                 payload.log(&format!("{} is already Talos (no kubespray etcd layout); trying next CP", cp.name));
                 payload.set_state(&cp.name, "pending", "", "");
@@ -255,10 +289,14 @@ ls -l {remote}
         };
         payload.etcd_snapshot_path = Some(local.to_string_lossy().to_string());
         payload.etcd_snapshot_size = size as i64;
+        payload.etcd_snapshot_revision = parse_tcs_rev(&snap_stdout);
         // TLS etcd (kubespray): the snapshot's member list carries https peer
         // URLs; etcd recovery must restore+reconfigure it (flag for recover).
         payload.etcd_tls = true;
-        payload.log(&format!("etcd snapshot saved from {} ({} bytes, TLS)", cp.name, size));
+        payload.log(&format!(
+            "etcd snapshot saved from {} ({} bytes, revision {}, TLS)",
+            cp.name, size, payload.etcd_snapshot_revision
+        ));
         payload.set_state(&cp.name, "pending", "", "");
         // Register as a ClusterBackup row (reuses the backup machinery + retention).
         let _ = (pool, jwt_secret);
@@ -272,6 +310,14 @@ ls -l {remote}
 fn fail_node(payload: &mut ConvertJobPayload, name: &str, step: &str, error: &str) {
     payload.set_state(name, "failed", step, error);
     payload.log(&format!("PHASE FAILED: {name} at {step}: {error}"));
+}
+
+fn parse_tcs_rev(stdout: &str) -> u64 {
+    stdout
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("TCS_REV="))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 fn backup_root(sqlite_path: &str) -> std::path::PathBuf {
@@ -343,9 +389,18 @@ async fn step_node_phase(
                     }
                 }
             } else {
-                payload.set_state(&node.name, "kexec", "transferring installer + kexec", "");
-                payload.log(&format!("kexec-ing {} into Talos installer", node.name));
-                do_kexec(sshc, factory, metal_pxe, payload, &node).await;
+                let (talos, ready) = kube_node_os_ready(pool, jwt_secret, cluster_id, &node.name).await;
+                if talos && ready && node.role == "worker" {
+                    payload.set_state(&node.name, "done", "already kubectl Ready on Talos", "");
+                    payload.log(&format!(
+                        "{} already kubectl Ready on Talos; not reinstalling",
+                        node.name
+                    ));
+                } else {
+                    payload.set_state(&node.name, "kexec", "transferring installer + kexec", "");
+                    payload.log(&format!("kexec-ing {} into Talos installer", node.name));
+                    do_kexec(sshc, factory, metal_pxe, payload, &node).await;
+                }
             }
         }
         "kexec" => match probe_talos_up(&node.address).await {
@@ -410,21 +465,44 @@ async fn step_node_phase(
                 .map(|s| s.installer_gone)
                 .unwrap_or(false);
             if apid && !installer_gone {
-                // Still the live installer (apply-config often returns without
-                // rebooting). Do not recover/configure until apid has dropped.
-                let attempts = bump_attempts(payload, &node.name);
-                if attempts > 60 {
-                    fail_node(
-                        payload,
-                        &node.name,
-                        "reboot",
-                        "installer apid never dropped after apply-config",
-                    );
-                } else {
+                // apply-config -m reboot often returns before the reboot, and a
+                // fast reboot is back on :50000 before the next tick, so the
+                // port never looks down. An authenticated version call only
+                // succeeds once the installed machine config is running.
+                // Maintenance mode rejects that certificate.
+                let installed = !is_first_cp
+                    && (installed_apid_authenticated(payload, &node.address).await
+                        || (kubelet && kube_node_is_talos(pool, jwt_secret, cluster_id, &node.name).await));
+                if installed {
+                    if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == node.name) {
+                        s.installer_gone = true;
+                        s.attempts = 0;
+                    }
+                    enter_join(payload, &node.name);
+                    let _ = label_converted_node(pool, jwt_secret, cluster_id, &node.name, payload).await;
                     payload.log(&format!(
-                        "{} installer still up; waiting for reboot off disk ({attempts}/60)",
+                        "{} installed Talos is up; waiting for kubectl Ready",
                         node.name
                     ));
+                } else {
+                    // Do not send a second reboot. A maintenance reboot while
+                    // apply-config is still writing the disk boots the previous
+                    // OS. Wait until the installer leaves on its own, or until
+                    // an authenticated apid shows the installed system.
+                    let attempts = bump_attempts(payload, &node.name);
+                    if attempts > 120 {
+                        fail_node(
+                            payload,
+                            &node.name,
+                            "reboot",
+                            "installer apid never dropped after apply-config",
+                        );
+                    } else {
+                        payload.log(&format!(
+                            "{} installer still up; waiting for reboot off disk ({attempts}/120)",
+                            node.name
+                        ));
+                    }
                 }
             } else if !apid {
                 if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == node.name) {
@@ -435,25 +513,45 @@ async fn step_node_phase(
                     }
                 }
                 let attempts = bump_attempts(payload, &node.name);
-                if attempts > 120 {
-                    fail_node(
-                        payload,
-                        &node.name,
-                        "reboot",
-                        "Talos apid :50000 never came back after install reboot",
-                    );
-                } else if kubelet && !is_first_cp {
-                    // fall through below via nested - actually kubelet while apid down
-                    let _ = inject_bootstrap_token(pool, jwt_secret, cluster_id, payload).await;
-                    let _ = issue_kubelet_csrs(pool, jwt_secret, cluster_id, payload).await;
-                    if kube_node_is_talos(pool, jwt_secret, cluster_id, &node.name).await {
-                        payload.set_state(&node.name, "done", "joined Kubernetes as Talos", "");
-                        payload.log(&format!("{} kubelet up and node OS is Talos; done (apid not required for worker-only)", node.name));
+                if kubelet && !is_first_cp && kube_node_is_talos(pool, jwt_secret, cluster_id, &node.name).await {
+                    // OS image flipped to Talos. Do not mark the node done yet:
+                    // kubectl Ready waits on the CNI, and the Talos Kube-OVN
+                    // DaemonSet only schedules after the label is set.
+                    enter_join(payload, &node.name);
+                    let _ = label_converted_node(pool, jwt_secret, cluster_id, &node.name, payload).await;
+                    payload.log(&format!(
+                        "{} OS is Talos; waiting for kubectl Ready before the next node",
+                        node.name
+                    ));
+                } else if attempts > 120 {
+                    let ssh_up = probe_tcp(&node.address, 22).await;
+                    if ssh_up && retry_install_once(payload, &node.name) {
+                        payload.log(&format!(
+                            "{} disk boot answered on ssh with no apid; retrying the install once",
+                            node.name
+                        ));
+                    } else if ssh_up {
+                        fail_node(
+                            payload,
+                            &node.name,
+                            "reboot",
+                            "disk boot returned to the previous OS after one install retry",
+                        );
+                    } else if attempts > DISK_BOOT_OFFLINE_ATTEMPTS {
+                        fail_node(
+                            payload,
+                            &node.name,
+                            "reboot",
+                            "node did not come back on the network after install reboot",
+                        );
                     } else {
-                        payload.log(&format!("{} still rebooting into Talos (kubelet up, waiting join) ({attempts}/120)", node.name));
+                        payload.log(&format!(
+                            "{} still offline after install reboot ({attempts}/{DISK_BOOT_OFFLINE_ATTEMPTS})",
+                            node.name
+                        ));
                     }
                 } else {
-                    payload.log(&format!("{} still rebooting into Talos", node.name));
+                    payload.log(&format!("{} still rebooting into Talos ({attempts}/120)", node.name));
                 }
             } else {
                 // apid up AND installer has gone down once → installed OS.
@@ -474,8 +572,17 @@ async fn step_node_phase(
         }
         "configure" => match do_post_boot_apply(pool, jwt_secret, factory, sshc, payload, cluster_id, &node).await {
             Ok(()) => {
-                payload.set_state(&node.name, "done", "machine config applied", "");
-                payload.log(&format!("{} captured network applied to running Talos", node.name));
+                if is_first_cp {
+                    payload.set_state(&node.name, "done", "machine config applied", "");
+                    payload.log(&format!("{} captured network applied to running Talos", node.name));
+                } else {
+                    enter_join(payload, &node.name);
+                    let _ = label_converted_node(pool, jwt_secret, cluster_id, &node.name, payload).await;
+                    payload.log(&format!(
+                        "{} captured network applied; waiting for kubectl Ready",
+                        node.name
+                    ));
+                }
             }
             Err(e) => {
                 let msg = e.to_string();
@@ -500,11 +607,40 @@ async fn step_node_phase(
                 }
             }
         },
+        "join" => {
+            let _ = inject_bootstrap_token(pool, jwt_secret, cluster_id, payload).await;
+            let _ = ensure_kubelet_bootstrap_rbac(pool, jwt_secret, cluster_id, payload).await;
+            let _ = issue_kubelet_csrs(pool, jwt_secret, cluster_id, payload).await;
+            let _ = label_converted_node(pool, jwt_secret, cluster_id, &node.name, payload).await;
+            let (talos, ready) = kube_node_os_ready(pool, jwt_secret, cluster_id, &node.name).await;
+            if talos && ready {
+                payload.set_state(&node.name, "done", "kubectl Ready on Talos", "");
+                payload.log(&format!("{} kubectl Ready on Talos", node.name));
+            } else {
+                let attempts = bump_attempts(payload, &node.name);
+                if attempts > JOIN_READY_ATTEMPTS {
+                    fail_node(
+                        payload,
+                        &node.name,
+                        "join",
+                        "kubectl Ready never became true after the node reported Talos",
+                    );
+                } else {
+                    payload.log(&format!(
+                        "{} waiting for kubectl Ready (talos={talos} ready={ready}) ({attempts}/{JOIN_READY_ATTEMPTS})",
+                        node.name
+                    ));
+                }
+            }
+        }
         "recover" => match do_first_cp_recover(pool, jwt_secret, sshc, payload, cluster_id, &node).await {
             Ok(()) => {
                 persist_convert_talosconfig(pool, jwt_secret, cluster_id, payload).await;
                 payload.set_state(&node.name, "done", "control plane up", "");
-                payload.log(&format!("{} control plane up (etcd recovered + bootstrapped)", node.name));
+                payload.log(&format!(
+                    "{} control plane up (etcd status confirmed and node OS is Talos)",
+                    node.name
+                ));
             }
             Err(e) => {
                 let msg = e.to_string();
@@ -515,6 +651,7 @@ async fn step_node_phase(
                 let transient = msg.contains("not ready for recovery")
                     || msg.contains("FailedPrecondition")
                     || msg.contains("etcd service is not ready")
+                    || msg.contains("waiting for kubelet")
                     || msg.contains("connection refused")
                     || msg.contains("Unavailable")
                     || msg.contains("dial tcp");
@@ -691,8 +828,27 @@ fn do_kexec<'a>(
 ) -> impl std::future::Future<Output = ()> + 'a {
     async move {
         let arch = "amd64"; // TODO: detect per node
+        match sshc
+            .run_capture(
+                &node.address,
+                "PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v kexec",
+            )
+            .await
+        {
+            Ok(o) if o.ok && !o.stdout.trim().is_empty() => {}
+            _ => {
+                fail_node(
+                    payload,
+                    &node.name,
+                    "kexec",
+                    "kexec binary not found. Install kexec-tools on the node before convert (Ubuntu: echo 'kexec-tools kexec-tools/load_kexec boolean false' | debconf-set-selections && apt-get install -y kexec-tools). /usr/sbin must be on PATH.",
+                );
+                return;
+            }
+        }
         let mut node = node.clone();
         refresh_node_network(sshc, payload, &mut node).await;
+        node.network.dns.retain(|d| crate::integration::network_capture::usable_nameserver(d));
         if !network_usable(&node.network) {
             fail_node(
                 payload,
@@ -781,6 +937,20 @@ fn bump_attempts(payload: &mut ConvertJobPayload, name: &str) -> u32 {
 /// healthy maintenance-mode installer look dead forever. A bare
 /// `connect(address)` targets TCP/80, which Talos never opens, so we must
 /// append the explicit port.
+/// True when the installed node accepts the cluster machine CA. The
+/// maintenance installer rejects that client certificate.
+async fn installed_apid_authenticated(payload: &ConvertJobPayload, address: &str) -> bool {
+    let Some(ident) = payload.cluster_identity.as_ref() else {
+        return false;
+    };
+    if ident.machine_ca_crt.is_empty() || ident.admin_cert.is_empty() || ident.admin_key.is_empty() {
+        return false;
+    }
+    let tc = build_node_talosconfig(ident, address);
+    let args = ["version".to_string()];
+    TalosctlClient::run_raw(&args, Some(&tc)).await.is_ok()
+}
+
 async fn probe_talos_up(address: &str) -> Result<bool, AppError> {
     Ok(probe_tcp(address, 50000).await)
 }
@@ -921,8 +1091,14 @@ async fn node_machine_config(
     let kube_server = stored_kubeconfig_server(pool, jwt_secret, cluster_id).await;
     let ident = ensure_cluster_identity(sshc, payload, &k8s_ca, kube_server.as_deref()).await?;
     let _ = inject_bootstrap_token(pool, jwt_secret, cluster_id, payload).await;
+    let _ = ensure_kubelet_bootstrap_rbac(pool, jwt_secret, cluster_id, payload).await;
+    retarget_endpoint_off_converting_node(payload, node);
     let ident = payload.cluster_identity.clone().unwrap_or(ident);
     let network_yaml = render_node_network_yaml(&node.network, &node.name);
+    // The installer GRUB written by `install.extraKernelArgs` does not inherit
+    // the kexec/GRUB append. Copy the same bond=, ip=, reset_devices, and
+    // panic= lines so the installed system comes up on the captured address.
+    let install_cmdline = kexec::kexec_append(&node.network, &node.name, "");
 
     let cfg = build_install_config(
         machine_type,
@@ -938,6 +1114,7 @@ async fn node_machine_config(
         &node.kubelet_cert,
         &node.kubelet_key,
         with_install,
+        &install_cmdline,
     );
     // Debug: log the network section (where YAML decode errors land) so a
     // malformed block is visible in the job log without dumping the whole
@@ -951,6 +1128,34 @@ async fn node_machine_config(
         .collect();
     payload.log(&format!("{} install network section:\n{}", node.name, net_lines.join("\n")));
     Ok(cfg)
+}
+
+/// Args already written into `install.extraKernelArgs` before the installer
+/// cmdline is copied. `console=tty0` and `talos.platform=metal` stay on the
+/// installer boot only; the installed GRUB keeps the serial consoles above.
+const INSTALL_CMDLINE_ALREADY: &[&str] = &[
+    "console=tty0",
+    "console=ttyS0,115200",
+    "console=ttyS1,115200",
+    "talos.platform=metal",
+    "slab_nomerge",
+    "pti=on",
+];
+
+/// Copy installer cmdline tokens the installed GRUB would otherwise drop.
+/// Values that contain `:` (`bond=`, `ip=`) are quoted so YAML does not split them.
+fn push_install_cmdline(cfg: &mut String, install_cmdline: &str) {
+    for token in install_cmdline.split_whitespace() {
+        if INSTALL_CMDLINE_ALREADY.iter().any(|known| *known == token) {
+            continue;
+        }
+        if token.contains(':') || token.contains('#') || token.contains('"') {
+            let escaped = token.replace('\\', "\\\\").replace('"', "\\\"");
+            cfg.push_str(&format!("      - \"{escaped}\"\n"));
+        } else {
+            cfg.push_str(&format!("      - {token}\n"));
+        }
+    }
 }
 
 /// Build the installer maintenance-mode machine config (bare root v1alpha1 form)
@@ -980,6 +1185,7 @@ fn build_install_config(
     kubelet_cert: &str,
     kubelet_key: &str,
     with_install: bool,
+    install_cmdline: &str,
 ) -> String {
     let mut cfg = String::new();
     cfg.push_str("version: v1alpha1\n");
@@ -992,6 +1198,28 @@ fn build_install_config(
     // 2-space `network:` key under `machine:`. Do NOT add indentation (the
     // earlier +2 over-indented and broke the YAML block mapping).
     cfg.push_str(network_yaml);
+    // Pin kubelet (and, on control planes, etcd) to the node's infrastructure
+    // subnet. Kube-OVN's join CIDR (often 100.64.0.0/16) otherwise becomes
+    // the node InternalIP and the etcd peer URL.
+    let infra_subnet = first_node_subnet(network_yaml);
+    if let Some(subnet) = infra_subnet.as_deref() {
+        cfg.push_str("  kubelet:\n");
+        cfg.push_str("    nodeIP:\n");
+        cfg.push_str("      validSubnets:\n");
+        cfg.push_str(&format!("        - {subnet}\n"));
+    }
+    if !ident.ntp_servers.is_empty() {
+        cfg.push_str("  time:\n");
+        cfg.push_str("    disabled: false\n");
+        cfg.push_str("    servers:\n");
+        for server in &ident.ntp_servers {
+            let server = server.trim();
+            if server.is_empty() {
+                continue;
+            }
+            cfg.push_str(&format!("      - {server}\n"));
+        }
+    }
     // CA fields are base64-of-PEM on a single line (matches the proven
     // greenfield provision format and what the v1.13 installer decoder accepts;
     // a raw PEM block scalar fails with "illegal base64 data").
@@ -1018,12 +1246,16 @@ fn build_install_config(
         // GRUB config written by the installer does NOT inherit those params.
         // NOTE: iLO4 SOL runs at 115200 baud; a bare console=ttyS0 defaults to
         // 9600 and produces silent SOL after GRUB handoff. Always set the baud.
+        // The same gap drops bond= and ip=. Without them the installed kernel
+        // boots with no static address, and an 802.3ad bond that never hears
+        // LACP stays down.
         cfg.push_str("    extraKernelArgs:\n");
         cfg.push_str("      - console=ttyS0,115200\n");
         // iLO4 SOL is often COM2 (ttyS1); ttyS0-only left SOL silent on phobos.
         cfg.push_str("      - console=ttyS1,115200\n");
         cfg.push_str("      - slab_nomerge\n");
         cfg.push_str("      - pti=on\n");
+        push_install_cmdline(&mut cfg, install_cmdline);
     }
     // Cluster identity. For an OVERTAKE the CP must carry the ORIGINAL cluster
     // PKI (k8s CA + key, aggregator/front-proxy CA + key, service-account key)
@@ -1087,10 +1319,7 @@ fn build_install_config(
                 b64(&ident.etcd_ca_key_orig),
             )
         };
-        cfg.push_str("  etcd:\n");
-        cfg.push_str("    ca:\n");
-        cfg.push_str(&format!("      crt: {etcd_crt}\n"));
-        cfg.push_str(&format!("      key: {etcd_key}\n"));
+        push_etcd_ca(&mut cfg, &etcd_crt, &etcd_key, infra_subnet.as_deref());
     } else {
         // Worker (or CP without original identity): trust the cluster CA only.
         if !k8s_crt.is_empty() {
@@ -1101,14 +1330,416 @@ fn build_install_config(
             // CP always needs an etcd CA (fresh when original unknown).
             let etcd_crt = crate::controllers::provision::b64_le(&ident.etcd_ca_crt);
             let etcd_key = crate::controllers::provision::b64_le(&ident.etcd_ca_key);
-            cfg.push_str("  etcd:\n");
-            cfg.push_str("    ca:\n");
-            cfg.push_str(&format!("      crt: {etcd_crt}\n"));
-            cfg.push_str(&format!("      key: {etcd_key}\n"));
+            push_etcd_ca(&mut cfg, &etcd_crt, &etcd_key, infra_subnet.as_deref());
         }
     }
     cfg.push_str("\n");
     cfg
+}
+
+fn push_etcd_ca(cfg: &mut String, crt: &str, key: &str, subnet: Option<&str>) {
+    cfg.push_str("  etcd:\n");
+    if let Some(subnet) = subnet {
+        cfg.push_str("    advertisedSubnets:\n");
+        cfg.push_str(&format!("      - {subnet}\n"));
+    }
+    cfg.push_str("    ca:\n");
+    cfg.push_str(&format!("      crt: {crt}\n"));
+    cfg.push_str(&format!("      key: {key}\n"));
+}
+
+/// First IPv4 address in a rendered machine.network block, masked to its prefix.
+/// Skips loopback and link-local. This is the infrastructure subnet etcd and
+/// kubelet must advertise on (not the CNI join range).
+fn first_node_subnet(network_yaml: &str) -> Option<String> {
+    for line in network_yaml.lines() {
+        let t = line.trim().trim_start_matches("- ").trim();
+        let Some((ip, pref)) = t.split_once('/') else { continue };
+        if ip.split('.').count() != 4 || ip.starts_with("127.") || ip.starts_with("169.254.") {
+            continue;
+        }
+        let Ok(prefix) = pref.trim().parse::<u32>() else { continue };
+        if let Some(net) = ipv4_subnet(ip, prefix) {
+            return Some(net);
+        }
+    }
+    None
+}
+
+fn ipv4_subnet(ip: &str, prefix: u32) -> Option<String> {
+    if prefix == 0 || prefix > 32 {
+        return None;
+    }
+    let mut octets = [0u8; 4];
+    for (i, part) in ip.split('.').enumerate() {
+        if i >= 4 {
+            return None;
+        }
+        octets[i] = part.parse().ok()?;
+    }
+    let addr = u32::from_be_bytes(octets);
+    let mask = u32::MAX << (32 - prefix);
+    let net = (addr & mask).to_be_bytes();
+    Some(format!("{}.{}.{}.{}/{}", net[0], net[1], net[2], net[3], prefix))
+}
+
+fn endpoint_host(endpoint: &str) -> String {
+    endpoint
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+/// The node about to be installed cannot stay as controlPlane.endpoint.
+/// Point at a control plane that is already done.
+fn retarget_endpoint_off_converting_node(payload: &mut ConvertJobPayload, node: &ConvertNodePlan) {
+    let Some(ident) = payload.cluster_identity.as_ref() else { return };
+    if endpoint_host(&ident.control_plane_endpoint) != node.address {
+        return;
+    }
+    let alt = payload.nodes.iter().find(|n| {
+        n.address != node.address
+            && (n.role == "control-plane" || n.role == "controlplane")
+            && payload
+                .node_states
+                .iter()
+                .any(|s| s.name == n.name && s.status == "done")
+    });
+    let Some(alt) = alt else { return };
+    let next = format!("https://{}:6443", alt.address);
+    if let Some(ident) = payload.cluster_identity.as_mut() {
+        ident.control_plane_endpoint = next.clone();
+    }
+    payload.log(&format!(
+        "{} is the current control-plane endpoint; retargeting to {next}",
+        node.name
+    ));
+}
+
+/// One automatic reinstall when the disk boot is the previous OS (ssh is
+/// up and the Talos API is not). Returns false once that retry is spent.
+fn retry_install_once(payload: &mut ConvertJobPayload, name: &str) -> bool {
+    let tries = payload
+        .node_states
+        .iter()
+        .find(|s| s.name == name)
+        .map(|s| s.install_tries)
+        .unwrap_or(0);
+    if tries >= 1 {
+        return false;
+    }
+    if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == name) {
+        s.install_tries = 1;
+        s.attempts = 0;
+        s.installer_gone = false;
+        s.status = "pending".into();
+        s.error.clear();
+        s.current_step = "retry install; disk boot was the previous OS".into();
+    }
+    true
+}
+
+fn enter_join(payload: &mut ConvertJobPayload, name: &str) {
+    payload.set_state(name, "join", "waiting for kubectl Ready", "");
+    if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == name) {
+        s.attempts = 0;
+    }
+}
+
+fn is_worker_only(payload: &ConvertJobPayload) -> bool {
+    !payload.nodes.is_empty() && payload.nodes.iter().all(|n| n.role == "worker")
+}
+
+fn identity_usable(ident: &ConvertClusterIdentity) -> bool {
+    !ident.machine_ca_crt.is_empty()
+        && !ident.machine_token.is_empty()
+        && !ident.cluster_id.is_empty()
+        && !ident.cluster_secret.is_empty()
+        && !ident.kube_token.is_empty()
+        && !ident.admin_cert.is_empty()
+        && !ident.admin_key.is_empty()
+}
+
+fn short_material_fp(material: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(material.as_bytes());
+    digest.iter().take(6).map(|b| format!("{b:02x}")).collect()
+}
+
+fn talosconfig_field(yaml: &str, field: &str) -> Option<String> {
+    let prefix = format!("{field}:");
+    for line in yaml.lines() {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix(&prefix) else { continue };
+        let v = rest.trim().trim_matches('"').trim_matches('\'');
+        if !v.is_empty() && v != "|" && v != ">" {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+/// Point a stored talosconfig at one control plane. The CA and admin client
+/// cert stay as they are; only the endpoint and node change.
+fn retarget_talosconfig(yaml: &str, host: &str) -> Option<String> {
+    let host = host.trim();
+    if host.is_empty() {
+        return None;
+    }
+    let ca = talosconfig_field(yaml, "ca")?;
+    let crt = talosconfig_field(yaml, "crt")?;
+    let key = talosconfig_field(yaml, "key")?;
+    Some(format!(
+        "context: tcs\ncontexts:\n  tcs:\n    endpoints:\n      - https://{host}:50000\n    nodes:\n      - {host}\n    ca: {ca}\n    crt: {crt}\n    key: {key}\n"
+    ))
+}
+
+fn decode_mc_pem(value: &str) -> String {
+    let t = value.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    if t.contains("BEGIN ") {
+        return t.to_string();
+    }
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(t)
+        .unwrap_or_default();
+    String::from_utf8(bytes).unwrap_or_default()
+}
+
+fn yaml_at<'a>(v: &'a serde_yaml::Value, path: &[&str]) -> Option<&'a serde_yaml::Value> {
+    let mut cur = v;
+    for p in path {
+        cur = cur.get(p)?;
+    }
+    Some(cur)
+}
+
+fn yaml_str(v: &serde_yaml::Value, path: &[&str]) -> String {
+    yaml_at(v, path)
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn yaml_list(v: &serde_yaml::Value, path: &[&str]) -> Vec<String> {
+    yaml_at(v, path)
+        .and_then(|x| x.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|i| i.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Read membership from a live control-plane machine config. The admin client
+/// cert is filled by the caller from the talosconfig that was allowed to read
+/// this document. PEM fields in the config are base64.
+fn identity_from_machine_config_yaml(yaml: &str) -> Result<ConvertClusterIdentity, AppError> {
+    let doc: serde_yaml::Value = serde_yaml::from_str(yaml)
+        .map_err(|e| AppError::InvalidInput(format!("live machine config is not YAML: {e}")))?;
+    let machine_ca = decode_mc_pem(&yaml_str(&doc, &["machine", "ca", "crt"]));
+    let machine_key = decode_mc_pem(&yaml_str(&doc, &["machine", "ca", "key"]));
+    let token = yaml_str(&doc, &["machine", "token"]);
+    let cluster_id = yaml_str(&doc, &["cluster", "id"]);
+    let cluster_secret = yaml_str(&doc, &["cluster", "secret"]);
+    let kube_token = yaml_str(&doc, &["cluster", "token"]);
+    if !machine_ca.contains("BEGIN ") || token.is_empty() || cluster_id.is_empty() || cluster_secret.is_empty() || kube_token.is_empty() {
+        return Err(AppError::InvalidInput(
+            "worker-only convert will not mint a new machine CA. The live control plane machine config is missing the machine CA, token, or cluster id.".into(),
+        ));
+    }
+    let image = yaml_str(&doc, &["cluster", "apiServer", "image"]);
+    let k8s_version = image.rsplit(':').next().unwrap_or("").to_string();
+    let pod = yaml_list(&doc, &["cluster", "network", "podSubnets"]);
+    let svc = yaml_list(&doc, &["cluster", "network", "serviceSubnets"]);
+    let etcd_crt = decode_mc_pem(&yaml_str(&doc, &["cluster", "etcd", "ca", "crt"]));
+    let etcd_key = decode_mc_pem(&yaml_str(&doc, &["cluster", "etcd", "ca", "key"]));
+    Ok(ConvertClusterIdentity {
+        machine_ca_crt: machine_ca,
+        machine_ca_key: machine_key,
+        cluster_id,
+        cluster_secret,
+        machine_token: token,
+        kube_token,
+        cluster_name: {
+            let n = yaml_str(&doc, &["cluster", "clusterName"]);
+            if n.is_empty() { "phobos".into() } else { n }
+        },
+        control_plane_endpoint: yaml_str(&doc, &["cluster", "controlPlane", "endpoint"]),
+        k8s_ca_crt: decode_mc_pem(&yaml_str(&doc, &["cluster", "ca", "crt"])),
+        k8s_ca_key: decode_mc_pem(&yaml_str(&doc, &["cluster", "ca", "key"])),
+        aggregator_ca_crt: decode_mc_pem(&yaml_str(&doc, &["cluster", "aggregatorCA", "crt"])),
+        aggregator_ca_key: decode_mc_pem(&yaml_str(&doc, &["cluster", "aggregatorCA", "key"])),
+        service_account_key: decode_mc_pem(&yaml_str(&doc, &["cluster", "serviceAccount", "key"])),
+        k8s_version,
+        service_cidr: svc.first().cloned().unwrap_or_default(),
+        cluster_domain: {
+            let d = yaml_str(&doc, &["cluster", "network", "dnsDomain"]);
+            if d.is_empty() { "cluster.local".into() } else { d }
+        },
+        pod_cidr: pod.first().cloned().unwrap_or_default(),
+        ntp_servers: yaml_list(&doc, &["machine", "time", "servers"]),
+        secretbox_secret: yaml_str(&doc, &["cluster", "secretboxEncryptionSecret"]),
+        etcd_ca_crt: etcd_crt.clone(),
+        etcd_ca_key: etcd_key.clone(),
+        etcd_ca_crt_orig: etcd_crt,
+        etcd_ca_key_orig: etcd_key,
+        ..Default::default()
+    })
+}
+
+fn admin_pem_from_talosconfig(yaml: &str) -> Option<(String, String)> {
+    let crt = decode_mc_pem(&talosconfig_field(yaml, "crt")?);
+    let key = decode_mc_pem(&talosconfig_field(yaml, "key")?);
+    if crt.contains("BEGIN ") && key.contains("BEGIN ") {
+        Some((crt, key))
+    } else {
+        None
+    }
+}
+
+fn backfill_empty_from_stored(live: &mut ConvertClusterIdentity, stored: Option<&ConvertClusterIdentity>) {
+    let Some(stored) = stored else { return };
+    if live.ntp_servers.is_empty() {
+        live.ntp_servers = stored.ntp_servers.clone();
+    }
+    if live.pod_cidr.is_empty() {
+        live.pod_cidr = stored.pod_cidr.clone();
+    }
+    if live.service_cidr.is_empty() {
+        live.service_cidr = stored.service_cidr.clone();
+    }
+    if live.k8s_ca_crt.is_empty() {
+        live.k8s_ca_crt = stored.k8s_ca_crt.clone();
+    }
+    if live.k8s_ca_key.is_empty() {
+        live.k8s_ca_key = stored.k8s_ca_key.clone();
+    }
+    if live.control_plane_endpoint.is_empty() {
+        live.control_plane_endpoint = stored.control_plane_endpoint.clone();
+    }
+}
+
+/// Worker-only convert: copy the machine CA, cluster id, secret, and tokens
+/// from a control plane that is already Talos. Refuse to mint a second CA.
+async fn adopt_live_control_plane_identity(
+    pool: &DbPool,
+    jwt_secret: &str,
+    payload: &mut ConvertJobPayload,
+    cluster_id: Uuid,
+) -> Result<(), AppError> {
+    let kube_server = stored_kubeconfig_server(pool, jwt_secret, cluster_id).await;
+    let host = explicit_cp_host(payload)
+        .filter(|h| h != "127.0.0.1")
+        .or_else(|| {
+            kube_server
+                .as_deref()
+                .map(endpoint_host)
+                .filter(|h| !h.is_empty() && h != "127.0.0.1")
+        })
+        .ok_or_else(|| {
+            AppError::InvalidInput(
+                "worker-only convert will not mint a new machine CA. Set controlPlaneEndpoint to a converted control plane.".into(),
+            )
+        })?;
+    let mut configs: Vec<String> = Vec::new();
+    if let Some(yaml) = stored_talosconfig_yaml(pool, jwt_secret, cluster_id).await {
+        if let Some(tc) = retarget_talosconfig(&yaml, &host) {
+            configs.push(tc);
+        }
+    }
+    if let Some(ident) = payload.cluster_identity.clone() {
+        if !ident.machine_ca_crt.is_empty() && !ident.admin_cert.is_empty() && !ident.admin_key.is_empty() {
+            configs.push(build_node_talosconfig(&ident, &host));
+        }
+    }
+    if configs.is_empty() {
+        return Err(AppError::InvalidInput(
+            "worker-only convert will not mint a new machine CA. The cluster has no talosconfig that can read the live control plane.".into(),
+        ));
+    }
+    let stored = payload.cluster_identity.clone();
+    let mut last_err = String::new();
+    for tc in &configs {
+        let args = [
+            "get".to_string(),
+            "mc".to_string(),
+            "-o".to_string(),
+            "json".to_string(),
+        ];
+        let spec = match TalosctlClient::run_raw(&args, Some(tc)).await {
+            Ok(out) => match crate::integration::talosctl::spec_from_mc_json(&out) {
+                Ok(spec) => spec,
+                Err(e) => {
+                    last_err = e.to_string();
+                    continue;
+                }
+            },
+            Err(e) => {
+                last_err = e.to_string();
+                continue;
+            }
+        };
+        let mut live = identity_from_machine_config_yaml(&spec)?;
+        if let Some((crt, key)) = admin_pem_from_talosconfig(tc) {
+            live.admin_cert = crt;
+            live.admin_key = key;
+        }
+        backfill_empty_from_stored(&mut live, stored.as_ref());
+        if let Some(explicit) = explicit_cp_host(payload) {
+            live.control_plane_endpoint = format!("https://{explicit}:6443");
+        }
+        if live.admin_cert.is_empty() || live.admin_key.is_empty() {
+            return Err(AppError::InvalidInput(
+                "worker-only convert will not mint a new machine CA. The talosconfig that read the control plane has no admin client certificate.".into(),
+            ));
+        }
+        let live_fp = short_material_fp(&live.machine_ca_crt);
+        let stored_fp = stored
+            .as_ref()
+            .map(|s| short_material_fp(&s.machine_ca_crt))
+            .unwrap_or_default();
+        let relation = if stored_fp.is_empty() {
+            "no stored identity".to_string()
+        } else if stored_fp == live_fp {
+            "matches the stored identity".to_string()
+        } else {
+            "differs from the stored identity; using the live control plane".to_string()
+        };
+        payload.log(&format!(
+            "adopted live control plane identity fp={live_fp} ({relation}) endpoint={} pod={} ntp={}",
+            endpoint_host(&live.control_plane_endpoint),
+            if live.pod_cidr.is_empty() { "empty" } else { live.pod_cidr.as_str() },
+            live.ntp_servers.len()
+        ));
+        payload.cluster_identity = Some(live);
+        return Ok(());
+    }
+    let low = last_err.to_lowercase();
+    if low.contains("connection refused")
+        || low.contains("timed out")
+        || low.contains("timeout")
+        || low.contains("unavailable")
+        || low.contains("dial tcp")
+    {
+        return Err(AppError::Network(format!(
+            "live control plane {host} unreachable: {last_err}"
+        )));
+    }
+    Err(AppError::InvalidInput(format!(
+        "worker-only convert will not mint a new machine CA. The stored talosconfig was rejected by {host}: {last_err}"
+    )))
 }
 
 /// Ensure the job has a shared cluster identity, generating it once and
@@ -1123,7 +1754,14 @@ async fn ensure_cluster_identity(
     kube_server: Option<&str>,
 ) -> Result<ConvertClusterIdentity, AppError> {
     if let Some(ident) = &payload.cluster_identity {
-        return Ok(ident.clone());
+        if identity_usable(ident) || !is_worker_only(payload) {
+            return Ok(ident.clone());
+        }
+    }
+    if is_worker_only(payload) {
+        return Err(AppError::InvalidInput(
+            "worker-only convert will not mint a new machine CA. Adopt the live control plane identity first.".into(),
+        ));
     }
     use crate::controllers::provision::{
         b64_random, bootstrap_token, generate_ca_issuer, generate_server_cert,
@@ -1280,7 +1918,12 @@ async fn ensure_cluster_identity(
         k8s_version: orig.as_ref().map(|o| o.k8s_version.clone()).unwrap_or_default(),
         service_cidr: orig.as_ref().map(|o| o.service_cidr.clone()).unwrap_or_default(),
         cluster_domain: orig.as_ref().map(|o| o.cluster_domain.clone()).unwrap_or_else(|| "cluster.local".into()),
-        pod_cidr: "10.244.0.0/16".into(),
+        pod_cidr: orig
+            .as_ref()
+            .map(|o| o.pod_cidr.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "10.244.0.0/16".into()),
+        ntp_servers: orig.as_ref().map(|o| o.ntp_servers.clone()).unwrap_or_default(),
         secretbox_secret: b64_random(32),
         etcd_ca_crt_orig: orig.as_ref().map(|o| o.etcd_ca_crt.clone()).unwrap_or_default(),
         etcd_ca_key_orig: orig.as_ref().map(|o| o.etcd_ca_key.clone()).unwrap_or_default(),
@@ -1354,10 +1997,7 @@ async fn inject_bootstrap_token(
         return Ok(());
     };
     let Some((id, secret)) = parse_kubeadm_token(&ident.kube_token) else {
-        payload.log(&format!(
-            "bootstrap token {:?} is not kubeadm 6.16 form; not injecting",
-            ident.kube_token
-        ));
+        payload.log("bootstrap token is not kubeadm 6.16 form; not injecting");
         return Ok(());
     };
     let Some(kc) = stored_kubeconfig_yaml(pool, jwt_secret, cluster_id).await else {
@@ -1365,9 +2005,7 @@ async fn inject_bootstrap_token(
         return Ok(());
     };
     let exp = (chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339();
-    let yaml = format!(
-        "apiVersion: v1\nkind: Secret\nmetadata:\n  name: bootstrap-token-{id}\n  namespace: kube-system\ntype: bootstrap.kubernetes.io/token\nstringData:\n  description: tcs convert overtake\n  token-id: {id}\n  token-secret: {secret}\n  expiration: {exp}\n  usage-bootstrap-authentication: \"true\"\n  usage-bootstrap-signing: \"true\"\n  auth-extra-groups: system:bootstrappers:nodes\n"
-    );
+    let yaml = bootstrap_token_secret_yaml(id, secret, &exp);
     let tmpdir = std::path::PathBuf::from("/var/lib/tcs/talosctl-tmp");
     let _ = tokio::fs::create_dir_all(&tmpdir).await;
     let kc_path = tmpdir.join(format!("kubeconfig.{}.inject", std::process::id()));
@@ -1399,6 +2037,97 @@ async fn inject_bootstrap_token(
     }
     payload.bootstrap_token_injected = true;
     payload.log(&format!("injected kubeadm bootstrap token {id}.**** into kube-system"));
+    Ok(())
+}
+
+/// Kubespray binds `system:bootstrappers:kubeadm:default-node-token` to
+/// node-bootstrapper and the CSR auto-approver. `system:bootstrappers:nodes`
+/// has no binding, so the kubelet's CSR create is forbidden.
+fn bootstrap_token_secret_yaml(id: &str, secret: &str, exp: &str) -> String {
+    format!(
+        "apiVersion: v1\nkind: Secret\nmetadata:\n  name: bootstrap-token-{id}\n  namespace: kube-system\ntype: bootstrap.kubernetes.io/token\nstringData:\n  description: tcs convert overtake\n  token-id: {id}\n  token-secret: {secret}\n  expiration: {exp}\n  usage-bootstrap-authentication: \"true\"\n  usage-bootstrap-signing: \"true\"\n  auth-extra-groups: system:bootstrappers:kubeadm:default-node-token\n"
+    )
+}
+
+/// ClusterRoleBindings for clusters that do not already ship the kubeadm
+/// bootstrapper bindings. Idempotent kubectl apply.
+async fn ensure_kubelet_bootstrap_rbac(
+    pool: &DbPool,
+    jwt_secret: &str,
+    cluster_id: Uuid,
+    payload: &mut ConvertJobPayload,
+) -> Result<(), AppError> {
+    if payload.bootstrap_rbac_applied {
+        return Ok(());
+    }
+    let Some(kc) = stored_kubeconfig_yaml(pool, jwt_secret, cluster_id).await else {
+        payload.log("no stored kubeconfig; cannot apply kubelet bootstrap RBAC");
+        return Ok(());
+    };
+    let yaml = "\
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tcs-convert-node-bootstrapper
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:node-bootstrapper
+subjects:
+  - kind: Group
+    name: system:bootstrappers:kubeadm:default-node-token
+    apiGroup: rbac.authorization.k8s.io
+  - kind: Group
+    name: system:bootstrappers:nodes
+    apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tcs-convert-node-autoapprove
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:certificates.k8s.io:certificatesigningrequests:nodeclient
+subjects:
+  - kind: Group
+    name: system:bootstrappers:kubeadm:default-node-token
+    apiGroup: rbac.authorization.k8s.io
+  - kind: Group
+    name: system:bootstrappers:nodes
+    apiGroup: rbac.authorization.k8s.io
+";
+    let tmpdir = std::path::PathBuf::from("/var/lib/tcs/talosctl-tmp");
+    let _ = tokio::fs::create_dir_all(&tmpdir).await;
+    let kc_path = tmpdir.join(format!("kubeconfig.{}.rbac", std::process::id()));
+    let rbac_path = tmpdir.join(format!("bootstrap-rbac.{}.yaml", std::process::id()));
+    tokio::fs::write(&kc_path, kc)
+        .await
+        .map_err(|e| AppError::Internal(format!("write kubeconfig: {e}")))?;
+    tokio::fs::write(&rbac_path, yaml)
+        .await
+        .map_err(|e| AppError::Internal(format!("write bootstrap rbac: {e}")))?;
+    let out = tokio::process::Command::new("kubectl")
+        .env("TCS_INTERNAL", "1")
+        .args([
+            "--kubeconfig",
+            &kc_path.to_string_lossy(),
+            "apply",
+            "-f",
+            &rbac_path.to_string_lossy(),
+        ])
+        .output()
+        .await
+        .map_err(|e| AppError::Network(format!("kubectl spawn: {e}")))?;
+    let _ = tokio::fs::remove_file(&kc_path).await;
+    let _ = tokio::fs::remove_file(&rbac_path).await;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        payload.log(&format!("kubelet bootstrap RBAC apply failed: {err}"));
+        return Err(AppError::Network(format!("kubectl apply bootstrap rbac: {err}")));
+    }
+    payload.bootstrap_rbac_applied = true;
+    payload.log("applied kubelet bootstrap ClusterRoleBindings");
     Ok(())
 }
 
@@ -1567,20 +2296,42 @@ async fn sign_kubelet_csr(
     Ok(())
 }
 
-async fn kube_node_is_talos(
+fn parse_node_os_ready(text: &str) -> (bool, bool) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text.trim()) else {
+        return (false, false);
+    };
+    let os = v
+        .pointer("/status/nodeInfo/osImage")
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    let talos = os.to_ascii_lowercase().contains("talos");
+    let ready = v
+        .pointer("/status/conditions")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter().any(|c| {
+                c.get("type").and_then(|t| t.as_str()) == Some("Ready")
+                    && c.get("status").and_then(|s| s.as_str()) == Some("True")
+            })
+        })
+        .unwrap_or(false);
+    (talos, ready)
+}
+
+async fn kube_node_os_ready(
     pool: &DbPool,
     jwt_secret: &str,
     cluster_id: Uuid,
     node: &str,
-) -> bool {
+) -> (bool, bool) {
     let Some(kc) = stored_kubeconfig_yaml(pool, jwt_secret, cluster_id).await else {
-        return false;
+        return (false, false);
     };
     let tmpdir = std::path::PathBuf::from("/var/lib/tcs/talosctl-tmp");
     let _ = tokio::fs::create_dir_all(&tmpdir).await;
     let kc_path = tmpdir.join(format!("kubeconfig.{}.os", std::process::id()));
     if tokio::fs::write(&kc_path, kc).await.is_err() {
-        return false;
+        return (false, false);
     }
     let out = tokio::process::Command::new("kubectl")
         .env("TCS_INTERNAL", "1")
@@ -1591,18 +2342,24 @@ async fn kube_node_is_talos(
             "node",
             node,
             "-o",
-            "jsonpath={.status.nodeInfo.osImage}",
+            "json",
         ])
         .output()
         .await;
     let _ = tokio::fs::remove_file(&kc_path).await;
     match out {
-        Ok(o) if o.status.success() => {
-            let s = String::from_utf8_lossy(&o.stdout);
-            s.to_ascii_lowercase().contains("talos")
-        }
-        _ => false,
+        Ok(o) if o.status.success() => parse_node_os_ready(&String::from_utf8_lossy(&o.stdout)),
+        _ => (false, false),
     }
+}
+
+async fn kube_node_is_talos(
+    pool: &DbPool,
+    jwt_secret: &str,
+    cluster_id: Uuid,
+    node: &str,
+) -> bool {
+    kube_node_os_ready(pool, jwt_secret, cluster_id, node).await.0
 }
 
 /// The original (kubeadm) cluster identity extracted from a running old CP.
@@ -1626,6 +2383,8 @@ struct OriginalIdentity {
     etcd_ca_key: String,
     etcd_server_crt: String,
     etcd_server_key: String,
+    pod_cidr: String,
+    ntp_servers: Vec<String>,
 }
 
 /// Extract the original cluster's PKI + control-plane settings from a RUNNING
@@ -1656,6 +2415,15 @@ echo "END SERVICE_CIDR"
 echo "BEGIN CLUSTER_DOMAIN"
 echo cluster.local
 echo "END CLUSTER_DOMAIN"
+echo "BEGIN POD_CIDR"
+grep -oE -- '--cluster-cidr=[0-9./]+' /etc/kubernetes/manifests/kube-controller-manager.yaml 2>/dev/null | head -1 | sed 's/.*=//'
+echo "END POD_CIDR"
+echo "BEGIN NTP"
+{
+  grep -hE '^(server|pool)[[:space:]]+' /etc/chrony/chrony.conf /etc/chrony.conf 2>/dev/null | awk '{print $2}'
+  awk -F= '/^NTP=/{print $2}' /etc/systemd/timesyncd.conf 2>/dev/null | tr ' ' '\n'
+} | awk 'NF && $1 !~ /^127\./ && $1 !~ /^169\.254\./ && !seen[$0]++'
+echo "END NTP"
 emit ETCD_CA_CRT /etc/ssl/etcd/ssl/ca.pem
 emit ETCD_CA_KEY /etc/ssl/etcd/ssl/ca-key.pem
 emit ETCD_SERVER_CRT /etc/ssl/etcd/ssl/member-$(hostname).pem
@@ -1686,6 +2454,14 @@ emit ETCD_SERVER_KEY /etc/ssl/etcd/ssl/member-$(hostname)-key.pem
         etcd_server_crt: block(&out, "ETCD_SERVER_CRT").unwrap_or_default(),
         etcd_server_key: block(&out, "ETCD_SERVER_KEY").unwrap_or_default(),
         etcd_ca_key: block(&out, "ETCD_CA_KEY").unwrap_or_default(),
+        pod_cidr: block(&out, "POD_CIDR").unwrap_or_default(),
+        ntp_servers: block(&out, "NTP")
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
     })
 }
 
@@ -1713,18 +2489,249 @@ async fn do_first_cp_recover(
     cluster_id: Uuid,
     node: &ConvertNodePlan,
 ) -> Result<(), AppError> {
-    let path = payload.etcd_snapshot_path.clone().ok_or_else(|| AppError::Internal("no etcd snapshot path".into()))?;
-    // talosconfig from the generated identity (already created during do_install;
-    // cached in the payload, so no SSH re-extraction happens here).
     let k8s_ca = stored_kubeconfig_ca(pool, jwt_secret, cluster_id).await.unwrap_or_default();
     let kube_server = stored_kubeconfig_server(pool, jwt_secret, cluster_id).await;
     let tc = build_node_talosconfig(&ensure_cluster_identity(sshc, payload, &k8s_ca, kube_server.as_deref()).await?, &node.address);
     let endpoint = talos_endpoint(&node.address);
-    let how = if payload.etcd_tls { "TLS etcd" } else { "plain etcd" };
-    payload.set_state(&node.name, "recover", &format!("bootstrap --recover-from ({how})"), "");
-    payload.log(&format!("{} bootstrapping etcd from snapshot {} ({how})", node.name, path));
-    // --recover-from points at the LOCAL deployer path; the client streams it.
-    TalosctlClient::bootstrap_recover_etcd(&endpoint, &path, Some(&tc)).await
+    if !payload.etcd_bootstrapped {
+        refresh_etcd_snapshot_if_newer(sshc, payload, &node.address).await;
+        let path = payload.etcd_snapshot_path.clone().ok_or_else(|| AppError::Internal("no etcd snapshot path".into()))?;
+        let how = if payload.etcd_tls { "TLS etcd" } else { "plain etcd" };
+        payload.set_state(&node.name, "recover", &format!("bootstrap --recover-from ({how})"), "");
+        payload.log(&format!(
+            "{} bootstrapping etcd from snapshot {} revision {} ({how})",
+            node.name, path, payload.etcd_snapshot_revision
+        ));
+        // --recover-from points at the LOCAL deployer path; the client streams it.
+        match TalosctlClient::bootstrap_recover_etcd(&endpoint, &path, Some(&tc)).await {
+            Ok(()) => {
+                payload.etcd_bootstrapped = true;
+                if let Some(s) = payload.node_states.iter_mut().find(|s| s.name == node.name) {
+                    s.attempts = 0;
+                }
+                payload.log(&format!(
+                    "{} bootstrap exited; confirming etcd status before marking it done",
+                    node.name
+                ));
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let low = msg.to_lowercase();
+                if low.contains("alreadyexists") || low.contains("not empty") {
+                    return Err(AppError::Internal(format!(
+                        "etcd data directory is not empty ({msg}). Not bootstrapping again. Empty only the EPHEMERAL volume on the system disk, then retry recover."
+                    )));
+                }
+                return Err(e);
+            }
+        }
+    }
+    let status = TalosctlClient::run_raw(
+        &["etcd".into(), "status".into()],
+        Some(&tc),
+    )
+    .await?;
+    if !etcd_status_ok(&status) {
+        return Err(AppError::Network(format!("etcd service is not ready: {status}")));
+    }
+    let mut retargeted = None;
+    if let Some(ident) = payload.cluster_identity.as_mut() {
+        let ep = format!("https://{}:6443", node.address);
+        if ident.control_plane_endpoint != ep {
+            ident.control_plane_endpoint = ep.clone();
+            retargeted = Some(ep);
+        }
+    }
+    if let Some(ep) = retargeted {
+        payload.log(&format!("control-plane endpoint is now {ep}"));
+    }
+    let _ = inject_bootstrap_token(pool, jwt_secret, cluster_id, payload).await;
+    let _ = ensure_kubelet_bootstrap_rbac(pool, jwt_secret, cluster_id, payload).await;
+    let _ = issue_kubelet_csrs(pool, jwt_secret, cluster_id, payload).await;
+    if !kube_node_is_talos(pool, jwt_secret, cluster_id, &node.name).await {
+        return Err(AppError::Network("waiting for kubelet join".into()));
+    }
+    let _ = label_converted_node(pool, jwt_secret, cluster_id, &node.name, payload).await;
+    Ok(())
+}
+
+fn etcd_status_ok(text: &str) -> bool {
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let Some(header) = lines.next() else { return false };
+    header.contains("RAFT") && lines.next().is_some()
+}
+
+/// If another still-Ubuntu control plane has a higher mvcc revision than the
+/// snapshot taken at job start, replace the snapshot before bootstrap.
+async fn refresh_etcd_snapshot_if_newer(sshc: &SshClient, payload: &mut ConvertJobPayload, skip_addr: &str) {
+    let Some(dir) = payload
+        .etcd_snapshot_path
+        .as_ref()
+        .and_then(|p| std::path::Path::new(p).parent().map(|d| d.to_path_buf()))
+    else {
+        return;
+    };
+    let cps: Vec<(String, String)> = payload
+        .nodes
+        .iter()
+        .filter(|n| {
+            n.address != skip_addr
+                && !n.address.is_empty()
+                && (n.role == "control-plane" || n.role == "controlplane")
+                && !payload
+                    .node_states
+                    .iter()
+                    .any(|s| s.name == n.name && s.status == "done")
+        })
+        .map(|n| (n.name.clone(), n.address.clone()))
+        .collect();
+    let mut best_rev = payload.etcd_snapshot_revision;
+    let mut best: Option<(String, String)> = None;
+    for (name, addr) in &cps {
+        match sshc.run_capture(addr, ETCD_REV_SCRIPT).await {
+            Ok(o) if o.ok => {
+                let rev = parse_tcs_rev(&o.stdout);
+                if rev > best_rev {
+                    best_rev = rev;
+                    best = Some((name.clone(), addr.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some((name, addr)) = best else { return };
+    let remote = format!("/tmp/tcs-convert-etcd-refresh-{best_rev}.db");
+    let local = dir.join(format!("convert-refresh-{best_rev}.db"));
+    let script = etcd_snapshot_script(&remote);
+    match sshc.run_capture(&addr, &script).await {
+        Ok(o) if o.ok => {}
+        Ok(o) => {
+            payload.log(&format!("{name} refresh snapshot failed: {}", o.stderr.trim()));
+            return;
+        }
+        Err(e) => {
+            payload.log(&format!("{name} refresh snapshot unreachable: {e}"));
+            return;
+        }
+    }
+    match sshc.scp_back(&addr, &remote, &local).await {
+        Ok(size) => {
+            payload.etcd_snapshot_path = Some(local.to_string_lossy().to_string());
+            payload.etcd_snapshot_size = size as i64;
+            payload.etcd_snapshot_revision = best_rev;
+            payload.log(&format!(
+                "refreshed etcd snapshot from {name} revision {best_rev} ({size} bytes) before bootstrap"
+            ));
+        }
+        Err(e) => payload.log(&format!("{name} refresh snapshot scp failed: {e}")),
+    }
+}
+
+const ETCD_REV_SCRIPT: &str = r#"
+set +e
+CA=""; CERT=""; KEY=""
+envget() { grep -E "^$1=" /etc/etcd.env 2>/dev/null | head -1 | cut -d= -f2-; }
+ENVCA=$(envget ETCD_TRUSTED_CA_FILE); ENVCERT=$(envget ETCD_CERT_FILE); ENVKEY=$(envget ETCD_KEY_FILE)
+if [ -n "$ENVCA" ] && [ -f "$ENVCA" ] && [ -f "$ENVCERT" ] && [ -f "$ENVKEY" ]; then
+  CA=$ENVCA; CERT=$ENVCERT; KEY=$ENVKEY
+elif [ -f /etc/kubernetes/pki/etcd/ca.crt ]; then
+  CA=/etc/kubernetes/pki/etcd/ca.crt
+  CERT=/etc/kubernetes/pki/etcd/server.crt
+  KEY=/etc/kubernetes/pki/etcd/server.key
+elif [ -f /etc/ssl/etcd/ssl/ca.pem ]; then
+  CA=/etc/ssl/etcd/ssl/ca.pem
+  for n in member-$(hostname) node-$(hostname) member-$(hostname -s) node-$(hostname -s); do
+    if [ -f "/etc/ssl/etcd/ssl/$n.pem" ] && [ -f "/etc/ssl/etcd/ssl/$n-key.pem" ]; then
+      CERT="/etc/ssl/etcd/ssl/$n.pem"; KEY="/etc/ssl/etcd/ssl/$n-key.pem"; break
+    fi
+  done
+fi
+if [ -z "$CA" ] || [ -z "$CERT" ] || [ -z "$KEY" ]; then echo "ERROR no etcd cert"; exit 1; fi
+REV=$(ETCDCTL_API=3 etcdctl endpoint status -w json --endpoints=https://127.0.0.1:2379 --cacert="$CA" --cert="$CERT" --key="$KEY" 2>/dev/null | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin)
+    row=d[0] if isinstance(d, list) else d
+    print(row["Status"]["header"]["revision"])
+except Exception:
+    pass')
+echo "TCS_REV=${REV}"
+"#;
+
+fn etcd_snapshot_script(remote: &str) -> String {
+    format!(
+        r#"
+set +e
+CA=""; CERT=""; KEY=""
+envget() {{ grep -E "^$1=" /etc/etcd.env 2>/dev/null | head -1 | cut -d= -f2-; }}
+ENVCA=$(envget ETCD_TRUSTED_CA_FILE); ENVCERT=$(envget ETCD_CERT_FILE); ENVKEY=$(envget ETCD_KEY_FILE)
+if [ -n "$ENVCA" ] && [ -f "$ENVCA" ] && [ -f "$ENVCERT" ] && [ -f "$ENVKEY" ]; then
+  CA=$ENVCA; CERT=$ENVCERT; KEY=$ENVKEY
+elif [ -f /etc/kubernetes/pki/etcd/ca.crt ]; then
+  CA=/etc/kubernetes/pki/etcd/ca.crt
+  CERT=/etc/kubernetes/pki/etcd/server.crt
+  KEY=/etc/kubernetes/pki/etcd/server.key
+elif [ -f /etc/ssl/etcd/ssl/ca.pem ]; then
+  CA=/etc/ssl/etcd/ssl/ca.pem
+  for n in member-$(hostname) node-$(hostname) member-$(hostname -s) node-$(hostname -s); do
+    if [ -f "/etc/ssl/etcd/ssl/$n.pem" ] && [ -f "/etc/ssl/etcd/ssl/$n-key.pem" ]; then
+      CERT="/etc/ssl/etcd/ssl/$n.pem"; KEY="/etc/ssl/etcd/ssl/$n-key.pem"; break
+    fi
+  done
+fi
+if [ -z "$CA" ] || [ -z "$CERT" ] || [ -z "$KEY" ]; then echo "ERROR no etcd cert"; exit 1; fi
+ETCDCTL_API=3 etcdctl snapshot save {remote} --endpoints=https://127.0.0.1:2379 --cacert="$CA" --cert="$CERT" --key="$KEY"
+echo OK
+"#
+    )
+}
+
+async fn label_converted_node(
+    pool: &DbPool,
+    jwt_secret: &str,
+    cluster_id: Uuid,
+    node: &str,
+    payload: &mut ConvertJobPayload,
+) -> bool {
+    let Some(kc) = stored_kubeconfig_yaml(pool, jwt_secret, cluster_id).await else {
+        return false;
+    };
+    let tmpdir = std::path::PathBuf::from("/var/lib/tcs/talosctl-tmp");
+    let _ = tokio::fs::create_dir_all(&tmpdir).await;
+    let kc_path = tmpdir.join(format!("kubeconfig.{}.label", std::process::id()));
+    if tokio::fs::write(&kc_path, kc).await.is_err() {
+        return false;
+    }
+    let out = tokio::process::Command::new("kubectl")
+        .env("TCS_INTERNAL", "1")
+        .args([
+            "--kubeconfig",
+            &kc_path.to_string_lossy(),
+            "label",
+            "node",
+            node,
+            "tcs.local/os=talos",
+            "--overwrite",
+        ])
+        .output()
+        .await;
+    let _ = tokio::fs::remove_file(&kc_path).await;
+    match out {
+        Ok(o) if o.status.success() => {
+            payload.log(&format!("{node} labeled tcs.local/os=talos"));
+            true
+        }
+        Ok(o) => {
+            payload.log(&format!(
+                "{node} label tcs.local/os=talos failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ));
+            false
+        }
+        Err(e) => {
+            payload.log(&format!("{node} label spawn failed: {e}"));
+            false
+        }
+    }
 }
 
 /// Build a talosconfig YAML for a freshly-installed node's apid (:50000) from
@@ -1738,6 +2745,12 @@ fn build_node_talosconfig(ident: &ConvertClusterIdentity, node_address: &str) ->
     format!(
         "context: {name}\ncontexts:\n  {name}:\n    endpoints:\n      - https://{node_address}:50000\n    nodes:\n      - {node_address}\n    ca: {ca_b64}\n    crt: {crt_b64}\n    key: {key_b64}\n"
     )
+}
+
+async fn stored_talosconfig_yaml(pool: &DbPool, jwt_secret: &str, cluster_id: Uuid) -> Option<String> {
+    let c = repos::cluster::get(pool, cluster_id).await.ok().flatten()?;
+    let enc = c.talosconfig.as_deref()?;
+    secrets::decrypt(jwt_secret, enc).ok()
 }
 
 async fn stored_kubeconfig_yaml(pool: &DbPool, jwt_secret: &str, cluster_id: Uuid) -> Option<String> {
@@ -1780,16 +2793,14 @@ async fn step_adopt(
     cluster_id: Uuid,
 ) -> Result<(), AppError> {
     persist_convert_talosconfig(pool, jwt_secret, cluster_id, payload).await;
-    let done: std::collections::HashSet<String> = payload
-        .node_states
-        .iter()
-        .filter(|s| s.status == "done")
-        .map(|s| s.name.clone())
-        .collect();
     let names: Vec<String> = payload.nodes.iter().map(|n| n.name.clone()).collect();
     let machines = repos::machine::list_by_cluster(pool, cluster_id).await?;
     for name in names {
-        if !done.is_empty() && !done.contains(&name) {
+        let finished = payload
+            .node_states
+            .iter()
+            .any(|s| s.name == name && s.status == "done");
+        if !finished {
             payload.log(&format!("skip adopt {name} (not done)"));
             continue;
         }
@@ -1905,7 +2916,7 @@ mod tests {
             ConvertNodePlan { name: "w1".into(), role: "worker".into(), address: "10.0.0.3".into(), ..Default::default() },
         ];
         p.node_states = p.nodes.iter().map(|n| crate::controllers::convert::ConvertNodeState {
-            name: n.name.clone(), role: n.role.clone(), status: "pending".into(), current_step: "".into(), error: "".into(), attempts: 0, installer_gone: false,
+            name: n.name.clone(), role: n.role.clone(), status: "pending".into(), current_step: "".into(), error: "".into(), attempts: 0, installer_gone: false, install_tries: 0,
         }).collect();
         p
     }
@@ -2008,6 +3019,7 @@ mod tests {
             service_cidr: "10.233.0.0/18".into(),
             cluster_domain: "cluster.local".into(),
             pod_cidr: "10.244.0.0/16".into(),
+            ntp_servers: Vec::new(),
             secretbox_secret: "c2VjcmV0Ym94".into(),
             etcd_ca_crt_orig: String::new(),
             etcd_ca_key_orig: String::new(),
@@ -2022,7 +3034,7 @@ mod tests {
         // `talosctl apply-config --dry-run`.
         let net = "    hostname: cp1\n    interfaces:\n      - interface: bond0\n        mtu: 1500\n";
         let k8s_ca = "-----BEGIN CERTIFICATE-----\nK8s\n-----END CERTIFICATE-----";
-        let cfg = build_install_config("controlplane", true, net, "/dev/sda", "factory.talos.dev/metal-installer/x:v1.13.10", &fake_ident(), k8s_ca, true, "", "", true);
+        let cfg = build_install_config("controlplane", true, net, "/dev/sda", "factory.talos.dev/metal-installer/x:v1.13.10", &fake_ident(), k8s_ca, true, "", "", true, "");
         // Root form: version + persist, NO apiVersion/kind/metadata.
         assert!(cfg.starts_with("version: v1alpha1\npersist: true\nmachine:\n"));
         assert!(!cfg.contains("apiVersion:"));
@@ -2080,9 +3092,40 @@ mod tests {
     }
 
     #[test]
+    fn install_cmdline_copies_bond_ip_and_reset_devices() {
+        let net = "    hostname: ceph04\n    interfaces:\n      - interface: bond0\n        addresses:\n          - 172.20.0.42/22\n";
+        let cmdline = "console=tty0 console=ttyS0,115200 talos.platform=metal slab_nomerge pti=on reset_devices panic=10 bond=bond0:eno1,eno2,eno3:mode=802.3ad,xmit_hash_policy=layer2,miimon=100,lacp_rate=fast,ad_select=stable ip=172.20.0.42::172.20.0.1:255.255.252.0:931314-ceph04:bond0:off";
+        let cfg = build_install_config(
+            "worker", false, net, "/dev/sda", "img:v1", &fake_ident(), "", false, "", "", true, cmdline,
+        );
+        assert_eq!(cfg.matches("slab_nomerge").count(), 1);
+        assert_eq!(cfg.matches("console=ttyS0,115200").count(), 1);
+        assert!(!cfg.contains("console=tty0"));
+        assert!(!cfg.contains("talos.platform=metal"));
+        assert!(cfg.contains("      - reset_devices\n"));
+        assert!(cfg.contains("      - panic=10\n"));
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&cfg).expect("valid YAML");
+        let args = parsed["machine"]["install"]["extraKernelArgs"]
+            .as_sequence()
+            .expect("extraKernelArgs");
+        let joined: Vec<&str> = args.iter().filter_map(|v| v.as_str()).collect();
+        assert!(joined.iter().any(|s| {
+            *s == "bond=bond0:eno1,eno2,eno3:mode=802.3ad,xmit_hash_policy=layer2,miimon=100,lacp_rate=fast,ad_select=stable"
+        }));
+        assert!(joined
+            .iter()
+            .any(|s| *s == "ip=172.20.0.42::172.20.0.1:255.255.252.0:931314-ceph04:bond0:off"));
+        let bare = build_install_config(
+            "worker", false, net, "/dev/sda", "img:v1", &fake_ident(), "", false, "", "", false, cmdline,
+        );
+        assert!(!bare.contains("extraKernelArgs"));
+        assert!(!bare.contains("bond="));
+    }
+
+    #[test]
     fn post_boot_config_omits_install_wipe() {
         let net = "    hostname: w1\n    interfaces:\n      - interface: bond0\n";
-        let cfg = build_install_config("worker", false, net, "/dev/sda", "img:v1", &fake_ident(), "", false, "", "", false);
+        let cfg = build_install_config("worker", false, net, "/dev/sda", "img:v1", &fake_ident(), "", false, "", "", false, "");
         assert!(cfg.contains("  network:\n    hostname: w1"));
         assert!(!cfg.contains("  install:"));
         assert!(!cfg.contains("wipe: true"));
@@ -2109,9 +3152,55 @@ mod tests {
     }
 
     #[test]
+    fn parse_tcs_rev_and_etcd_status() {
+        assert_eq!(parse_tcs_rev("noise\nTCS_REV=3073394\n"), 3073394);
+        assert_eq!(parse_tcs_rev("TCS_REV=\n"), 0);
+        assert!(etcd_status_ok(
+            "NODE MEMBER DB SIZE RAFT INDEX\n172.20.0.55 7029 484 MB 89428\n"
+        ));
+        assert!(!etcd_status_ok("NODE MEMBER RAFT\n"));
+        assert!(!etcd_status_ok(""));
+    }
+
+    #[test]
+    fn infra_subnet_pins_kubelet_and_etcd_and_ntp() {
+        let net = "    hostname: cp1\n    interfaces:\n      - interface: bond0\n        addresses:\n          - 172.20.0.55/22\n";
+        let mut ident = fake_ident();
+        ident.pod_cidr = "10.236.0.0/14".into();
+        ident.ntp_servers = vec!["172.20.0.126".into()];
+        let cfg = build_install_config(
+            "controlplane", true, net, "/dev/sda", "img:v1", &ident, "", true, "", "", true, "",
+        );
+        assert!(cfg.contains("podSubnets:\n      - 10.236.0.0/14\n"));
+        assert!(cfg.contains("validSubnets:\n        - 172.20.0.0/22\n"));
+        assert!(cfg.contains("advertisedSubnets:\n      - 172.20.0.0/22\n"));
+        assert!(cfg.contains("servers:\n      - 172.20.0.126\n"));
+        assert_eq!(ipv4_subnet("172.20.0.38", 22).as_deref(), Some("172.20.0.0/22"));
+        let worker = build_install_config(
+            "worker", false, net, "/dev/sda", "img:v1", &ident, "", false, "", "", true, "",
+        );
+        assert!(worker.contains("validSubnets:\n        - 172.20.0.0/22\n"));
+        assert!(!worker.contains("  etcd:"));
+        assert!(!worker.contains("PRIVATE KEY"));
+    }
+
+    #[test]
+    fn bootstrap_token_uses_kubeadm_group() {
+        let y = bootstrap_token_secret_yaml("abc123", "0123456789abcdef", "2026-10-13T00:00:00Z");
+        assert!(y.contains("auth-extra-groups: system:bootstrappers:kubeadm:default-node-token\n"));
+        assert!(!y.contains("system:bootstrappers:nodes"));
+    }
+
+    #[test]
+    fn endpoint_host_strips_scheme_and_port() {
+        assert_eq!(endpoint_host("https://172.20.0.38:6443"), "172.20.0.38");
+        assert_eq!(endpoint_host("172.20.0.55"), "172.20.0.55");
+    }
+
+    #[test]
     fn build_install_config_worker_uses_accepted_cas() {
         let net = "    interfaces:\n      - interface: bond0\n";
-        let cfg = build_install_config("worker", false, net, "/dev/sda", "img:v1", &fake_ident(), "", false, "", "", true);
+        let cfg = build_install_config("worker", false, net, "/dev/sda", "img:v1", &fake_ident(), "", false, "", "", true, "");
         assert!(cfg.contains("  type: worker\n"));
         assert!(cfg.contains("console=ttyS0,115200"));
         assert!(cfg.contains("console=ttyS1,115200"));
@@ -2129,5 +3218,127 @@ mod tests {
         assert!(!cfg.contains("serviceAccount"));
         assert!(!cfg.contains("  etcd:"));
         assert!(!cfg.contains("apiServer"));
+    }
+
+    fn b64_pem(pem: &str) -> String {
+        crate::controllers::provision::b64_le(pem)
+    }
+
+    fn sample_live_mc() -> String {
+        let ca = "-----BEGIN CERTIFICATE-----\nLiveCA\n-----END CERTIFICATE-----";
+        let key = "-----BEGIN PRIVATE KEY-----\nLiveKey\n-----END PRIVATE KEY-----";
+        let k8s = "-----BEGIN CERTIFICATE-----\nLiveK8s\n-----END CERTIFICATE-----";
+        let k8s_key = "-----BEGIN PRIVATE KEY-----\nLiveK8sKey\n-----END PRIVATE KEY-----";
+        let etcd = "-----BEGIN CERTIFICATE-----\nLiveEtcd\n-----END CERTIFICATE-----";
+        let etcd_key = "-----BEGIN PRIVATE KEY-----\nLiveEtcdKey\n-----END PRIVATE KEY-----";
+        format!(
+            "version: v1alpha1\nmachine:\n  type: controlplane\n  token: aabbcc.1111112222223333\n  ca:\n    crt: {ca}\n    key: {key}\n  time:\n    servers:\n      - 172.20.0.126\ncluster:\n  id: Y2x1c3Rlci1pZA==\n  secret: Y2x1c3Rlci1zZWNyZXQ=\n  clusterName: phobos\n  token: ddeeff.4444445555556666\n  controlPlane:\n    endpoint: https://172.20.0.38:6443\n  secretboxEncryptionSecret: c2VjcmV0Ym94\n  network:\n    dnsDomain: cluster.local\n    podSubnets:\n      - 10.236.0.0/14\n    serviceSubnets:\n      - 10.233.0.0/18\n  ca:\n    crt: {k8s}\n    key: {k8s_key}\n  apiServer:\n    image: registry.k8s.io/kube-apiserver:v1.35.4\n  etcd:\n    ca:\n      crt: {etcd}\n      key: {etcd_key}\n",
+            ca = b64_pem(ca),
+            key = b64_pem(key),
+            k8s = b64_pem(k8s),
+            k8s_key = b64_pem(k8s_key),
+            etcd = b64_pem(etcd),
+            etcd_key = b64_pem(etcd_key),
+        )
+    }
+
+    #[test]
+    fn live_machine_config_adopts_ca_ntp_and_pod_cidr() {
+        let ident = identity_from_machine_config_yaml(&sample_live_mc()).unwrap();
+        assert!(ident.machine_ca_crt.contains("LiveCA"));
+        assert!(ident.machine_ca_key.contains("LiveKey"));
+        assert_eq!(ident.machine_token, "aabbcc.1111112222223333");
+        assert_eq!(ident.kube_token, "ddeeff.4444445555556666");
+        assert_eq!(ident.pod_cidr, "10.236.0.0/14");
+        assert_eq!(ident.service_cidr, "10.233.0.0/18");
+        assert_eq!(ident.ntp_servers, vec!["172.20.0.126".to_string()]);
+        assert_eq!(ident.k8s_version, "v1.35.4");
+        assert!(ident.k8s_ca_crt.contains("LiveK8s"));
+        assert!(ident.etcd_ca_crt.contains("LiveEtcd"));
+        assert!(ident.admin_cert.is_empty());
+        let mut payload = ConvertJobPayload::default();
+        payload.control_plane_endpoint = Some("https://172.20.0.55:6443".into());
+        payload.nodes = vec![ConvertNodePlan {
+            name: "w9".into(),
+            role: "worker".into(),
+            address: "172.20.0.66".into(),
+            ..Default::default()
+        }];
+        assert!(is_worker_only(&payload));
+        assert!(!identity_usable(&ident));
+        let tc = format!(
+            "context: phobos\ncontexts:\n  phobos:\n    endpoints:\n      - https://172.20.0.38:50000\n    nodes:\n      - 172.20.0.38\n    ca: {ca}\n    crt: {crt}\n    key: {key}\n",
+            ca = b64_pem("-----BEGIN CERTIFICATE-----\nLiveCA\n-----END CERTIFICATE-----"),
+            crt = b64_pem("-----BEGIN CERTIFICATE-----\nAdmin\n-----END CERTIFICATE-----"),
+            key = b64_pem("-----BEGIN PRIVATE KEY-----\nAdminKey\n-----END PRIVATE KEY-----"),
+        );
+        let retargeted = retarget_talosconfig(&tc, "172.20.0.55").unwrap();
+        assert!(retargeted.contains("https://172.20.0.55:50000"));
+        assert!(!retargeted.contains("172.20.0.38"));
+        let (admin_crt, admin_key) = admin_pem_from_talosconfig(&retargeted).unwrap();
+        assert!(admin_crt.contains("Admin"));
+        assert!(admin_key.contains("AdminKey"));
+        let mut live = ident.clone();
+        live.admin_cert = admin_crt;
+        live.admin_key = admin_key;
+        if let Some(explicit) = explicit_cp_host(&payload) {
+            live.control_plane_endpoint = format!("https://{explicit}:6443");
+        }
+        assert_eq!(live.control_plane_endpoint, "https://172.20.0.55:6443");
+        assert!(identity_usable(&live));
+        let worker = build_install_config(
+            "worker", false, "    hostname: w9\n", "/dev/sda", "img:v1", &live, "", false, "", "", true, "",
+        );
+        assert!(worker.contains("servers:\n      - 172.20.0.126\n"));
+        assert!(worker.contains("endpoint: https://172.20.0.55:6443\n"));
+        assert!(!worker.contains("LiveKey"));
+        assert!(!worker.contains("PRIVATE KEY"));
+    }
+
+    #[test]
+    fn talos_os_without_ready_is_not_success() {
+        let not_ready = r#"{"status":{"nodeInfo":{"osImage":"Talos (v1.13.11)"},"conditions":[{"type":"Ready","status":"False","reason":"KubeletNotReady"}]}}"#;
+        assert_eq!(parse_node_os_ready(not_ready), (true, false));
+        let ready = r#"{"status":{"nodeInfo":{"osImage":"Talos (v1.13.11)"},"conditions":[{"type":"Ready","status":"True"}]}}"#;
+        assert_eq!(parse_node_os_ready(ready), (true, true));
+        let ubuntu = r#"{"status":{"nodeInfo":{"osImage":"Ubuntu 24.04.3 LTS"},"conditions":[{"type":"Ready","status":"True"}]}}"#;
+        assert_eq!(parse_node_os_ready(ubuntu), (false, true));
+    }
+
+    #[test]
+    fn disk_boot_to_previous_os_retries_once() {
+        let mut payload = ConvertJobPayload::default();
+        payload.node_states = vec![crate::controllers::convert::ConvertNodeState {
+            name: "w4".into(),
+            role: "worker".into(),
+            status: "reboot".into(),
+            current_step: "waiting".into(),
+            error: String::new(),
+            attempts: 121,
+            installer_gone: true,
+            install_tries: 0,
+        }];
+        assert!(retry_install_once(&mut payload, "w4"));
+        assert_eq!(payload.node_states[0].status, "pending");
+        assert_eq!(payload.node_states[0].install_tries, 1);
+        assert_eq!(payload.node_states[0].attempts, 0);
+        assert!(!payload.node_states[0].installer_gone);
+        assert!(!retry_install_once(&mut payload, "w4"));
+        assert_eq!(payload.node_states[0].install_tries, 1);
+    }
+
+    #[test]
+    fn worker_only_without_identity_must_not_mint() {
+        let mut payload = ConvertJobPayload::default();
+        payload.nodes = vec![ConvertNodePlan {
+            name: "w9".into(),
+            role: "worker".into(),
+            address: "172.20.0.66".into(),
+            ..Default::default()
+        }];
+        assert!(is_worker_only(&payload));
+        assert!(!payload.cluster_identity.as_ref().map(identity_usable).unwrap_or(false));
+        payload.cluster_identity = Some(fake_ident());
+        assert!(identity_usable(payload.cluster_identity.as_ref().unwrap()));
     }
 }

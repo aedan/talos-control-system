@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.5.93] — 2026-10-15
+
+### Fixed
+- **In-place convert dropped the installer network when it wrote the disk.** The GRUB config the installer writes does not inherit the boot cmdline. `install.extraKernelArgs` now copies `reset_devices`, `panic=10`, `bond=`, and `ip=` from that cmdline (serial consoles stay at 115200). An 802.3ad bond also sets `miimon: 100`, `lacpRate: fast`, `xmitHashPolicy: layer2`, and `adSelect: stable` in the machine config and on the `bond=` cmdline, so a switch that never answers LACP still marks a slave active.
+- **A worker-only convert minted a second machine CA.** It now reads the live control-plane machine config and copies that CA, cluster id, secret, tokens, NTP, and pod CIDR. It does not mint. The explicit control-plane endpoint replaces the one stored in that config.
+- **A node was marked done while it was still NotReady.** The job labels `tcs.local/os=talos` when the OS image is Talos, then waits about an hour for the Ready condition. A node that boots back to the previous OS is retried once. The scheduler does not send a maintenance reboot while the installer is still up, and it does not power-cycle. `install.wipe` stays on the captured root disk. Before the install reboot, the BMC boot device is set to disk. When `kexec -e` does not start the factory initrd, the installer is booted from a one-shot GRUB entry.
+
 ## [0.5.92] — 2026-10-11
 
 ### Added

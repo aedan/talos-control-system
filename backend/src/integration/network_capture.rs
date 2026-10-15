@@ -102,7 +102,7 @@ echo "==DNS=="; {
   done
   resolvectl dns 2>/dev/null | awk '/^[A-Za-z0-9._-]+ +/{p=1} p && /^[[:space:]]+[0-9]/{print; p=0}'
   awk '/^nameserver/{print $2}' /etc/resolv.conf 2>/dev/null
-} | grep -v '^127\.' | awk '!seen[$0]++' | head -8
+} | grep -vE '^(127\.|169\.254\.)' | awk '!seen[$0]++' | head -8
 echo "==BONDS=="; for d in /sys/class/net/*/bonding; do [ -d "$d" ] || continue; b=$(basename $(dirname "$d")); echo "$b mode=$(cat "$d/mode" 2>/dev/null) slaves=$(cat "$d/slaves" 2>/dev/null)"; done
 echo "==OVS=="; ovs-vsctl list-br 2>/dev/null
 echo "==LSMOD=="; lsmod 2>/dev/null | awk 'NR>1{print $1}'
@@ -264,11 +264,12 @@ pub fn parse_capture(text: &str) -> CaptureResult {
         }
     }
 
-    // DNS.
+    // DNS. Drop loopback and link-local (NodeLocal DNS 169.254.25.10 is dead
+    // until the cluster CNI is up, and Talos will not fall through it).
     net.dns = section(text, "DNS")
         .lines()
         .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
+        .filter(|l| usable_nameserver(l))
         .collect();
 
     // OVS bridges.
@@ -372,6 +373,14 @@ pub fn render_node_network_yaml(c: &NodeNetworkCapture, hostname: &str) -> Strin
         let mode = talos_bond_mode(&bond.mode);
         y.push_str("        bond:\n");
         y.push_str(&format!("          mode: {}\n", mode));
+        // Same options as the installer cmdline. Without miimon, 802.3ad on a
+        // switch that does not speak LACP never marks a slave active.
+        y.push_str("          miimon: 100\n");
+        if mode == "802.3ad" {
+            y.push_str("          lacpRate: fast\n");
+            y.push_str("          xmitHashPolicy: layer2\n");
+            y.push_str("          adSelect: stable\n");
+        }
         y.push_str("          interfaces:\n");
         for s in &bond.slaves {
             y.push_str(&format!("            - {}\n", s));
@@ -437,9 +446,10 @@ pub fn render_node_network_yaml(c: &NodeNetworkCapture, hostname: &str) -> Strin
         y.push_str("      []\n");
     }
 
-    if !c.dns.is_empty() {
+    let dns: Vec<&String> = c.dns.iter().filter(|d| usable_nameserver(d)).collect();
+    if !dns.is_empty() {
         y.push_str("    nameservers:\n");
-        for d in &c.dns {
+        for d in dns {
             y.push_str(&format!("      - {}\n", d));
         }
     }
@@ -494,6 +504,13 @@ fn address_for_bond(c: &NodeNetworkCapture, bond: &NodeNetworkBond) -> Option<(S
 /// True when the capture has enough to kexec with a static IP (bond or NIC
 /// plus a default gateway). An empty capture must not be kexec'd — the
 /// installer would DHCP-drift or come up with no NIC and never reach :50000.
+/// Nameserver Talos can use before the cluster CNI and NodeLocal DNS exist.
+/// Loopback and 169.254/16 are not upstream resolvers.
+pub fn usable_nameserver(ns: &str) -> bool {
+    let s = ns.trim();
+    !s.is_empty() && s != "::1" && !s.starts_with("127.") && !s.starts_with("169.254.")
+}
+
 pub fn network_usable(c: &NodeNetworkCapture) -> bool {
     if c.gateway.trim().is_empty() {
         return false;
@@ -637,7 +654,7 @@ Default Gateway IP      : 172.20.8.1
         assert_eq!(r.network.vlans.len(), 1);
         assert_eq!(r.network.vlans[0].name, "bond0.326");
         assert_eq!(r.network.gateway, "172.20.0.1");
-        assert_eq!(r.network.dns, vec!["127.0.0.53"]);
+        assert!(r.network.dns.is_empty(), "loopback resolver is not an upstream nameserver");
         // The bond IP is resolvable for the kexec ip= param.
         let bondc = &r.network.bonds[0];
         let got = address_for_bond(&r.network, bondc);
@@ -672,12 +689,26 @@ Default Gateway IP      : 172.20.8.1
         assert!(y.contains("hostname: node1"));
         assert!(y.contains("- interface: bond0"));
         assert!(y.contains("mode: 802.3ad"));
+        assert!(y.contains("miimon: 100"));
+        assert!(y.contains("lacpRate: fast"));
         assert!(y.contains("- eth0"));
         // Address-bearing VLANs render with their vlanId + address.
         assert!(y.contains("- vlanId: 207"));
         assert!(y.contains("10.207.0.2/24"));
         assert!(y.contains("gateway: 10.0.0.1"));
         assert!(y.contains("- 10.0.0.2"));
+    }
+
+    #[test]
+    fn drops_link_local_and_loopback_nameservers() {
+        let text = "==DNS==\n169.254.25.10\n127.0.0.53\n172.20.8.200\n172.20.0.126\n==END==\n";
+        let r = parse_capture(text);
+        assert_eq!(r.network.dns, vec!["172.20.8.200", "172.20.0.126"]);
+        let y = render_node_network_yaml(&r.network, "n");
+        assert!(!y.contains("169.254"));
+        assert!(!y.contains("127.0.0.53"));
+        assert!(y.contains("172.20.8.200"));
+        assert!(y.contains("172.20.0.126"));
     }
 
     #[test]

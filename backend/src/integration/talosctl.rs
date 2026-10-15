@@ -498,6 +498,18 @@ impl TalosctlClient {
         Ok(())
     }
 
+    /// Reboot the maintenance installer. It has no machine CA yet, so this
+    /// must not send a talosconfig.
+    pub async fn reboot_maintenance(endpoint: &str) -> Result<(), AppError> {
+        Self::ensure_installed().await?;
+        let args: Vec<String> = vec![
+            "reboot".into(), "-i".into(), "-e".into(), endpoint.into(), "-n".into(), endpoint.into(),
+        ];
+        Self::run(&args).await?;
+        info!(endpoint, "talosctl reboot (maintenance)");
+        Ok(())
+    }
+
     /// Reboot a machine.
     pub async fn reboot(endpoint: &str, talosconfig: Option<&str>) -> Result<(), AppError> {
         Self::ensure_installed().await?;
@@ -1295,7 +1307,7 @@ fn serialize_yaml_documents(docs: &[serde_yaml::Value]) -> Result<String, AppErr
 /// The MachineConfig resource wraps the real config in `spec` as an opaque
 /// YAML string (fields like `node`/`metadata` are resource plumbing that
 /// must not be fed back to the node).
-fn spec_from_mc_json(out: &str) -> Result<String, AppError> {
+pub(crate) fn spec_from_mc_json(out: &str) -> Result<String, AppError> {
     // talosctl get mc -o json emits one JSON document per machine config
     // resource (multi-doc configs produce several). Pick the primary
     // machine config document (metadata.id == "v1alpha1"), falling back to
